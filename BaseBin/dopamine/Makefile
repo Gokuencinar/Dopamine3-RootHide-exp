@@ -2,6 +2,9 @@ TARGET = dopamine
 
 # Direct BaseBin builds must provide a numeric value to #if BUILD_STANDALONE.
 BUILD_STANDALONE ?= 0
+# The legacy CLI is not a RootHide installer; experimental builds must not
+# expose its stock /var/jb installation commands.
+ROOTHIDE_EXPERIMENTAL_BUILD ?= $(if $(wildcard ../libjailbreak/src/roothider.h),1,0)
 
 CC = clang
 
@@ -14,6 +17,7 @@ CFLAGS = $(XPF_CFLAGS) $(CHOMA_CFLAGS) -framework Security -framework Foundation
 # RootHide port's trust/dyld routines reside in libjailbreak/src/roothider/*
 # and are deliberately built into libjailbreak.dylib instead of duplicated
 # here. Resolve them from the sibling library staged in BaseBin/.build.
+CFLAGS += -DROOTHIDE_EXPERIMENTAL_BUILD=$(ROOTHIDE_EXPERIMENTAL_BUILD)
 LDFLAGS = -L../.build -ljailbreak -larchive -lbsm -lcompression -lMobileGestalt -F ../_external/frameworks
 
 sign: $(TARGET)

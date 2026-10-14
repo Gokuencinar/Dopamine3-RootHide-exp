@@ -207,6 +207,50 @@ bypass, verify all dyld/kernel hooks and signatures, and test interrupted
 install/boot, userspace reboot and recovery on a spare supported iPhone.
 No production device should install the compile-only artifact.
 
+## Reconstructing the RootHide 2 / Dopamine 3 build path
+
+The local historical donor is `../RootHide-Dopamine2-ref` on
+`v2.4.9.x` at `e8de6e5`; the 3.0.11 upstream baseline is
+`dopamine/3.x` at `448ff1a`. RootHide 2 produced a jailbreak by building
+`BaseBin/Makefile` (libjailbreak, launchdhook, systemhook, dyldhook,
+roothidehooks, jailbreakd, basebin trustcache, then `basebin.tar`), and
+then using Xcode and `Application/Makefile` to bundle dependencies, sign
+and package the app as a `.tipa`. Its App Makefile added the
+`Dopamine.roothide` marker on installable builds. The marker must not be
+copied blindly to our compile-only IPA: it would falsely suggest a
+functioning RootHide jailbreak, while the activation gate remains zero.
+
+| Component | RootHide 2 donor method | Current Dopamine 3 adaptation |
+| --- | --- | --- |
+| BaseBin and trustcache | Stage RootHide-specific tools, sign/load trustcache, package tar | Added RootHide tools alongside stock `hookd`, `rootlesshooks`, Dopamine CLI; structural ARM64(E) checks |
+| Hidden bootstrap and package managers | `.jbroot-<brand>`, RootHide Procursus and Manager packages | Owned `.jbroot` plus AppGroup, pinned SHA-256 resources, transaction stages, manual recovery; runtime not verified |
+| Initial `launchd` activation | `launchdhookFirstLoad` prevents broad injection until userspace reboot | Set only after boomerang recovery with valid RootHide identity; RootHide-only spawn guard, stock path retained |
+| `dyld` and library trust | RootHide dyld patches, recursive signing and userspace injection | Source-port for known iOS 15–17 layout, preserving 3.x hooks; iOS 18+ RootHide runtime still unsupported |
+| Blacklisted apps | Direct app executable spawn interception and PID tracking | Similar interception; launches via `xpcproxy`/later exec remain an unresolved P1 |
+| CLI installer | RootHide 2 installation is app-driven | Dopamine 3's Corellium CLI remains stock `/var/jb`; experimental builds reject CLI `install`/`activate` before any KRW action |
+| `bootstrapper` helper | Donor's executable is an unimplemented always-successful placeholder | Kept for packaging compatibility, but now returns failure instead of falsely indicating a completed bootstrap |
+| IPA/TIPA | Xcode, bundled `.deb`, ad-hoc `ldid`, `.tipa` and marker | Same general compilation chain, with diagnostic quarantine and no-install warning; marker deliberately absent |
+
+The `ROOTHIDE_EXPERIMENTAL_BUILD=1` GitHub workflow environment flag is now
+propagated to the standalone Dopamine CLI compiler. Direct local builds
+default to experimental mode when RootHide's `roothider.h` is present.
+In this configuration,
+neither `install` nor `activate` can reach the conventional `/var/jb`,
+preboot or fakelib mutation code. `ROOTHIDE_EXPERIMENTAL_BUILD=0` retains
+the original Dopamine 3 CLI behavior. The donor's separate `bootstrapper`
+helper never performed real work; returning nonzero is preferable to
+claiming success from a no-op.
+
+These are targeted integration and build-safety changes, not an assertion
+that the RootHide2 and Dopamine3 runtime code paths are equivalent. Before
+changing `ROOTHIDE3_BOOTSTRAP_READY=0`, the remaining work includes a
+RootHide-capable CLI if required, P1 blacklist/xpcproxy correctness,
+kernel/dyld hook compatibility and patch trust, real code-signature checks,
+clean installation/recovery and full userspace reboot tests on supported
+spare iPhones. The currently configured private GitHub Actions macOS build
+may remain blocked by the account's runner billing restriction; static
+Python tests alone cannot replace the macOS compilation.
+
 ## Reproducible macOS diagnostic build
 
 The experimental fork uses `.github/workflows/main.yml` on

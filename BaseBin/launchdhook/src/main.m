@@ -141,6 +141,12 @@ __attribute__((constructor)) static void initializer(void)
 		return;
 	}
 
+	// RootHide 2 deliberately withheld system-wide injection during the
+	// initial live-launchd activation, until userspace reboot completed.
+	// Keep the Dopamine 3 stock path unchanged. The spawn hook reads this
+	// state only when the verified hidden root is active.
+	if (roothide_is_active()) launchdhookFirstLoad = firstLoad;
+
 	if (jbupdatePrevVersion && jbupdateNewVersion) {
 		jbupdate_finalize_stage2(jbupdatePrevVersion, jbupdateNewVersion);
 		unsetenv("JBUPDATE_PREV_VERSION");

@@ -242,6 +242,19 @@ int __posix_spawn_hook(pid_t *restrict pid, const char *restrict path,
 		}
 	}
 
+	// RootHide 2 did not turn on global process injection while its
+	// initial bootstrap was being finalized in an already-running launchd.
+	// Otherwise a failed setup can leave half-initialized hooks across
+	// system processes. On the first userspace reboot this flag is false.
+	// Do not change normal Dopamine 3's launchd behavior.
+	if (roothide_is_active() && launchdhookFirstLoad) {
+		// Avoid relaunching the experimental jailbreak app during an
+		// interrupted first activation, matching RootHide 2's safeguard.
+		if (path && strstr(path, ".app/") && string_has_suffix(path, "/Dopamine"))
+			return EPERM;
+		return __posix_spawn_orig_wrapper(pid, path, desc, argv, envp);
+	}
+
 	// Blacklisted apps are launched without tweak injection. Their identifiers
 	// are read from the RootHide configuration under the active jailbreak root.
 	if (path && roothide_is_active() && isBlacklistedPath(path)) {

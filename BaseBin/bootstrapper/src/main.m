@@ -2,8 +2,9 @@
 
 int main(int argc, char* argv[])
 {
-	//To Do: if the jailbreak app is installed with a certificate signature,
-	//		it may not have sufficient entitlements to write files to /var/containers/Bundle/Applicaton/(.jbroot-XXXXXXXXXXXXXXXX)
-
-	return 0;
+	// The historical RootHide 2 donor included an unimplemented executable
+	// that returned success. Our actual hidden-root transaction lives in
+	// DOBootstrapper; never report a fictitious successful install here.
+	fputs("RootHide 3 standalone bootstrapper is not implemented; no changes made.\n", stderr);
+	return 78;
 }

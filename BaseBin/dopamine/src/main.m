@@ -13,6 +13,10 @@
 #include <libproc.h>
 #include <copyfile.h>
 
+#ifndef ROOTHIDE_EXPERIMENTAL_BUILD
+#define ROOTHIDE_EXPERIMENTAL_BUILD 0
+#endif
+
 #import "krw-corellium.h"
 
 #import <DOJailbreaker.h>
@@ -418,6 +422,15 @@ void activate_dopamine(void)
 
 int main(int argc, char* argv[])
 {
+	// Dopamine 3's standalone/Corellium CLI still assumes conventional
+	// /var/jb and /usr/lib fakelib. Keep the diagnostic binary for inspection,
+	// but reject legacy installation/activation before any kernel mutation.
+#if ROOTHIDE_EXPERIMENTAL_BUILD
+	if (argc >= 2 && (!strcmp(argv[1], "install") || !strcmp(argv[1], "activate"))) {
+		fprintf(stderr, "RootHide 3 diagnostic: legacy Dopamine CLI install/activate disabled until hidden-root port is verified.\n");
+		return 78;
+	}
+#endif
 	gJb = [[DOJailbreaker alloc] init];
 
 	if (argc >= 2) {
