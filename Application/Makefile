@@ -27,14 +27,20 @@ Dopamine.ipa: build/Build/Products/Debug-iphoneos/Dopamine.app
 	rm -rf Dopamine.tipa
 	cp Dopamine.ipa Dopamine.tipa
 
+# The explicit RootHide build selector takes priority over NIGHTLY. The
+# latter only adds metadata; disabling nightly must never select stock
+# Dopamine's bundle ID or re-enable its bootstrap on a RootHide build.
 ifeq ($(NIGHTLY), 1)
-build/Build/Products/Debug-iphoneos/Dopamine.app: FORCE
-ifeq ($(ROOTHIDE_EXPERIMENTAL_BUILD), 1)
-	@echo "Building full RootHide 3 experimental app with protected jailbreak entrypoint"
-	xcodebuild -scheme Dopamine -derivedDataPath build -destination 'generic/platform=iOS' CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO PRODUCT_BUNDLE_IDENTIFIER=com.gokuencinar.roothide3.fulltest INFOPLIST_KEY_CFBundleDisplayName='RootHide 3 Experimental' GCC_PREPROCESSOR_DEFINITIONS='NIGHTLY=1 RH3_FULL_APP_EXPERIMENTAL=1 ROOTHIDE3_BOOTSTRAP_READY=0 COMMIT_HASH=\"$(COMMIT_HASH)\"'
-else
-	xcodebuild -scheme Dopamine -derivedDataPath build -destination 'generic/platform=iOS' CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO GCC_PREPROCESSOR_DEFINITIONS='NIGHTLY=1 COMMIT_HASH=\"$(COMMIT_HASH)\"'
+DOPAMINE_NIGHTLY_DEFINITIONS := NIGHTLY=1 COMMIT_HASH=\"$(COMMIT_HASH)\"
 endif
+
+ifeq ($(ROOTHIDE_EXPERIMENTAL_BUILD), 1)
+build/Build/Products/Debug-iphoneos/Dopamine.app: FORCE
+	@echo "Building full RootHide 3 experimental app with protected jailbreak entrypoint"
+	xcodebuild -scheme Dopamine -derivedDataPath build -destination 'generic/platform=iOS' CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO PRODUCT_BUNDLE_IDENTIFIER=com.gokuencinar.roothide3.fulltest INFOPLIST_KEY_CFBundleDisplayName='RootHide 3 Experimental' GCC_PREPROCESSOR_DEFINITIONS='RH3_FULL_APP_EXPERIMENTAL=1 ROOTHIDE3_BOOTSTRAP_READY=0 $(DOPAMINE_NIGHTLY_DEFINITIONS)'
+else ifeq ($(NIGHTLY), 1)
+build/Build/Products/Debug-iphoneos/Dopamine.app: FORCE
+	xcodebuild -scheme Dopamine -derivedDataPath build -destination 'generic/platform=iOS' CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO GCC_PREPROCESSOR_DEFINITIONS='$(DOPAMINE_NIGHTLY_DEFINITIONS)'
 else
 build/Build/Products/Debug-iphoneos/Dopamine.app: FORCE
 	xcodebuild -scheme Dopamine -derivedDataPath build -destination 'generic/platform=iOS' CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO

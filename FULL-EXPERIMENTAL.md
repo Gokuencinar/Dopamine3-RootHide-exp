@@ -17,6 +17,12 @@ botón de jailbreak, Settings y las acciones de reinicio permanecen desactivadas
 Se bloquean también los comandos CLI heredados de TrollStore/actualización
 que podrían interactuar con un jailbreak ya instalado.
 
+La selección **siempre** depende de `ROOTHIDE_EXPERIMENTAL_BUILD=1`,
+independientemente de `NIGHTLY`. `NIGHTLY=1` añade únicamente el
+identificador de compilación y metadatos; no habilita ni deshabilita las
+guardias RootHide. El CI prueba los cuatro cruces de ambas opciones mediante
+`make -n` antes de iniciar la compilación real.
+
 ## Estado y seguridad
 
 La nueva IPA incluye código y recursos de Dopamine/RootHide, pero **no es un

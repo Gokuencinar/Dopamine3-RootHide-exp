@@ -38,6 +38,7 @@ jobs:
           set -euo pipefail
           python3 -m unittest discover -s tools/tests -p 'test_roothide_device_test.py' -v
           python3 -m unittest discover -s tools/tests -p 'test_roothide_device_test_verifier.py' -v
+          python3 -m unittest discover -s tools/tests -p 'test_roothide_build_matrix.py' -v
 
       - name: Build standalone RootHide device-test app
         run: |
@@ -174,6 +175,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m unittest discover -s tools/tests -p 'test_roothide_full_experimental.py' -v
+          python3 -m unittest discover -s tools/tests -p 'test_roothide_build_matrix.py' -v
 
       - name: Build
         # The readiness script must use the same RootHide classification as
