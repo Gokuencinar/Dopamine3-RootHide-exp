@@ -31,6 +31,17 @@ class RootHideTrustRecursionTests(unittest.TestCase):
         self.assertIn("if (recurse_collect_untrusted_cdhashes(", caller)
         self.assertLess(caller.index("return -1;", caller.index("if (recurse_collect_untrusted_cdhashes(")), caller.index("jb_trustcache_add_cdhashes(cdhashes, cdhashesCount)"))
 
+    def test_missing_required_dependencies_propagate_but_weak_can_be_absent(self):
+        source = (ROOT / "BaseBin/libjailbreak/src/roothider/signatures.m").read_text(encoding="utf-8")
+        self.assertIn("unsigned depth, bool required, bool *failed)", source)
+        self.assertIn("if (required) *failed = true;", source)
+        self.assertIn("cmd != LC_LOAD_WEAK_DYLIB && cmd != LC_LAZY_LOAD_DYLIB", source)
+        self.assertIn("depth + 1, dependencyRequired, failed)", source)
+        self.assertIn("0, true, &failed)", source)
+        self.assertIn('JBLogError("Failed to decode code signature', source)
+        self.assertIn('JBLogError("Failed to calculate ad-hoc CDHash', source)
+        self.assertIn("*failed = true;", source[source.index("ensure_randomized_cdhash_for_slice("):])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -141,7 +141,7 @@ typedef struct {
 #define RH3_MAX_TRUST_DEPENDENCIES 4096
 #define RH3_MAX_TRUST_DEPTH 64
 
-static void recurse_handler(NSString *loadPath, NSString *loaderPath, NSString *mainExecutablePath, NSString *workingDir, NSMutableArray* fileCaches, NSMutableArray* rpathStack, preferredArchInfo* preferredArch, cdhash_t **cdhashesOut, uint32_t *cdhashCountOut, unsigned depth, bool *failed)
+static void recurse_handler(NSString *loadPath, NSString *loaderPath, NSString *mainExecutablePath, NSString *workingDir, NSMutableArray* fileCaches, NSMutableArray* rpathStack, preferredArchInfo* preferredArch, cdhash_t **cdhashesOut, uint32_t *cdhashCountOut, unsigned depth, bool required, bool *failed)
 {
 @autoreleasepool {
 	if (*failed) return;
@@ -181,8 +181,9 @@ static void recurse_handler(NSString *loadPath, NSString *loaderPath, NSString *
 
 
 	NSString *resolvedLoadPath = resolveLoadPath(loadPath, loaderPath, mainExecutablePath, workingDir, rpathStack);
-	if(!resolvedLoadPath) {
+	if (!resolvedLoadPath) {
 		JBLogError("Failed to resolve dependency library for %s (loader: %s, mainExecutable: %s)", loadPath.fileSystemRepresentation, loaderPath.fileSystemRepresentation, mainExecutablePath.fileSystemRepresentation);
+		if (required) *failed = true;
 		return;
 	}
 
@@ -195,11 +196,13 @@ static void recurse_handler(NSString *loadPath, NSString *loaderPath, NSString *
 	int fd = open(resolvedLoadPath.fileSystemRepresentation, O_RDONLY);
 	if (fd < 0) {
 		JBLogError("Failed to open binary at path: %s (loader: %s)", resolvedLoadPath.fileSystemRepresentation, loaderPath.fileSystemRepresentation);
+		if (required) *failed = true;
 		return;
 	}
-	if(fcntl(fd, F_GETPATH, realfilepath) != 0) {
+	if (fcntl(fd, F_GETPATH, realfilepath) != 0) {
 		JBLogError("Failed to get file path for fd %d", fd);
 		close(fd);
+		*failed = true;
 		return;
 	}
 	close(fd);
@@ -244,6 +247,7 @@ static void recurse_handler(NSString *loadPath, NSString *loaderPath, NSString *
 	Fat *fat = fat_init_from_path(realLoadPath.fileSystemRepresentation);
 	if (!fat) {
 		JBLogError("Failed to parse fat binary at path: %s", realLoadPath.fileSystemRepresentation);
+		*failed = true;
 		return;
 	}
 
@@ -263,6 +267,7 @@ static void recurse_handler(NSString *loadPath, NSString *loaderPath, NSString *
 		if (!macho) {
 			JBLogError("Failed to find preferred slice for file: %s", realLoadPath.fileSystemRepresentation);
 			fat_free(fat);
+			*failed = true;
 			return;
 		}
 	}
@@ -277,26 +282,30 @@ static void recurse_handler(NSString *loadPath, NSString *loaderPath, NSString *
 			if (csd_superblob_is_adhoc_signed(decodedSuperblob)) {
 				isAdhocSigned = true;
 				cdhash_t cdhash = {0};
-				if (csd_superblob_calculate_best_cdhash(decodedSuperblob, cdhash, NULL) == 0) {
-					if (!cdhashesContains(cdhash)) {
-						if (!is_cdhash_trustcached(cdhash)) {
-							// If something is trustcached we do not want to add it to your array
-							// We do want to parse it's dependencies however, as one may have been updated since we added the binary to trustcache
-							// Potential optimization: If trustcached, save in some array so we don't recheck
-
-							int ret = ensure_randomized_cdhash_for_slice(realLoadPath.fileSystemRepresentation, macho->archDescriptor.offset, cdhash);
-							if(ret==0) {
-								cdhashesAdd(cdhash);
-							} else {
-								JBLogError("ensure_randomized_cdhash_for_slice(%llx) failed: %s -> (%d)", macho->archDescriptor.offset, realLoadPath.fileSystemRepresentation, ret);
+					if (csd_superblob_calculate_best_cdhash(decodedSuperblob, cdhash, NULL) == 0) {
+						if (!cdhashesContains(cdhash)) {
+							if (!is_cdhash_trustcached(cdhash)) {
+								// Even a previously trusted binary must have its dependencies examined.
+								int ret = ensure_randomized_cdhash_for_slice(realLoadPath.fileSystemRepresentation, macho->archDescriptor.offset, cdhash);
+								if (ret == 0) {
+									cdhashesAdd(cdhash);
+								} else {
+									JBLogError("ensure_randomized_cdhash_for_slice(%llx) failed: %s -> (%d)", macho->archDescriptor.offset, realLoadPath.fileSystemRepresentation, ret);
+									*failed = true;
+								}
 							}
+							cdhashWasKnown = false;
 						}
-						cdhashWasKnown = false;
+					} else {
+						JBLogError("Failed to calculate ad-hoc CDHash for %s", realLoadPath.fileSystemRepresentation);
+						*failed = true;
 					}
 				}
+				csd_superblob_free(decodedSuperblob);
+			} else {
+				JBLogError("Failed to decode code signature for %s", realLoadPath.fileSystemRepresentation);
+				*failed = true;
 			}
-			csd_superblob_free(decodedSuperblob);
-		}
 		free(superblob);
 	}
 
@@ -316,7 +325,10 @@ static void recurse_handler(NSString *loadPath, NSString *loaderPath, NSString *
 		NSMutableArray* nextChain = rpathStack.mutableCopy;
 		[nextChain addObject:realLoadPath]; //Loading dependencies, add current macho itself to the rpath stack
 
-		recurse_handler(@(pathCStr), realLoadPath, mainExecutablePath, workingDir, fileCaches, nextChain, preferredArch, cdhashesOut, cdhashCountOut, depth + 1, failed);
+			// A weak or lazy load may legitimately be absent. All other
+			// dependencies must resolve or the collection is incomplete.
+			bool dependencyRequired = cmd != LC_LOAD_WEAK_DYLIB && cmd != LC_LAZY_LOAD_DYLIB;
+			recurse_handler(@(pathCStr), realLoadPath, mainExecutablePath, workingDir, fileCaches, nextChain, preferredArch, cdhashesOut, cdhashCountOut, depth + 1, dependencyRequired, failed);
 		if (*failed) *stop = true;
 	});
 
@@ -347,7 +359,7 @@ int recurse_collect_untrusted_cdhashes(const char *path, const char *callerImage
 
 	NSMutableArray* fileCaches = [NSMutableArray array];
 
-	recurse_handler(@(path), @(callerImagePath), @(callerExecutablePath), workingDir ? @(workingDir) : nil, fileCaches, rpathStack, preferredArch, cdhashesOut, cdhashCountOut, 0, &failed);
+	recurse_handler(@(path), @(callerImagePath), @(callerExecutablePath), workingDir ? @(workingDir) : nil, fileCaches, rpathStack, preferredArch, cdhashesOut, cdhashCountOut, 0, true, &failed);
 
 	DEBUG_LOG("fileCaches: %s", path, fileCaches.description.UTF8String);
 	DEBUG_LOG("Finished collecting cdhashes for path: %s, found %u cdhashes, processed %d files", path, *cdhashCountOut, fileCaches.count);

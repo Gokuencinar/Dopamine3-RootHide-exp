@@ -3,6 +3,8 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <fcntl.h>
+#include <errno.h>
 #include "kernel.h"
 #include "info.h"
 #include "primitives.h"
@@ -395,23 +397,43 @@ int trustcache_file_build_from_cdhashes(cdhash_t *CDHashes, uint32_t CDHashCount
 
 int trustcache_file_build_from_path(const char *filePath, trustcache_file_v1 **tcOut)
 {
-	int fd = open(filePath, O_RDONLY);
+	if (!filePath || !tcOut) return -1;
+	*tcOut = NULL;
+	int fd = open(filePath, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+	if (fd < 0) return -1;
 	struct stat s = { 0 };
-	fstat(fd, &s);
-	
-	size_t tcSize = s.st_size;
-	if (tcSize < (sizeof(trustcache_file_v1))) {
-		// To small to be a TrustCache, file is probably malformed
+	if (fstat(fd, &s) != 0 || !S_ISREG(s.st_mode) ||
+	    s.st_size < (off_t)sizeof(trustcache_file_v1) ||
+	    s.st_size > 0x4000) {
+		close(fd);
 		return -1;
 	}
 
+	size_t tcSize = (size_t)s.st_size;
 	trustcache_file_v1 *file = malloc(tcSize);
-	read(fd, file, tcSize);
+	if (!file) {
+		close(fd);
+		return -1;
+	}
+	size_t copied = 0;
+	while (copied < tcSize) {
+		ssize_t count = read(fd, (uint8_t *)file + copied, tcSize - copied);
+		if (count < 0 && errno == EINTR) continue;
+		if (count <= 0) {
+			free(file);
+			close(fd);
+			return -1;
+		}
+		copied += (size_t)count;
+	}
 	close(fd);
 
-	size_t actualTcSize = sizeof(trustcache_file_v1) + (sizeof(trustcache_entry_v1) * file->length);
-	if (actualTcSize != tcSize) {
-		// Size mismatch, file is malformed
+	// Validate the serialized length without multiplication overflow or
+	// accepting short reads. Never upload uninitialized trustcache entries.
+	size_t dataSize = tcSize - sizeof(trustcache_file_v1);
+	if (file->version != 1 || file->length == 0 ||
+	    dataSize % sizeof(trustcache_entry_v1) != 0 ||
+	    (size_t)file->length != dataSize / sizeof(trustcache_entry_v1)) {
 		free(file);
 		return -1;
 	}

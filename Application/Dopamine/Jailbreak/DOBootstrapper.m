@@ -632,6 +632,18 @@ cleanup_root:
         if (!error && ![[NSData data] writeToFile:newSafeMode atomically:YES])
             error = RH3Error(BootstrapErrorCodeFailedReplacing, @"Unable to preserve RootHide safe mode");
     }
+    // RootHide 3 currently uploads the BaseBin trustcache included in
+    // basebin.tar. The 2.x donor instead regenerated a randomized cache,
+    // but that path has not been integrated into our Dopamine 3 loader.
+    // Reject an invalid archive here, while the previous BaseBin is still
+    // available for rollback. The loader validates the cache contents.
+    NSString *trustcache = [oldBasebin stringByAppendingPathComponent:@"basebin.tc"];
+    struct stat trustcacheInfo;
+    if (!error && (lstat(trustcache.fileSystemRepresentation, &trustcacheInfo) != 0 ||
+                   !S_ISREG(trustcacheInfo.st_mode) || trustcacheInfo.st_size <= 0)) {
+        error = RH3Error(BootstrapErrorCodeFailedReplacing,
+                         @"RootHide BaseBin archive has no regular packaged trustcache");
+    }
     if (error) {
         NSError *rollbackError = nil;
         if ([fm attributesOfItemAtPath:oldBasebin error:nil] &&
@@ -646,7 +658,6 @@ cleanup_root:
         return error;
     }
     if (hadBasebin && ![fm removeItemAtPath:backup error:&error]) return error;
-    [fm removeItemAtPath:[oldBasebin stringByAppendingPathComponent:@"basebin.tc"] error:nil];
     NSString *bundleIdentifier = NSBundle.mainBundle.bundleIdentifier;
     if (bundleIdentifier) {
         [bundleIdentifier writeToFile:[oldBasebin stringByAppendingPathComponent:@".AppIdentifier"]

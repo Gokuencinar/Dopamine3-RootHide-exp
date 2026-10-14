@@ -120,6 +120,12 @@ jobs:
             cd Application/Dopamine/Resources
             bash ./download_bootstraps.sh
 
+      - name: Verify RootHide Boomerang and trustcache regressions
+        if: steps.roothide_port.outputs.is_port == 'true'
+        run: |
+          set -euo pipefail
+          python3 -m unittest discover -s tools/tests -p 'test_roothide_boomerang_trustcache.py' -v
+
       - name: Build
         # The readiness script must use the same RootHide classification as
         # Theos selection, including PR refs such as 123/merge.

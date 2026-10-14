@@ -247,9 +247,53 @@ changing `ROOTHIDE3_BOOTSTRAP_READY=0`, the remaining work includes a
 RootHide-capable CLI if required, P1 blacklist/xpcproxy correctness,
 kernel/dyld hook compatibility and patch trust, real code-signature checks,
 clean installation/recovery and full userspace reboot tests on supported
-spare iPhones. The currently configured private GitHub Actions macOS build
-may remain blocked by the account's runner billing restriction; static
-Python tests alone cannot replace the macOS compilation.
+spare iPhones. Static Python tests alone cannot replace macOS compilation
+and hardware testing.
+
+### 2026-10-14 independent code audit follow-up
+
+The review of commit `215adc1` identified two concrete early activation
+blockers. `gBoomerangServer.maxDomain` was `1` while the server dispatches
+the numeric Root domain `4`; the new bounds guard prevented all Boomerang
+GET_SYSINFO/GET_PHYSRW messages even on stock Dopamine. It now advertises
+`JBS_DOMAIN_ROOT`, with the other three slots still explicitly unused.
+The out-of-band DONE message also checks Root-domain identity and the
+audited caller before acknowledging completion.
+
+The hidden-root BaseBin installer removed `basebin/basebin.tc` even though
+Dopamine 3 uploads exactly that file before injecting launchd. Until a
+correct RootHide 2-style randomized cache generator is independently
+implemented, this port instead preserves the trustcache packaged by the
+build, validates its file type before discarding an old BaseBin, and uses
+the original mandatory loader. That loader now rejects short, oversized,
+malformed, symlinked or incomplete caches without leaking a descriptor.
+This is a consistency fix, not proof that build-time CDHashes match every
+binary after all on-device preparation or future signature randomization.
+
+`tools/tests/test_roothide_boomerang_trustcache.py` exercises the numeric
+domain/table contract and on macOS/Linux runs the extracted production C
+trustcache parser against valid and corrupt fixture files. CI performs
+these checks before the experimental build. The tests cannot replace a
+real XPC/boomerang exchange or on-device trustcache validation.
+
+The separate GitHub Actions run `38604743659` for `215adc1` did compile,
+validate binary slices and upload a quarantined diagnostic IPA; its job
+finished with the intentionally failing readiness gate. That build predates
+the fixes described in this follow-up.
+
+RootHide's recursive-trust collector also now reports failure for an
+unresolved *required* dependency, an unreadable binary, malformed Mach-O,
+unusable signature or failed CDHash randomization. Missing weak/lazy
+dependencies remain optional; the caller declines trustcache upload after
+any required failure. This is a fail-closed correction, not evidence that
+all platform-specific dependency resolution is complete.
+
+**Still blocking functional RootHide activation:** application/extension
+identity across xpcproxy and execve; RootHide's XPC response filtering
+hooks and identifier initialization; verified dyld selection, recursive
+trust and sandbox startup; a bounded opainject wait; verified dependency
+resolver behavior on real iOS processes; physical lifecycle tests. None of those are certified by the
+current structural auditor's 7/9 prerequisite result.
 
 ## Reproducible macOS diagnostic build
 
