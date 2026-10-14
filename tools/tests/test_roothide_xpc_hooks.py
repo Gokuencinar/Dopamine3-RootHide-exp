@@ -52,13 +52,14 @@ class RootHideXPCHookTests(unittest.TestCase):
         handler = POLICY.split("int new_xpc_pipe_routine_reply(xpc_object_t reply)", 1)[1].split(
             "#define RB2_USERREBOOT", 1
         )[0]
-        retain = handler.index("xpc_retain(original);")
         removal = handler.index('xpc_dictionary_set_value(reply, "roothide-blacklisted-process-request", NULL)')
         read = handler.index('xpc_dictionary_get_audit_token(original, &clientToken)')
-        release = handler.index("xpc_release(original);")
-        self.assertLess(retain, removal)
-        self.assertLess(removal, read)
-        self.assertLess(read, release)
+        routine = handler.index('xpc_dictionary_get_uint64(original, "routine")')
+        subsystem = handler.index('xpc_dictionary_get_uint64(original, "subsystem")')
+        self.assertLess(read, routine)
+        self.assertLess(subsystem, removal)
+        self.assertNotIn("xpc_retain(original)", handler)
+        self.assertNotIn("xpc_release(original)", handler)
 
     def test_identifier_snapshot_is_safe_to_initialize(self):
         init = POLICY.split("bool roothide_prepare_xpc_filters(void)", 1)[1].split(
@@ -72,6 +73,7 @@ class RootHideXPCHookTests(unittest.TestCase):
         self.assertIn('@"_TrollStore"', init)
         self.assertIn('@"PlugIns"', init)
         self.assertIn('@"Extensions"', init)
+        self.assertIn('@"SC_Info"', init)
         self.assertLess(init.index("NSMutableSet<NSString *> *identifiers ="),
                         init.index("StoredAppIdentifiers = identifiers;"))
         self.assertNotIn("abort()", init)
@@ -89,6 +91,21 @@ class RootHideXPCHookTests(unittest.TestCase):
         self.assertNotIn("assert(", checker)
         self.assertIn("if (!resolved_jbroot || !real_path) return true;", checker)
         self.assertIn("== '\\0'", checker)
+
+    def test_reply_marker_is_only_emitted_after_send_hook_is_ready(self):
+        initializer = RECEIVER.split("void initXPCHooks(void)", 1)[1]
+        self.assertLess(initializer.index("MSHookFunction((void *)&xpc_pipe_routine_reply"),
+                        initializer.index("MSHookFunction((void *)&xpc_dictionary_create_reply"))
+        self.assertLess(initializer.index("roothide_set_xpc_reply_hooks_ready(true);"),
+                        initializer.index("gRootHideXPCFiltersReady = true;"))
+        self.assertIn("if (!orig_xpc_pipe_routine_reply)", initializer)
+        self.assertIn("return;", initializer.split("if (!orig_xpc_pipe_routine_reply)", 1)[1])
+        create = POLICY.split("xpc_object_t new_xpc_dictionary_create_reply", 1)[1].split(
+            "int (*orig_xpc_pipe_routine_reply)", 1
+        )[0]
+        self.assertIn("atomic_load_explicit(&gRootHideReplyHooksReady, memory_order_acquire)", create)
+        self.assertLess(create.index("atomic_load_explicit("),
+                        create.index('xpc_dictionary_set_value(reply, "roothide-blacklisted-process-request"'))
 
 
 if __name__ == "__main__":

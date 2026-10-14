@@ -1,6 +1,7 @@
 #import <Foundation/Foundation.h>
 
 #include <errno.h>
+#include <stdatomic.h>
 #include <libgen.h>
 #include <sandbox.h>
 #include <libproc.h>
@@ -53,6 +54,10 @@ bool roothide_prepare_xpc_filters(void)
 			for (NSString *entry in [fm contentsOfDirectoryAtPath:containerPath error:nil]) {
 				if (![entry hasSuffix:@".app"]) continue;
 				NSString *appPath = [containerPath stringByAppendingPathComponent:entry];
+				// Match the RootHide 2 donor: a sideloaded or repackaged app
+				// must not become a trusted App Store identifier merely
+				// because its container has iTunesMetadata.plist.
+				if (![fm fileExistsAtPath:[appPath stringByAppendingPathComponent:@"SC_Info"]]) continue;
 				NSDictionary *appInfo = [NSDictionary dictionaryWithContentsOfFile:[appPath stringByAppendingPathComponent:@"Info.plist"]];
 				if (![appInfo[@"CFBundleIdentifier"] isKindOfClass:[NSString class]]) continue;
 				addStoredBundleIdentifier(identifiers, appPath);
@@ -138,12 +143,22 @@ static bool check_path_in_jbroot(const char* real_path)
 	return real_path[strlen(real_jbroot)] == '/' || real_path[strlen(real_jbroot)] == '\0';
 }
 
+// Do not attach the original client request to a reply until the send-side
+// stripping hook is installed. Partial hook installation otherwise leaks
+// request data back to blacklisted clients.
+static _Atomic(bool) gRootHideReplyHooksReady = false;
+void roothide_set_xpc_reply_hooks_ready(bool ready)
+{
+    atomic_store_explicit(&gRootHideReplyHooksReady, ready, memory_order_release);
+}
+
 xpc_object_t (*orig_xpc_dictionary_create_reply)(xpc_object_t original);
 xpc_object_t new_xpc_dictionary_create_reply(xpc_object_t original)
 {
 	if (!orig_xpc_dictionary_create_reply) return NULL;
 	xpc_object_t reply = orig_xpc_dictionary_create_reply(original);
-	if (reply && original && xpc_get_type(original) == XPC_TYPE_DICTIONARY)
+		if (atomic_load_explicit(&gRootHideReplyHooksReady, memory_order_acquire) &&
+		    reply && original && xpc_get_type(original) == XPC_TYPE_DICTIONARY)
 	{
 		audit_token_t clientToken = {0};
 		xpc_dictionary_get_audit_token(original, &clientToken);
@@ -163,18 +178,18 @@ int new_xpc_pipe_routine_reply(xpc_object_t reply)
 	if (!orig_xpc_pipe_routine_reply) return ENOSYS;
 	if (reply && xpc_get_type(reply) == XPC_TYPE_DICTIONARY)
 	{
-		xpc_object_t original = xpc_dictionary_get_value(reply, "roothide-blacklisted-process-request");
-		if (original)
-		{
-			// The reply may hold the last reference to the original request.
-			xpc_retain(original);
-			xpc_dictionary_set_value(reply, "roothide-blacklisted-process-request", NULL);
+			xpc_object_t original = xpc_dictionary_get_value(reply, "roothide-blacklisted-process-request");
+			if (original)
+			{
+				// Take the only information we need while the reply retains
+				// the original request. Explicit xpc_retain/xpc_release map
+				// to forbidden Objective-C retain/release under iOS ARC.
+				audit_token_t clientToken = {0};
+				xpc_dictionary_get_audit_token(original, &clientToken);
 
-			audit_token_t clientToken = {0};
-			xpc_dictionary_get_audit_token(original, &clientToken);
-
-			volatile uint64_t routine = xpc_dictionary_get_uint64(original, "routine");
-			volatile uint64_t subsystem = xpc_dictionary_get_uint64(original, "subsystem");
+				volatile uint64_t routine = xpc_dictionary_get_uint64(original, "routine");
+				volatile uint64_t subsystem = xpc_dictionary_get_uint64(original, "subsystem");
+				xpc_dictionary_set_value(reply, "roothide-blacklisted-process-request", NULL);
 
 			/*
 			if(subsystem==2 && routine==708)
@@ -240,7 +255,6 @@ int new_xpc_pipe_routine_reply(xpc_object_t reply)
 					xpc_dictionary_set_int64(reply, "error", 3);
 				}
 			}
-			xpc_release(original);
 		}
 	}
 

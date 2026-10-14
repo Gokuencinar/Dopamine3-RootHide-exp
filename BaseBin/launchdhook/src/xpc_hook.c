@@ -13,6 +13,7 @@
 // receiver and hook installation belong to launchdhook.
 extern bool roothide_prepare_xpc_filters(void);
 extern bool roothide_filter_xpc_message(xpc_object_t xmsg);
+extern void roothide_set_xpc_reply_hooks_ready(bool ready);
 extern xpc_object_t (*orig_xpc_dictionary_create_reply)(xpc_object_t original);
 extern xpc_object_t new_xpc_dictionary_create_reply(xpc_object_t original);
 extern int (*orig_xpc_pipe_routine_reply)(xpc_object_t reply);
@@ -87,15 +88,24 @@ void initXPCHooks(void)
 	// response interception must be installed for its ordinary preboot root.
 	if (!roothide_is_active() || !roothide_prepare_xpc_filters()) return;
 
-	MSHookFunction((void *)&xpc_dictionary_create_reply,
-	               (void *)&new_xpc_dictionary_create_reply,
-	               (void **)&orig_xpc_dictionary_create_reply);
-	MSHookFunction((void *)&xpc_pipe_routine_reply,
-	               (void *)&new_xpc_pipe_routine_reply,
-	               (void **)&orig_xpc_pipe_routine_reply);
+		roothide_set_xpc_reply_hooks_ready(false);
+		// Install the send-side marker stripper first. If only this hook
+		// succeeds, it is a no-op. If the sender hook fails, the create
+		// wrapper must NOT attach sensitive original request data to replies.
+		MSHookFunction((void *)&xpc_pipe_routine_reply,
+		               (void *)&new_xpc_pipe_routine_reply,
+		               (void **)&orig_xpc_pipe_routine_reply);
+		if (!orig_xpc_pipe_routine_reply) {
+			JBLogError("RootHide XPC reply sender unavailable; filters disabled");
+			return;
+		}
+		MSHookFunction((void *)&xpc_dictionary_create_reply,
+		               (void *)&new_xpc_dictionary_create_reply,
+		               (void **)&orig_xpc_dictionary_create_reply);
 	if (!orig_xpc_dictionary_create_reply || !orig_xpc_pipe_routine_reply) {
 		JBLogError("RootHide XPC reply hooks missing original implementation");
-		return;
-	}
-	gRootHideXPCFiltersReady = true;
+			return;
+		}
+		roothide_set_xpc_reply_hooks_ready(true);
+		gRootHideXPCFiltersReady = true;
 }

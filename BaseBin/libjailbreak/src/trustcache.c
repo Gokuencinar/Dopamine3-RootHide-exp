@@ -190,7 +190,9 @@ uint64_t _jb_trustcache_grow(void)
 
 int jb_trustcache_add_entries(struct trustcache_entry_v1 *entries, uint32_t entryCount)
 {
+	if (entryCount > 0 && !entries) return -1;
 	uint32_t remainingEntryCount = entryCount;
+	uint32_t insertedEntryCount = 0;
 	while (remainingEntryCount > 0) {
 		__block uint64_t freeJbTcKaddr = 0;
 		__block uint32_t freeJbTcCurrentLength = 0;
@@ -204,6 +206,7 @@ int jb_trustcache_add_entries(struct trustcache_entry_v1 *entries, uint32_t entr
 		});
 		if (freeJbTcKaddr == 0) {
 			freeJbTcKaddr = _jb_trustcache_grow();
+			if (freeJbTcKaddr == 0) return -1;
 		}
 
 		uint32_t entryCountToInsert = JB_TRUSTCACHE_ENTRY_COUNT - freeJbTcCurrentLength;
@@ -214,25 +217,35 @@ int jb_trustcache_add_entries(struct trustcache_entry_v1 *entries, uint32_t entr
 		jb_trustcache *jbTc = alloca(JB_TRUSTCACHE_SIZE);
 		kreadbuf(freeJbTcKaddr, jbTc, JB_TRUSTCACHE_SIZE);
 		for (uint32_t i = 0; i < entryCountToInsert; i++) {
-			jbTc->file.entries[freeJbTcCurrentLength+i] = entries[i];
+			// The input cursor must advance when this batch spans multiple
+			// trustcache pages, otherwise each page repeats entries[0..N].
+			jbTc->file.entries[freeJbTcCurrentLength+i] = entries[insertedEntryCount+i];
 		}
 		jbTc->file.length += entryCountToInsert;
 		_trustcache_file_sort(&jbTc->file);
 		kwritebuf(freeJbTcKaddr, jbTc, JB_TRUSTCACHE_SIZE);
 		remainingEntryCount -= entryCountToInsert;
+		insertedEntryCount += entryCountToInsert;
 	}
 	return 0;
 }
 
 int jb_trustcache_add_cdhashes(cdhash_t *hashes, uint32_t hashCount)
 {
-	struct trustcache_entry_v1 entries[hashCount];
-	for (int i = 0; i < hashCount; i++) {
+	if (hashCount == 0) return 0;
+	if (!hashes || (size_t)hashCount > SIZE_MAX / sizeof(trustcache_entry_v1)) return -1;
+	// A recursive trust request may contain thousands of binaries. A VLA
+	// sized by its count can overflow jailbreakd/launchd's small stack.
+	struct trustcache_entry_v1 *entries = calloc(hashCount, sizeof(*entries));
+	if (!entries) return -1;
+	for (uint32_t i = 0; i < hashCount; i++) {
 		memcpy(entries[i].hash, hashes[i], sizeof(cdhash_t));
 		entries[i].hash_type = 1;
 		entries[i].flags = 0;
 	}
-	return jb_trustcache_add_entries(entries, hashCount);
+	int result = jb_trustcache_add_entries(entries, hashCount);
+	free(entries);
+	return result;
 }
 
 int jb_trustcache_add_entry(struct trustcache_entry_v1 entry)
