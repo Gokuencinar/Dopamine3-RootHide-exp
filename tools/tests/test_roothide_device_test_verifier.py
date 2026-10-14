@@ -7,7 +7,7 @@ import tempfile
 import unittest
 import zipfile
 
-from tools.verify_roothide_device_test import inspect_ipa
+from tools.verify_roothide_device_test import inspect_ipa, EXPECTED_BINARY_MARKER
 from tools.tests.test_verify_roothide_build import thin_macho
 
 
@@ -15,11 +15,12 @@ class DeviceTestVerifierTests(unittest.TestCase):
     def make_ipa(self, path: Path, bundle="com.gokuencinar.roothide3.diagnostic",
                  display="RootHide 3 Test", extra=None, executable=None):
         plist = plistlib.dumps({"CFBundleIdentifier": bundle, "CFBundleDisplayName": display,
+                               "CFBundleExecutable": "Dopamine", "CFBundlePackageType": "APPL",
                                "MinimumOSVersion": "15.0"})
         with zipfile.ZipFile(path, "w") as archive:
             archive.writestr("Payload/Dopamine.app/Info.plist", plist)
             archive.writestr("Payload/Dopamine.app/Dopamine",
-                             executable if executable is not None else thin_macho())
+                             executable if executable is not None else thin_macho() + EXPECTED_BINARY_MARKER)
             if extra is not None:
                 archive.writestr("Payload/Dopamine.app/" + extra, b"payload")
 
@@ -37,8 +38,13 @@ class DeviceTestVerifierTests(unittest.TestCase):
                 ("stock-id", {"bundle": "com.opa334.Dopamine"}),
                 ("wrong-name", {"display": "Dopamine"}),
                 ("basebin", {"extra": "basebin.tar"}),
+                ("nested-basebin", {"extra": "Resources/payload/basebin.tar"}),
                 ("manager", {"extra": "roothideapp.deb"}),
+                ("nested-manager", {"extra": "Resources/packages/roothideapp.deb"}),
+                ("embedded-framework", {"extra": "Frameworks/Privileged.framework/Privileged"}),
+                ("unexpected-resource", {"extra": "README.txt"}),
                 ("bootstrap", {"extra": "bootstrap_1800.tar.zst"}),
+                ("missing-marker", {"executable": thin_macho()}),
                 ("bad-binary", {"executable": b"not a Mach-O"}),
             ):
                 with self.subTest(label=label):

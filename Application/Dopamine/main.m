@@ -12,7 +12,12 @@
 #import <libjailbreak/info.h>
 #import <libjailbreak/jbclient_xpc.h>
 
+#ifndef RH3_INSTALLABLE_DIAGNOSTIC
+#define RH3_INSTALLABLE_DIAGNOSTIC 0
+#endif
+
 int main(int argc, char * argv[]) {
+#if !RH3_INSTALLABLE_DIAGNOSTIC
     if (argc >= 3) {
         if (!strcmp(argv[1], "trollstore")) {
             if (!strcmp(argv[2], "delete-bootstrap")) {
@@ -38,6 +43,7 @@ int main(int argc, char * argv[]) {
         setenv("PATH", "/sbin:/bin:/usr/sbin:/usr/bin:/var/jb/sbin:/var/jb/bin:/var/jb/usr/sbin:/var/jb/usr/bin", 1);
         setenv("TERM", "xterm-256color", 1);
     }
+#endif // !RH3_INSTALLABLE_DIAGNOSTIC
     
     NSString * appDelegateClassName;
     @autoreleasepool {

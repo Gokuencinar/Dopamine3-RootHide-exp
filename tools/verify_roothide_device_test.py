@@ -1,8 +1,8 @@
 """Inspect a RootHide 3 GUI-only diagnostic IPA, not a functional jailbreak.
 
 Ad-hoc ldid signatures are not equivalent to an Apple provisioning profile.
-This check validates ZIP structure, identifiers, Mach-O layout and removal
-of bootstrap payloads, but cannot establish device installability by itself.
+This check validates ZIP structure, a dedicated UIKit-only runtime marker,
+identifiers and Mach-O layout. It cannot establish device installability.
 """
 
 import argparse
@@ -20,6 +20,7 @@ except ImportError:  # Run directly from tools/ during GitHub Actions.
 
 EXPECTED_BUNDLE_ID = "com.gokuencinar.roothide3.diagnostic"
 EXPECTED_DISPLAY_NAME = "RootHide 3 Test"
+EXPECTED_BINARY_MARKER = b"RH3_DEVICE_TEST_UIKIT_ONLY_V1"
 
 
 def inspect_ipa(path: Path):
@@ -43,13 +44,27 @@ def inspect_ipa(path: Path):
                 errors.append("Diagnostic bundle ID is not isolated from stock Dopamine")
             if details["display_name"] != EXPECTED_DISPLAY_NAME:
                 errors.append("Diagnostic display name is not distinct")
-            macho_error = validate_macho(archive.read(binary_path), required_arch="arm64")
+            if info.get("CFBundleExecutable") != "Dopamine":
+                errors.append("Unexpected diagnostic bundle executable")
+            if info.get("CFBundlePackageType") != "APPL":
+                errors.append("Diagnostic bundle is not an iOS application")
+            binary = archive.read(binary_path)
+            macho_error = validate_macho(binary, required_arch="arm64")
             if macho_error:
                 errors.append(f"Invalid diagnostic Mach-O: {macho_error}")
+            if EXPECTED_BINARY_MARKER not in binary:
+                errors.append("Binary does not contain the standalone UIKit-only diagnostic marker")
+            # No extensions, frameworks, archives, scripts or embedded jailbreak
+            # resources should be present: the app comprises exactly two files.
+            unexpected = sorted(name for name in contents if name.startswith(prefix)
+                                and not name.endswith("/") and name not in {info_path, binary_path})
+            if unexpected:
+                errors.append(f"Unexpected files in standalone diagnostic IPA: {unexpected}")
+            # Check all app subdirectories, not just its top-level Resources.
+            # A nested installer must never slip into a GUI-only archive.
             forbidden = ("basebin.tar", ".deb", ".tar.zst")
-            found = [name for name in contents if name.startswith(prefix)
-                     and "/" not in name[len(prefix):].rstrip("/")
-                     and name.endswith(forbidden)]
+            found = sorted(name for name in contents if name.startswith(prefix)
+                           and not name.endswith("/") and name.lower().endswith(forbidden))
             if found:
                 errors.append(f"Diagnostic bundles jailbreak installer payloads: {found}")
             # No signature or entitlement conclusions: those must be checked

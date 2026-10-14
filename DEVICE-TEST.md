@@ -9,11 +9,13 @@ Esta rama genera **dos artefactos muy diferentes**. No los confundas:
 
 El primero incluye `RootHide3-Device-Test.ipa`, con bundle ID
 `com.gokuencinar.roothide3.diagnostic` y nombre visible `RootHide 3 Test`.
-Se construye con `RH3_INSTALLABLE_DIAGNOSTIC=1`, una rama de UI sin menú de
-jailbreak/reinicio/actualización, y una guardia adicional en `DOJailbreaker`
-que rechaza llamadas directas. Se eliminan los archivos de bootstrap,
-BaseBin y paquetes `.deb` de la app. La macro de activación RootHide sigue
-en `0`. **No reemplaza** la app estable de Dopamine.
+El artefacto se construye desde `Application/Diagnostic/` como una aplicación
+UIKit mínima **independiente**: no compila ni enlaza el ejecutable convencional
+de Dopamine, explotaciones, bibliotecas BaseBin, hooks, binarios de jailbreak
+o instaladores. El verificador exige que la IPA contenga únicamente el
+ejecutable y `Info.plist`, con un marcador exclusivo de diagnóstico.
+La macro de activación RootHide del port convencional sigue en `0`.
+**No reemplaza** la app estable de Dopamine.
 
 ## Instalación
 
@@ -40,10 +42,11 @@ no demuestra que el port sea funcional.
 
 ## Compilación en macOS
 
-Después de compilar BaseBin y dependencias:
+El diagnóstico no necesita compilar BaseBin ni el jailbreak. En macOS con
+Xcode Command Line Tools, el SDK de iOS y `ldid` disponibles:
 
 ```sh
-gmake -C Application diagnostic
+make -C Application diagnostic
 python3 tools/verify_roothide_device_test.py --ipa Application/RootHide3-Device-Test.ipa --json
 ```
 

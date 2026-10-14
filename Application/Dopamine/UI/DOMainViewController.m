@@ -85,7 +85,7 @@
         [diagnostic.widthAnchor constraintLessThanOrEqualToConstant:390],
     ]];
     return;
-#endif
+#else
     UIStackView *stackView = [[UIStackView alloc] init];
     [stackView setAxis:UILayoutConstraintAxisVertical];
     [stackView setAlignment:UIStackViewAlignmentTrailing];
@@ -221,6 +221,7 @@
             });
         }
     });
+#endif // RH3_INSTALLABLE_DIAGNOSTIC
 }
 
 - (NSString *)jailbreakButtonTitle
@@ -243,11 +244,17 @@
 - (void)viewWillAppear:(BOOL)animated
 {
     [super viewWillAppear:animated];
+#if !RH3_INSTALLABLE_DIAGNOSTIC
     [self.jailbreakBtn.button setTitle:[self jailbreakButtonTitle] forState:UIControlStateNormal];
+#endif
 }
 
 - (void)startJailbreak
 {
+#if RH3_INSTALLABLE_DIAGNOSTIC
+    // Defense in depth: no indirect call into the jailbreak UI flow.
+    return;
+#else
     DOJailbreaker *jailbreaker = [[DOJailbreaker alloc] init];
 
     [[DOUIManager sharedInstance] startLogCapture];
@@ -325,10 +332,15 @@
         });
         [self.jailbreakBtn unlockMutex];
     });
+#endif
 }
 
 -(void)setupUpdateAvailable:(BOOL)environmentUpdate
 {
+#if RH3_INSTALLABLE_DIAGNOSTIC
+    // No update navigation or installed-jailbreak probing in the device test.
+    return;
+#else
     if (self.jailbreakBtn.didExpand)
         return;
 
@@ -362,6 +374,7 @@
         [self.updateButton setTransform:CGAffineTransformIdentity];
         [self.updateButton setAlpha:1];
     } completion:nil];
+#endif
 }
 
 -(void)simulateJailbreak
