@@ -5,7 +5,7 @@ all: Dopamine.ipa
 # Minimal UIKit-only install/open app. Do not link Dopamine, kernel exploits,
 # BaseBin, jailbreak hooks, or any other privileged RootHide components.
 diagnostic: FORCE
-	@echo Building isolated RootHide 3 install/open diagnostic (no jailbreak)
+	@echo "Building isolated RootHide 3 install/open diagnostic (no jailbreak)"
 	mkdir -p build-diagnostic/Payload/Dopamine.app
 	cp Diagnostic/Info.plist build-diagnostic/Payload/Dopamine.app/Info.plist
 	xcrun --sdk iphoneos clang -arch arm64 -miphoneos-version-min=15.0 -fobjc-arc -fmodules -isysroot "$$(xcrun --sdk iphoneos --show-sdk-path)" -framework UIKit -framework Foundation Diagnostic/main.m -o build-diagnostic/Payload/Dopamine.app/Dopamine
