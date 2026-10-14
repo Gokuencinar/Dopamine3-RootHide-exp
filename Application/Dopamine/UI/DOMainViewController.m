@@ -17,6 +17,10 @@
 #import <sys/sysctl.h>
 #import <libjailbreak/libjailbreak.h>
 
+#ifndef RH3_INSTALLABLE_DIAGNOSTIC
+#define RH3_INSTALLABLE_DIAGNOSTIC 0
+#endif
+
 @interface DOMainViewController ()
 
 @property DOJailbreakButton *jailbreakBtn;
@@ -36,6 +40,52 @@
 
 -(void)setupStack
 {
+#if RH3_INSTALLABLE_DIAGNOSTIC
+    // Install-and-open smoke-test only. Deliberately do not construct the
+    // jailbreak / update / reboot / settings actions in this separate app.
+    self.view.backgroundColor = [UIColor systemBackgroundColor];
+    UIStackView *diagnostic = [[UIStackView alloc] init];
+    diagnostic.axis = UILayoutConstraintAxisVertical;
+    diagnostic.alignment = UIStackViewAlignmentCenter;
+    diagnostic.spacing = 18;
+    diagnostic.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.view addSubview:diagnostic];
+
+    UILabel *title = [[UILabel alloc] init];
+    title.text = @"RootHide 3 — Device Test";
+    title.font = [UIFont boldSystemFontOfSize:25];
+    title.textColor = [UIColor labelColor];
+    title.textAlignment = NSTextAlignmentCenter;
+    title.numberOfLines = 0;
+    [diagnostic addArrangedSubview:title];
+
+    UILabel *warning = [[UILabel alloc] init];
+    warning.text = @"Diagnostic build. RootHide installation, jailbreak, kernel patches, and userspace reboot are disabled. This test only checks whether the app can be installed and opened.";
+    warning.font = [UIFont systemFontOfSize:16];
+    warning.textColor = [UIColor secondaryLabelColor];
+    warning.textAlignment = NSTextAlignmentCenter;
+    warning.numberOfLines = 0;
+    [diagnostic addArrangedSubview:warning];
+
+    UILabel *device = [[UILabel alloc] init];
+    device.text = [NSString stringWithFormat:@"Device: %@\niOS: %@",
+                   UIDevice.currentDevice.model, UIDevice.currentDevice.systemVersion];
+    device.font = [UIFont monospacedSystemFontOfSize:14 weight:UIFontWeightRegular];
+    device.textColor = [UIColor labelColor];
+    device.textAlignment = NSTextAlignmentCenter;
+    device.numberOfLines = 0;
+    [diagnostic addArrangedSubview:device];
+
+    UILayoutGuide *safe = self.view.safeAreaLayoutGuide;
+    [NSLayoutConstraint activateConstraints:@[
+        [diagnostic.centerXAnchor constraintEqualToAnchor:safe.centerXAnchor],
+        [diagnostic.centerYAnchor constraintEqualToAnchor:safe.centerYAnchor],
+        [diagnostic.leadingAnchor constraintGreaterThanOrEqualToAnchor:safe.leadingAnchor constant:24],
+        [diagnostic.trailingAnchor constraintLessThanOrEqualToAnchor:safe.trailingAnchor constant:-24],
+        [diagnostic.widthAnchor constraintLessThanOrEqualToConstant:390],
+    ]];
+    return;
+#endif
     UIStackView *stackView = [[UIStackView alloc] init];
     [stackView setAxis:UILayoutConstraintAxisVertical];
     [stackView setAlignment:UIStackViewAlignmentTrailing];

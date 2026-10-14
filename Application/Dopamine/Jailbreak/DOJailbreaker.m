@@ -728,6 +728,17 @@ static void *rh3_boomerang_server(void *opaque)
 
 - (void)runWithError:(NSError **)errOut didRemoveJailbreak:(BOOL*)didRemove showLogs:(BOOL *)showLogs
 {
+#if RH3_INSTALLABLE_DIAGNOSTIC
+    // A second, non-UI guard: no diagnostic build may reach exploitation or
+    // removal even if another caller invokes the jailbreaker directly.
+    if (didRemove) *didRemove = NO;
+    if (showLogs) *showLogs = NO;
+    if (errOut) *errOut = [NSError errorWithDomain:JBErrorDomain
+                                            code:JBErrorCodeFailedBasebinTrustcache
+                                        userInfo:@{NSLocalizedDescriptionKey:
+                                        @"RootHide 3 diagnostic mode: jailbreak and removal are disabled."}];
+    return;
+#else
     BOOL removeJailbreakEnabled = [[DOPreferenceManager sharedManager] boolPreferenceValueForKey:@"removeJailbreakEnabled" fallback:NO];
     BOOL tweaksEnabled = [[DOPreferenceManager sharedManager] boolPreferenceValueForKey:@"tweakInjectionEnabled" fallback:YES];
     BOOL idownloadEnabled = [[DOPreferenceManager sharedManager] boolPreferenceValueForKey:@"idownloadEnabled" fallback:NO];
@@ -904,12 +915,18 @@ static void *rh3_boomerang_server(void *opaque)
     // It's only neccessary when we don't immediately userspace reboot
     
     printf("Done!\n");
+#endif // RH3_INSTALLABLE_DIAGNOSTIC
 }
 
 - (void)finalize
 {
+#if RH3_INSTALLABLE_DIAGNOSTIC
+    // No device lifecycle operations in the install/open smoke-test app.
+    return;
+#else
     [[DOUIManager sharedInstance] sendLog:DOLocalizedString(@"Rebooting Userspace") debug:NO];
     [[DOEnvironmentManager sharedManager] rebootUserspace];
+#endif
 }
 
 - (IOSurfaceRef)allocatePurpleGfxMemWithSize:(size_t)size

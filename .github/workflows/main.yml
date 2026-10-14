@@ -174,6 +174,38 @@ jobs:
             ${{ github.workspace }}/roothide-build-inspection.json
             ${{ github.workspace }}/ROOT_HIDE_DO_NOT_INSTALL.txt
 
+      # Separate install/open smoke-test app. It uses its own bundle ID,
+      # minimal entitlements, no jailbreak UI and no bootstrap payloads.
+      # Do not confuse this ad-hoc signed application with a RootHide release.
+      - name: Test RootHide device-test app safeguards
+        if: steps.roothide_port.outputs.is_port == 'true'
+        run: python3 -m unittest discover -s tools/tests -p 'test_roothide_device_test.py' -v
+
+      - name: Build RootHide device-test app
+        if: steps.roothide_port.outputs.is_port == 'true'
+        run: |
+          set -euo pipefail
+          gmake -C Application diagnostic
+
+      - name: Inspect RootHide device-test IPA
+        if: steps.roothide_port.outputs.is_port == 'true'
+        run: |
+          set -euo pipefail
+          python3 tools/verify_roothide_device_test.py --ipa Application/RootHide3-Device-Test.ipa --json | tee roothide-device-test-inspection.json
+          printf 'ROOT HIDE 3 — APP INSTALL/OPEN TEST ONLY\nKernel/jailbreak functionality: DISABLED\nContains no bootstrap installer payloads.\nAd-hoc signed: install via a compatible service, or re-sign legitimately for your device.\n' > ROOT_HIDE_DEVICE_TEST_README.txt
+
+      - name: Upload RootHide device-test IPA
+        if: steps.roothide_port.outputs.is_port == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: RootHide3-Device-Test-APP-ONLY
+          retention-days: 7
+          if-no-files-found: error
+          path: |
+            ${{ github.workspace }}/Application/RootHide3-Device-Test.ipa
+            ${{ github.workspace }}/roothide-device-test-inspection.json
+            ${{ github.workspace }}/ROOT_HIDE_DEVICE_TEST_README.txt
+
       # Compile first so early RootHide port errors are visible in CI, but
       # never upload an unverified stock artifact as a RootHide release.
       - name: Check RootHide port prerequisites before upload
