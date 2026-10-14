@@ -739,6 +739,20 @@ static void *rh3_boomerang_server(void *opaque)
                                         @"RootHide 3 diagnostic mode: jailbreak and removal are disabled."}];
     return;
 #else
+#if RH3_FULL_APP_EXPERIMENTAL
+    // The full experimental build carries all Dopamine/RootHide components,
+    // but must NEVER fall through to stock /var/jb installation while the
+    // RootHide bootstrap runtime remains unverified.
+    if (![DOBootstrapper rootHidePortEnabled]) {
+        if (didRemove) *didRemove = NO;
+        if (showLogs) *showLogs = NO;
+        if (errOut) *errOut = [NSError errorWithDomain:JBErrorDomain
+                                                code:JBErrorCodeFailedBasebinTrustcache
+                                            userInfo:@{NSLocalizedDescriptionKey:
+                                            @"RootHide 3 runtime is not validated. Jailbreak and removal are disabled in this experimental build."}];
+        return;
+    }
+#endif
     BOOL removeJailbreakEnabled = [[DOPreferenceManager sharedManager] boolPreferenceValueForKey:@"removeJailbreakEnabled" fallback:NO];
     BOOL tweaksEnabled = [[DOPreferenceManager sharedManager] boolPreferenceValueForKey:@"tweakInjectionEnabled" fallback:YES];
     BOOL idownloadEnabled = [[DOPreferenceManager sharedManager] boolPreferenceValueForKey:@"idownloadEnabled" fallback:NO];

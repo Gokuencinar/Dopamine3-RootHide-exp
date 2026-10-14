@@ -169,6 +169,12 @@ jobs:
           set -euo pipefail
           python3 -m unittest discover -s tools/tests -p 'test_roothide_boomerang_trustcache.py' -v
 
+      - name: Verify full experimental app safeguards
+        if: steps.roothide_port.outputs.is_port == 'true'
+        run: |
+          set -euo pipefail
+          python3 -m unittest discover -s tools/tests -p 'test_roothide_full_experimental.py' -v
+
       - name: Build
         # The readiness script must use the same RootHide classification as
         # Theos selection, including PR refs such as 123/merge.
@@ -216,6 +222,29 @@ jobs:
             ${{ github.workspace }}/BaseBin/basebin.tar
             ${{ github.workspace }}/roothide-build-inspection.json
             ${{ github.workspace }}/ROOT_HIDE_DO_NOT_INSTALL.txt
+
+      # A second artifact with ALL Dopamine 3/RootHide compiled resources and
+      # privileged entitlements, using a distinct bundle ID. Its entry points
+      # explicitly refuse stock jailbreak/removal until RootHide is validated.
+      - name: Verify full experimental RootHide 3 IPA
+        if: steps.roothide_port.outputs.is_port == 'true'
+        run: |
+          set -euo pipefail
+          cp Application/Dopamine.ipa Application/RootHide3-Full-Experimental.ipa
+          python3 tools/verify_roothide_full_experimental.py --ipa Application/RootHide3-Full-Experimental.ipa --json | tee roothide-full-experimental-inspection.json
+          printf 'ROOT HIDE 3 — FULL DOPAMINE COMPONENTS, NOT FUNCTIONAL JAILBREAK\nCommit: %s\nBundle: com.gokuencinar.roothide3.fulltest\nRootHide bootstrap gate: 0 / stock fallback blocked\nContains original Dopamine/RootHide exploit components and private entitlements.\nNo tests on a device: use only on disposable test hardware with compatible installation/signing.\n' "$GITHUB_SHA" > ROOT_HIDE_FULL_EXPERIMENTAL_README.txt
+
+      - name: Upload guarded full experimental app
+        if: steps.roothide_port.outputs.is_port == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: RootHide3-FULL-EXPERIMENTAL-JAILBREAK-DISABLED
+          if-no-files-found: error
+          retention-days: 7
+          path: |
+            ${{ github.workspace }}/Application/RootHide3-Full-Experimental.ipa
+            ${{ github.workspace }}/roothide-full-experimental-inspection.json
+            ${{ github.workspace }}/ROOT_HIDE_FULL_EXPERIMENTAL_README.txt
 
       # Compile first so early RootHide port errors are visible in CI, but
       # never upload an unverified stock artifact as a RootHide release.

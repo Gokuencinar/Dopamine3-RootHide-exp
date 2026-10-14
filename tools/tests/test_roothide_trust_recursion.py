@@ -42,6 +42,16 @@ class RootHideTrustRecursionTests(unittest.TestCase):
         self.assertIn('JBLogError("Failed to calculate ad-hoc CDHash', source)
         self.assertIn("*failed = true;", source[source.index("ensure_randomized_cdhash_for_slice("):])
 
+    def test_unreadable_macho_signature_is_not_treated_as_non_adhoc(self):
+        source = (ROOT / "BaseBin/libjailbreak/src/roothider/signatures.m").read_text(encoding="utf-8")
+        start = source.index("CS_SuperBlob *superblob = macho_read_code_signature(macho);")
+        stop = source.index("if (cdhashWasKnown ||", start)
+        block = source[start:stop]
+        self.assertIn("if (superblob) {", block)
+        self.assertIn('JBLogError("Missing or unreadable code signature', block)
+        self.assertIn("*failed = true;", block[block.index("} else {", block.index("free(superblob);")):])
+        self.assertIn("if (csd_superblob_is_adhoc_signed(decodedSuperblob))", block)
+
 
 if __name__ == "__main__":
     unittest.main()

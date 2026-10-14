@@ -275,8 +275,8 @@ static void recurse_handler(NSString *loadPath, NSString *loaderPath, NSString *
 	// Calculate cdhash and add it to our array
 	bool cdhashWasKnown = true;
 	bool isAdhocSigned = false;
-	CS_SuperBlob *superblob = macho_read_code_signature(macho);
-	if (superblob) {
+		CS_SuperBlob *superblob = macho_read_code_signature(macho);
+		if (superblob) {
 		CS_DecodedSuperBlob *decodedSuperblob = csd_superblob_decode(superblob);
 		if (decodedSuperblob) {
 			if (csd_superblob_is_adhoc_signed(decodedSuperblob)) {
@@ -306,8 +306,14 @@ static void recurse_handler(NSString *loadPath, NSString *loaderPath, NSString *
 				JBLogError("Failed to decode code signature for %s", realLoadPath.fileSystemRepresentation);
 				*failed = true;
 			}
-		free(superblob);
-	}
+			free(superblob);
+		} else {
+			// A mandatory Mach-O without a readable signature must not be
+			// misclassified as a valid non-ad-hoc binary. In particular,
+			// cdhashWasKnown=true would otherwise skip dependency inspection.
+			JBLogError("Missing or unreadable code signature for %s", realLoadPath.fileSystemRepresentation);
+			*failed = true;
+		}
 
 	if (cdhashWasKnown || // If we already knew the cdhash, we can skip parsing dependencies
 		!isAdhocSigned) { // If it was not ad hoc signed, we can safely skip it aswell

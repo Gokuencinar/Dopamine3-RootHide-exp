@@ -21,6 +21,10 @@
 #import "DOPSJetsamListItemsController.h"
 #import "DOButtonCell.h"
 
+#ifndef RH3_FULL_APP_EXPERIMENTAL
+#define RH3_FULL_APP_EXPERIMENTAL 0
+#endif
+
 @interface DOSettingsController ()
 
 @end
@@ -45,11 +49,13 @@
                 NSLog(@"Error changing app icon: %@", error);
         }];
 
+#if !RH3_FULL_APP_EXPERIMENTAL
         if ([DOEnvironmentManager sharedManager].isJailbroken) {
             dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
                 [[DOEnvironmentManager sharedManager] updateBootLogo];
             });
         }
+#endif
     }
 }
 

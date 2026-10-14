@@ -6,6 +6,7 @@ from pathlib import Path
 import tempfile
 import unittest
 import zipfile
+import warnings
 
 from tools.verify_roothide_device_test import inspect_ipa, EXPECTED_BINARY_MARKER
 from tools.tests.test_verify_roothide_build import thin_macho
@@ -59,6 +60,37 @@ class DeviceTestVerifierTests(unittest.TestCase):
             self.assertTrue(inspect_ipa(missing)[0])
             missing.write_bytes(b"invalid archive")
             self.assertTrue(inspect_ipa(missing)[0])
+
+    def test_rejects_unexpected_top_level_entries_duplicate_and_symlink(self):
+        with tempfile.TemporaryDirectory() as root:
+            for label, member in (
+                ("extra-app", "Payload/Unexpected.app/extra.bin"),
+                ("traversal", "Payload/Dopamine.app/../unexpected"),
+                ("backslash", "Payload\\Unexpected.app\\extra.bin"),
+                ("hidden", ".hidden"),
+                ("unexpected-directory", "Payload/Other.app/"),
+            ):
+                with self.subTest(label=label):
+                    path = Path(root) / f"{label}.ipa"
+                    self.make_ipa(path)
+                    with zipfile.ZipFile(path, "a") as archive:
+                        archive.writestr(member, b"payload")
+                    self.assertTrue(inspect_ipa(path)[0])
+            path = Path(root) / "duplicate.ipa"
+            self.make_ipa(path)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                with zipfile.ZipFile(path, "a") as archive:
+                    archive.writestr("Payload/Dopamine.app/Info.plist", b"duplicate")
+            self.assertTrue(inspect_ipa(path)[0])
+            path = Path(root) / "symlink.ipa"
+            self.make_ipa(path)
+            link = zipfile.ZipInfo("Payload/Dopamine.app/README")
+            link.create_system = 3
+            link.external_attr = (0o120777 << 16)
+            with zipfile.ZipFile(path, "a") as archive:
+                archive.writestr(link, "something")
+            self.assertTrue(inspect_ipa(path)[0])
 
 
 if __name__ == "__main__":

@@ -9,6 +9,7 @@
 #import "DOUIManager.h"
 #import "DOEnvironmentManager.h"
 #import "DOJailbreaker.h"
+#import "DOBootstrapper.h"
 #import "DOGlobalAppearance.h"
 #import "DOActionMenuButton.h"
 #import "DOUpdateViewController.h"
@@ -19,6 +20,9 @@
 
 #ifndef RH3_INSTALLABLE_DIAGNOSTIC
 #define RH3_INSTALLABLE_DIAGNOSTIC 0
+#endif
+#ifndef RH3_FULL_APP_EXPERIMENTAL
+#define RH3_FULL_APP_EXPERIMENTAL 0
 #endif
 
 @interface DOMainViewController ()
@@ -135,18 +139,44 @@
         [headerView.leadingAnchor constraintEqualToAnchor:stackView.leadingAnchor constant:5],
         [headerView.trailingAnchor constraintEqualToAnchor:stackView.trailingAnchor]
     ]];
+
+#if RH3_FULL_APP_EXPERIMENTAL
+    UILabel *portNotice = [[UILabel alloc] init];
+    portNotice.translatesAutoresizingMaskIntoConstraints = NO;
+    portNotice.text = [DOBootstrapper rootHidePortEnabled] ?
+        @"RootHide 3 — Experimental port; not validated on an iPhone" :
+        @"RootHide 3 — Full Dopamine test build. Jailbreak disabled until runtime validation.";
+    portNotice.font = [UIFont systemFontOfSize:12 weight:UIFontWeightSemibold];
+    portNotice.textColor = [UIColor systemOrangeColor];
+    portNotice.textAlignment = NSTextAlignmentCenter;
+    portNotice.numberOfLines = 0;
+    [stackView addArrangedSubview:portNotice];
+    [NSLayoutConstraint activateConstraints:@[
+        [portNotice.leadingAnchor constraintEqualToAnchor:stackView.leadingAnchor constant:8],
+        [portNotice.trailingAnchor constraintEqualToAnchor:stackView.trailingAnchor constant:-8]
+    ]];
+#endif
     
     //Action Menu
     DOActionMenuView *actionView = [[DOActionMenuView alloc] initWithActions:@[
         [UIAction actionWithTitle:DOLocalizedString(@"Menu_Settings_Title") image:[UIImage systemImageNamed:@"gearshape" withConfiguration:[DOGlobalAppearance smallIconImageConfiguration]] identifier:@"settings" handler:^(__kindof UIAction * _Nonnull action) {
+#if RH3_FULL_APP_EXPERIMENTAL
+            if (![DOBootstrapper rootHidePortEnabled]) return;
+#endif
             [self.navigationController pushViewController:[[DOSettingsController alloc] init] animated:YES];
         }],
         [UIAction actionWithTitle:DOLocalizedString(@"Menu_Restart_SpringBoard_Title") image:[UIImage systemImageNamed:@"arrow.clockwise" withConfiguration:[DOGlobalAppearance smallIconImageConfiguration]] identifier:@"respring" handler:^(__kindof UIAction * _Nonnull action) {
+#if RH3_FULL_APP_EXPERIMENTAL
+            if (![DOBootstrapper rootHidePortEnabled]) return;
+#endif
             [self fadeToBlack:^{
                 [[DOEnvironmentManager sharedManager] respring];
             }];
         }],
         [UIAction actionWithTitle:DOLocalizedString(@"Menu_Reboot_Userspace_Title") image:[UIImage systemImageNamed:@"arrow.clockwise.circle" withConfiguration:[DOGlobalAppearance smallIconImageConfiguration]] identifier:@"reboot-userspace" handler:^(__kindof UIAction * _Nonnull action) {
+#if RH3_FULL_APP_EXPERIMENTAL
+            if (![DOBootstrapper rootHidePortEnabled]) return;
+#endif
             [self fadeToBlack:^{
                 [[DOEnvironmentManager sharedManager] rebootUserspace];
             }];
@@ -197,6 +227,12 @@
         
     }]];
     self.jailbreakBtn.enabled = !isJailbroken && isSupported;
+#if RH3_FULL_APP_EXPERIMENTAL
+    // Do not offer stock Dopamine jailbreak or removal through the separate
+    // RootHide full build when its RootHide-specific runtime gate is closed.
+    self.jailbreakBtn.enabled = self.jailbreakBtn.enabled &&
+                                [DOBootstrapper rootHidePortEnabled];
+#endif
 
     [self.view addSubview:self.jailbreakBtn];
 
@@ -207,6 +243,7 @@
         [self.jailbreakBtn.centerYAnchor constraintEqualToAnchor:buttonPlaceHolder.centerYAnchor]
     ])];
 
+#if !RH3_FULL_APP_EXPERIMENTAL
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 0.1 * NSEC_PER_SEC), dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_LOW, 0), ^{
         if ([[DOUIManager sharedInstance] environmentUpdateAvailable])
         {
@@ -221,11 +258,17 @@
             });
         }
     });
+#endif
 #endif // RH3_INSTALLABLE_DIAGNOSTIC
 }
 
 - (NSString *)jailbreakButtonTitle
 {
+#if RH3_FULL_APP_EXPERIMENTAL
+    if (![DOBootstrapper rootHidePortEnabled]) {
+        return @"RootHide runtime unavailable";
+    }
+#endif
     BOOL isJailbroken = [[DOEnvironmentManager sharedManager] isJailbroken];
     BOOL isSupported = [[DOEnvironmentManager sharedManager] isSupported];
     BOOL removeJailbreakEnabled = [[DOPreferenceManager sharedManager] boolPreferenceValueForKey:@"removeJailbreakEnabled" fallback:NO];
@@ -255,6 +298,9 @@
     // Defense in depth: no indirect call into the jailbreak UI flow.
     return;
 #else
+#if RH3_FULL_APP_EXPERIMENTAL
+    if (![DOBootstrapper rootHidePortEnabled]) return;
+#endif
     DOJailbreaker *jailbreaker = [[DOJailbreaker alloc] init];
 
     [[DOUIManager sharedInstance] startLogCapture];
@@ -337,7 +383,7 @@
 
 -(void)setupUpdateAvailable:(BOOL)environmentUpdate
 {
-#if RH3_INSTALLABLE_DIAGNOSTIC
+#if RH3_INSTALLABLE_DIAGNOSTIC || RH3_FULL_APP_EXPERIMENTAL
     // No update navigation or installed-jailbreak probing in the device test.
     return;
 #else
@@ -448,6 +494,12 @@
 
 - (BOOL)actionMenuActionIsEnabled:(UIAction *)action
 {
+#if RH3_FULL_APP_EXPERIMENTAL
+    if (![DOBootstrapper rootHidePortEnabled] &&
+        ([action.identifier isEqualToString:@"settings"] ||
+         [action.identifier isEqualToString:@"respring"] ||
+         [action.identifier isEqualToString:@"reboot-userspace"])) return NO;
+#endif
     if ([action.identifier isEqualToString:@"respring"] || [action.identifier isEqualToString:@"reboot-userspace"]) {
         return [[DOEnvironmentManager sharedManager] isJailbroken];
     }

@@ -9,6 +9,7 @@ import argparse
 import json
 from pathlib import Path
 import plistlib
+import stat
 import sys
 import zipfile
 
@@ -30,10 +31,32 @@ def inspect_ipa(path: Path):
         return ["Diagnostic IPA does not exist"], details
     try:
         with zipfile.ZipFile(path) as archive:
-            contents = set(archive.namelist())
+            members = archive.infolist()
+            names = [member.filename for member in members]
+            contents = set(names)
+            if len(names) != len(contents):
+                errors.append("Duplicate ZIP entry names are not allowed")
             prefix = "Payload/Dopamine.app/"
             info_path = prefix + "Info.plist"
             binary_path = prefix + "Dopamine"
+            allowed = {"Payload/", "Payload/Dopamine.app/", info_path, binary_path}
+            for member in members:
+                name = member.filename
+                file_type = (member.external_attr >> 16) & 0o170000
+                if name not in allowed:
+                    errors.append(f"Unexpected ZIP entry: {name}")
+                if (name.startswith("/") or "\\" in name or "//" in name or
+                    any(piece in {".", "..", ""} for piece in name.rstrip("/").split("/"))):
+                    errors.append(f"Unsafe ZIP path: {name}")
+                if file_type == stat.S_IFLNK:
+                    errors.append(f"ZIP symbolic link is forbidden: {name}")
+                if file_type not in {0, stat.S_IFREG, stat.S_IFDIR}:
+                    errors.append(f"Unsupported ZIP member type: {name}")
+                if name.endswith("/") != (name in {"Payload/", "Payload/Dopamine.app/"}):
+                    errors.append(f"Unexpected ZIP directory or file type: {name}")
+            damaged = archive.testzip()
+            if damaged:
+                errors.append(f"ZIP CRC failed for {damaged}")
             if info_path not in contents or binary_path not in contents:
                 return ["Missing app Info.plist or executable"], details
             info = plistlib.loads(archive.read(info_path))
