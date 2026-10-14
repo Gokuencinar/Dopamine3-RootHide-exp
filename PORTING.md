@@ -23,7 +23,8 @@ sources, dyld loader hook candidates, package-manager hooks, and experimental
 launchd integration alongside Dopamine 3's existing hookd/rootlesshooks.
 It also includes the two RootHide bootstrap archives and the Sileo, Zebra,
 and RootHide Manager packages. All five assets are SHA-256-pinned and attached
-to the iOS application target. This is **not a compiled or working jailbreak**.
+to the iOS application target. A **compile-only** artifact has since been
+built; this is **not a working RootHide jailbreak**.
 
 The RootHide IPC domain is isolated as ID `6`, and the XPC dispatcher now
 rejects out-of-range domain and action indices. RootHide activation is tied
@@ -39,22 +40,27 @@ repositories and managers. It is **disabled by default** with
 Procursus path. The experimental path is deliberately limited to iOS 15/16;
 iOS 17+ is rejected until separately ported.
 
-**Remaining blockers:** The 3.x integration of RootHide 2 kernel/dyld
-patches, code-signing/trust handling, bootstrap dependencies and jailbroken
-runtime has not been compiled or tested. Some offsets required by the donor
+**Remaining blockers:** Although macOS has compiled the staged source,
+RootHide 2 kernel/dyld patches, code-signing/trust handling, bootstrap
+dependencies and jailbroken runtime have **not been validated on iPhone**.
+Some offsets required by the donor
 are absent from Dopamine 3's kernel patchfinder and are guarded instead of
 being used unchecked. RootHide's executable `bootstrapper` in the donor
 was only a placeholder. The audit checks source wiring, an explicit
 activation flag, and independent physical-device evidence. Activation
 and hardware evidence deliberately remain absent. Enabling RootHide based
-on source presence alone would be unsafe. No RootHide IPA/TIPA has been
-compiled or validated on hardware in this workspace.
+on source presence alone would be unsafe. No **installable, functional**
+RootHide IPA/TIPA has been validated on hardware in this workspace.
 
 ## Build attempt and reviewed defects (14 October 2026)
 
-The experimental tree is backed up in the **private**
-`Gokuencinar/Dopamine3-RootHide-Experimental` repository on branch
-`roothide-dopamine3-integration`. An earlier GitHub Actions attempt
+The experimental tree is backed up in
+`Gokuencinar/Dopamine3-RootHide-Experimental` on branch
+`roothide-dopamine3-integration`. **Visibility warning (14 October 2026):**
+GitHub's repository API reported `visibility: public`, contrary to the
+previous description of a private experimental fork. Verify that it is
+private before pushing further work; do not publish to a public fork.
+An earlier GitHub Actions attempt
 (`38482080417`) reported a billing/spending-limit restriction. Subsequent
 attempts **did start a real macOS runner** without any billing changes:
 
@@ -88,11 +94,45 @@ a claim that the legacy CLI is a RootHide installer: its `install` and
 `activate` subcommands are still stock Dopamine/Corellium flows, and the
 guarded RootHide app installer does not call them. Framework references for
 iOS targets now use the iPhoneOS `SDKROOT` instead of incorrectly selecting
-IOKit from the macOS SDK. Both changes await validation in Xcode CI.
+IOKit from the macOS SDK. The macOS CI run `38583786037` built and packaged
+this revision successfully.
 
-These are **partial compiler results**, not a successful BaseBin/Xcode
-build. No usable RootHide IPA has been produced, and the guarded branch
-must remain compile-only even if all source targets eventually build.
+Further local hardening, pending a new macOS build, makes disabled
+`jailbreakd` systemwide logging return `-ENOTSUP` rather than aborting the
+daemon on an IPC request, and declares RootHide-specific `DOBootstrapper`
+methods in their implementation category to avoid compiler warnings. The
+recursive trustcache collector now bounds traversal and checks `realloc`
+before writing into a resized buffer; it propagates allocation or limit
+failures to its caller instead of uploading a partial array. These are
+source-level fixes only, without iPhone runtime evidence.
+
+The post-build verifier was also hardened from a four-byte Mach-O magic
+check to checking real ARM64/ARM64E thin/fat slice headers, per-slice CPU
+architecture, load-command bounds, referenced sections and data ranges.
+Synthetic malformed-header/offset/architecture cases now fail the local
+tests. This structural inspection does **not** verify code-signature
+authenticity, entitlements or execution. The stronger verifier has not yet
+been run in macOS CI against the compiled diagnostic IPA; run `38583786037`
+used the previous, weaker version.
+
+**Unresolved blacklist path:** The RootHide `launchdhook` direct spawn check
+identifies blacklisted apps by the `.app` executable path. App launches
+routed through `/usr/libexec/xpcproxy` can bypass that path comparison;
+the subsequent exec handling does not clearly register the resulting PID
+as blacklisted before it can request privileged IPC. Audit the complete
+launch/exec/injection route and test on hardware before activation.
+
+Run `38583786037` at `1068eea` completed Build, arm64/arm64e architecture
+checks, quarantined package inspection and artifact upload successfully.
+The overall job finished **failure** because the final strict RootHide
+activation/hardware gate intentionally refused release. GitHub artifact
+`11905401984`, `RootHide3-COMPILE-ONLY-NOT-FOR-INSTALL`, contains an IPA,
+basebin archive, JSON inspection and a no-install warning. The ZIP is
+105,944,525 bytes with SHA-256
+`5883d145856c9e6c551d6292eaf0b083dd37b6f07c8652eef14b1068b476b01b`.
+The app remains ordinary Dopamine with RootHide activation disabled; this
+artifact is **not a usable RootHide IPA**. Locally updated sources after
+`1068eea` are not yet covered by this macOS run.
 
 Static review corrected a first-run state bug: both bundled RootHide
 `prep_bootstrap.sh` scripts can delete themselves on success. Marker
@@ -134,7 +174,7 @@ malformed Mach-O payloads.
 
 ## Reproducible macOS diagnostic build
 
-The private experimental fork uses `.github/workflows/main.yml` on
+The experimental fork uses `.github/workflows/main.yml` on
 `macos-15`. RootHide uses Theos revision
 `cfba89a53a05b4a1b822121158acc3669c20602f`; stock Dopamine uses
 the separate pinned official Theos revision. The iPhoneOS 16.5 SDK from
@@ -163,17 +203,18 @@ If compilation and package inspection pass on a RootHide branch, Actions
 stores `RootHide3-COMPILE-ONLY-NOT-FOR-INSTALL` for seven days.
 This is **not** a verified jailbreak release and must not be installed.
 Its inspection checks the five pinned RootHide assets, IPA and BaseBin
-structure, Mach-O image signatures and required hooks; CI also verifies
+structure, structural ARM64 Mach-O headers and load-command ranges, and
+required hooks; CI also verifies
 arm64/arm64e slices via `lipo`. The standard `Dopamine` artifact is
 not published for RootHide branches. The strict publish gate additionally
 requires reviewed activation and genuine device evidence following
 `validation/README.md`; it intentionally fails until then.
 
-The Windows source-work machine has no Xcode/macOS compiler. A GitHub-hosted
-macOS runner has since executed the BaseBin build, but stopped at source
-errors before producing an IPA. Another passing macOS build and verifier
-run are required before any compile-only IPA can be inspected. No billing
-modification is performed by this project.
+The Windows source-work machine has no Xcode/macOS compiler. GitHub-hosted
+macOS now completes a compile-only IPA at `1068eea`; the archive was inspected
+independently after download and its SHA-256 matches GitHub. No billing
+modification was performed. This evidence must not be confused with
+signature authenticity, successful installation or RootHide functionality.
 
 ## Integration boundaries
 

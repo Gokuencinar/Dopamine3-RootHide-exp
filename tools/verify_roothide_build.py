@@ -14,6 +14,7 @@ import io
 import json
 from pathlib import Path
 import plistlib
+import struct
 import sys
 import tarfile
 import zipfile
@@ -59,18 +60,182 @@ REQUIRED_BASEBIN = (
     "basebin.tc",
 )
 
-MACHO_MAGICS = (
-    bytes.fromhex("cffaedfe"),  # little-endian Mach-O 64
-    bytes.fromhex("feedfacf"),  # big-endian Mach-O 64
-    bytes.fromhex("cafebabe"),  # fat header (including arm64/arm64e)
-    bytes.fromhex("bebafeca"),
-    bytes.fromhex("cafebabf"),  # fat64
-    bytes.fromhex("bfbafeca"),
-)
+ARM64_CPU_TYPE = 0x0100000C
+ARM64_SUBTYPES = {0, 1, 2}  # ARM64_ALL, ARM64_V8, ARM64E
+THIN_MAGICS = {
+    bytes.fromhex("cffaedfe"): "<",  # MH_CIGAM_64 (common iOS format)
+    bytes.fromhex("feedfacf"): ">",  # MH_MAGIC_64
+}
+FAT_MAGICS = {
+    bytes.fromhex("cafebabe"): (">", False),  # FAT_MAGIC
+    bytes.fromhex("bebafeca"): ("<", False),  # FAT_CIGAM
+    bytes.fromhex("cafebabf"): (">", True),   # FAT_MAGIC_64
+    bytes.fromhex("bfbafeca"): ("<", True),   # FAT_CIGAM_64
+}
+
+
+def _in_bounds(offset: int, size: int, length: int) -> bool:
+    return offset >= 0 and size >= 0 and offset <= length and size <= length - offset
+
+
+def _validate_thin_macho(content: bytes | memoryview) -> tuple[int, int]:
+    """Check the on-disk ARM64 Mach-O layout, not its signature or behavior."""
+    if len(content) < 32 or bytes(content[:4]) not in THIN_MAGICS:
+        raise ValueError("invalid 64-bit Mach-O header")
+    endian = THIN_MAGICS[bytes(content[:4])]
+    _, cpu, subtype, filetype, ncmds, sizeofcmds, _, _ = struct.unpack_from(
+        endian + "IiiIIIII", content
+    )
+    if cpu != ARM64_CPU_TYPE or (subtype & 0x00FFFFFF) not in ARM64_SUBTYPES:
+        raise ValueError("missing supported arm64/arm64e CPU type")
+    if filetype == 0 or not ncmds or not sizeofcmds or ncmds > sizeofcmds // 8:
+        raise ValueError("invalid Mach-O file type or load-command count")
+    command_end = 32 + sizeofcmds
+    if command_end > len(content):
+        raise ValueError("load commands extend beyond the Mach-O slice")
+
+    cursor = 32
+    has_segment = False
+    for _ in range(ncmds):
+        if cursor + 8 > command_end:
+            raise ValueError("truncated Mach-O load command")
+        cmd, cmdsize = struct.unpack_from(endian + "II", content, cursor)
+        if cmdsize < 8 or cmdsize % 8 or cmdsize > command_end - cursor:
+            raise ValueError("invalid Mach-O load-command size")
+
+        if cmd == 0x19:  # LC_SEGMENT_64
+            if cmdsize < 72:
+                raise ValueError("truncated LC_SEGMENT_64")
+            fileoff, filesize = struct.unpack_from(endian + "QQ", content, cursor + 40)
+            nsects = struct.unpack_from(endian + "I", content, cursor + 64)[0]
+            if nsects > (cmdsize - 72) // 80:
+                raise ValueError("LC_SEGMENT_64 sections exceed command size")
+            if not _in_bounds(fileoff, filesize, len(content)):
+                raise ValueError("LC_SEGMENT_64 file range exceeds slice")
+            for section in range(nsects):
+                section_start = cursor + 72 + section * 80
+                section_size = struct.unpack_from(endian + "Q", content, section_start + 40)[0]
+                section_offset = struct.unpack_from(endian + "I", content, section_start + 48)[0]
+                section_flags = struct.unpack_from(endian + "I", content, section_start + 64)[0]
+                # Zerofill sections occupy VM space but no bytes in the file.
+                if (section_flags & 0xFF) not in {1, 0xC, 0x12} and section_size:
+                    if not _in_bounds(section_offset, section_size, len(content)):
+                        raise ValueError("LC_SEGMENT_64 section data exceeds slice")
+            has_segment = True
+        elif cmd == 0x2:  # LC_SYMTAB: nlist_64 records and the string table
+            if cmdsize < 24:
+                raise ValueError("truncated LC_SYMTAB")
+            symoff, nsyms, stroff, strsize = struct.unpack_from(
+                endian + "IIII", content, cursor + 8
+            )
+            if not (_in_bounds(symoff, nsyms * 16, len(content)) and
+                    _in_bounds(stroff, strsize, len(content))):
+                raise ValueError("LC_SYMTAB data exceeds slice")
+        elif cmd == 0xB:  # LC_DYSYMTAB: six file-offset/count table pairs
+            if cmdsize < 80:
+                raise ValueError("truncated LC_DYSYMTAB")
+            for pair, record_size in enumerate((8, 56, 4, 4, 8, 8)):
+                offset, count = struct.unpack_from(endian + "II", content, cursor + 32 + pair * 8)
+                if not _in_bounds(offset, count * record_size, len(content)):
+                    raise ValueError("LC_DYSYMTAB data exceeds slice")
+        elif cmd in {0x22, 0x80000022}:  # LC_DYLD_INFO / LC_DYLD_INFO_ONLY
+            if cmdsize < 48:
+                raise ValueError("truncated LC_DYLD_INFO")
+            for pair in range(5):
+                offset, size = struct.unpack_from(endian + "II", content, cursor + 8 + pair * 8)
+                if not _in_bounds(offset, size, len(content)):
+                    raise ValueError("LC_DYLD_INFO data exceeds slice")
+        elif cmd in {0x1D, 0x1E, 0x26, 0x29, 0x2B, 0x2E, 0x80000033, 0x80000034}:
+            # LC_CODE_SIGNATURE and other linkedit_data_command variants.
+            if cmdsize < 16:
+                raise ValueError("truncated linkedit data command")
+            offset, size = struct.unpack_from(endian + "II", content, cursor + 8)
+            if not _in_bounds(offset, size, len(content)):
+                raise ValueError("linkedit data exceeds slice")
+        elif cmd == 0x80000028:  # LC_MAIN
+            if cmdsize < 24:
+                raise ValueError("truncated LC_MAIN")
+            entryoff = struct.unpack_from(endian + "Q", content, cursor + 8)[0]
+            if entryoff >= len(content):
+                raise ValueError("LC_MAIN entry offset exceeds slice")
+        elif cmd == 0x2C:  # LC_ENCRYPTION_INFO_64
+            if cmdsize < 24:
+                raise ValueError("truncated LC_ENCRYPTION_INFO_64")
+            offset, size = struct.unpack_from(endian + "II", content, cursor + 8)
+            if not _in_bounds(offset, size, len(content)):
+                raise ValueError("LC_ENCRYPTION_INFO_64 range exceeds slice")
+        elif cmd == 0x16:  # LC_TWOLEVEL_HINTS (4 bytes per hint)
+            if cmdsize < 16:
+                raise ValueError("truncated LC_TWOLEVEL_HINTS")
+            offset, count = struct.unpack_from(endian + "II", content, cursor + 8)
+            if not _in_bounds(offset, count * 4, len(content)):
+                raise ValueError("LC_TWOLEVEL_HINTS data exceeds slice")
+        elif cmd == 0x31:  # LC_NOTE
+            if cmdsize < 40:
+                raise ValueError("truncated LC_NOTE")
+            offset, size = struct.unpack_from(endian + "QQ", content, cursor + 24)
+            if not _in_bounds(offset, size, len(content)):
+                raise ValueError("LC_NOTE data exceeds slice")
+        cursor += cmdsize
+
+    if cursor != command_end or not has_segment:
+        raise ValueError("invalid load-command table or missing LC_SEGMENT_64")
+    return cpu, subtype & 0x00FFFFFF
+
+
+def validate_macho(content: bytes, *, required_arch: str | None = None) -> str | None:
+    """Return a structural error, or None for a well-formed ARM64 Mach-O.
+
+    This is deliberately not code-signature verification, entitlement checking,
+    device compatibility testing, or a guarantee of executable machine code.
+    """
+    try:
+        if len(content) < 4:
+            raise ValueError("truncated Mach-O magic")
+        magic = bytes(content[:4])
+        subtypes: set[int] = set()
+        if magic in THIN_MAGICS:
+            subtypes.add(_validate_thin_macho(content)[1])
+        elif magic in FAT_MAGICS:
+            if len(content) < 8:
+                raise ValueError("truncated fat Mach-O header")
+            endian, fat64 = FAT_MAGICS[magic]
+            count = struct.unpack_from(endian + "I", content, 4)[0]
+            entry_size = 32 if fat64 else 20
+            table_end = 8 + count * entry_size
+            if not count or table_end > len(content):
+                raise ValueError("invalid fat Mach-O architecture table")
+            ranges: list[tuple[int, int]] = []
+            for i in range(count):
+                entry = 8 + i * entry_size
+                cpu, subtype = struct.unpack_from(endian + "ii", content, entry)
+                if fat64:
+                    offset, size, align = struct.unpack_from(endian + "QQI", content, entry + 8)
+                else:
+                    offset, size, align = struct.unpack_from(endian + "III", content, entry + 8)
+                if (align > 31 or offset % (1 << align) or offset < table_end or
+                        not _in_bounds(offset, size, len(content)) or size < 32):
+                    raise ValueError("invalid fat Mach-O slice offset, size or alignment")
+                inner_cpu, inner_subtype = _validate_thin_macho(memoryview(content)[offset:offset + size])
+                if (cpu, subtype & 0x00FFFFFF) != (inner_cpu, inner_subtype):
+                    raise ValueError("fat Mach-O architecture disagrees with its slice")
+                subtypes.add(inner_subtype)
+                ranges.append((offset, offset + size))
+            ranges.sort()
+            if any(end > following_start for (_, end), (following_start, _) in zip(ranges, ranges[1:])):
+                raise ValueError("overlapping fat Mach-O slices")
+        else:
+            raise ValueError("unrecognized Mach-O magic")
+        if (required_arch == "arm64e" and 2 not in subtypes) or (
+                required_arch == "arm64" and not subtypes.intersection({0, 1})):
+            raise ValueError(f"Mach-O is missing the required {required_arch} architecture")
+    except (ValueError, struct.error) as exc:
+        return str(exc)
+    return None
 
 
 def is_macho(content: bytes) -> bool:
-    return len(content) >= 32 and content[:4] in MACHO_MAGICS
+    return validate_macho(content) is None
 
 
 def check_ipa(path: Path) -> tuple[list[str], dict]:
@@ -128,7 +293,12 @@ def check_basebin_bytes(content: bytes) -> list[str]:
                     errors.append(f"basebin.tar missing {name}")
                 elif name != "basebin.tc":
                     extracted = archive.extractfile(member)
-                    if not extracted or not is_macho(extracted.read(32)):
+                    required_arch = None
+                    if name.startswith("dyldhook_merge.arm64e."):
+                        required_arch = "arm64e"
+                    elif name.startswith("dyldhook_merge.arm64."):
+                        required_arch = "arm64"
+                    if not extracted or validate_macho(extracted.read(), required_arch=required_arch):
                         errors.append(f"basebin.tar contains invalid Mach-O: {name}")
             return errors
     except (tarfile.TarError, OSError) as exc:

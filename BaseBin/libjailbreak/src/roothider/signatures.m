@@ -138,9 +138,18 @@ typedef struct {
 	uint32_t* Subtypes;
 } preferredArchInfo;
 
-static void recurse_handler(NSString *loadPath, NSString *loaderPath, NSString *mainExecutablePath, NSString *workingDir, NSMutableArray* fileCaches, NSMutableArray* rpathStack, preferredArchInfo* preferredArch, cdhash_t **cdhashesOut, uint32_t *cdhashCountOut)
+#define RH3_MAX_TRUST_DEPENDENCIES 4096
+#define RH3_MAX_TRUST_DEPTH 64
+
+static void recurse_handler(NSString *loadPath, NSString *loaderPath, NSString *mainExecutablePath, NSString *workingDir, NSMutableArray* fileCaches, NSMutableArray* rpathStack, preferredArchInfo* preferredArch, cdhash_t **cdhashesOut, uint32_t *cdhashCountOut, unsigned depth, bool *failed)
 {
 @autoreleasepool {
+	if (*failed) return;
+	if (depth > RH3_MAX_TRUST_DEPTH) {
+		JBLogError("RootHide trust dependency recursion depth exceeded");
+		*failed = true;
+		return;
+	}
 
 	DEBUG_LOG("Recursing into loadPath: %s\n\tloader: %s\n\tmainExecutable: %s\nworkingDir: %s\n", loadPath.fileSystemRepresentation, loaderPath.fileSystemRepresentation, mainExecutablePath.fileSystemRepresentation, workingDir.fileSystemRepresentation);
 
@@ -153,9 +162,21 @@ static void recurse_handler(NSString *loadPath, NSString *loaderPath, NSString *
 		return false;
 	};
 	void (^cdhashesAdd)(cdhash_t) = ^(cdhash_t cdhash) {
-		(*cdhashCountOut)++;
-		(*cdhashesOut) = realloc((*cdhashesOut), (*cdhashCountOut) * sizeof(cdhash_t));
-		memcpy((*cdhashesOut)[(*cdhashCountOut)-1], cdhash, sizeof(cdhash_t));
+		if (*cdhashCountOut >= RH3_MAX_TRUST_DEPENDENCIES) {
+			JBLogError("RootHide trust cdhash limit exceeded");
+			*failed = true;
+			return;
+		}
+		uint32_t newCount = *cdhashCountOut + 1;
+		cdhash_t *resized = realloc(*cdhashesOut, (size_t)newCount * sizeof(cdhash_t));
+		if (!resized) {
+			JBLogError("Out of memory expanding RootHide trust cdhashes");
+			*failed = true;
+			return;
+		}
+		memcpy(resized[newCount - 1], cdhash, sizeof(cdhash_t));
+		*cdhashesOut = resized;
+		*cdhashCountOut = newCount;
 	};
 
 
@@ -209,6 +230,11 @@ static void recurse_handler(NSString *loadPath, NSString *loaderPath, NSString *
 	if([fileCaches containsObject:realLoadPath]) {
 		DEBUG_LOG("Skipping already parsed file: %s", realLoadPath.fileSystemRepresentation);
 		return; // Already parsed
+	}
+	if (fileCaches.count >= RH3_MAX_TRUST_DEPENDENCIES) {
+		JBLogError("RootHide trust dependency file limit exceeded");
+		*failed = true;
+		return;
 	}
 	//add realLoadPath to fileCaches
 	[fileCaches addObject:realLoadPath];
@@ -282,11 +308,16 @@ static void recurse_handler(NSString *loadPath, NSString *loaderPath, NSString *
 
 	// Recurse this block on all dependencies
 	macho_enumerate_dependencies(macho, ^(const char *pathCStr, uint32_t cmd, struct dylib* dylib, bool *stop) {
+		if (*failed) {
+			*stop = true;
+			return;
+		}
 
 		NSMutableArray* nextChain = rpathStack.mutableCopy;
 		[nextChain addObject:realLoadPath]; //Loading dependencies, add current macho itself to the rpath stack
 
-		recurse_handler(@(pathCStr), realLoadPath, mainExecutablePath, workingDir, fileCaches, nextChain, preferredArch, cdhashesOut, cdhashCountOut);
+		recurse_handler(@(pathCStr), realLoadPath, mainExecutablePath, workingDir, fileCaches, nextChain, preferredArch, cdhashesOut, cdhashCountOut, depth + 1, failed);
+		if (*failed) *stop = true;
 	});
 
 	fat_free(fat);
@@ -294,8 +325,10 @@ static void recurse_handler(NSString *loadPath, NSString *loaderPath, NSString *
 } //autoreleasepool
 }
 
-void recurse_collect_untrusted_cdhashes(const char *path, const char *callerImagePath, const char *callerExecutablePath, const char *workingDir, preferredArchInfo* preferredArch, cdhash_t **cdhashesOut, uint32_t *cdhashCountOut)
+int recurse_collect_untrusted_cdhashes(const char *path, const char *callerImagePath, const char *callerExecutablePath, const char *workingDir, preferredArchInfo* preferredArch, cdhash_t **cdhashesOut, uint32_t *cdhashCountOut)
 {
+	if (!path || !*path || !preferredArch || !cdhashesOut || !cdhashCountOut) return -1;
+	bool failed = false;
 	if(!callerExecutablePath) {
 		callerExecutablePath = path;
 	}
@@ -314,8 +347,9 @@ void recurse_collect_untrusted_cdhashes(const char *path, const char *callerImag
 
 	NSMutableArray* fileCaches = [NSMutableArray array];
 
-	recurse_handler(@(path), @(callerImagePath), @(callerExecutablePath), workingDir ? @(workingDir) : nil, fileCaches, rpathStack, preferredArch, cdhashesOut, cdhashCountOut);
+	recurse_handler(@(path), @(callerImagePath), @(callerExecutablePath), workingDir ? @(workingDir) : nil, fileCaches, rpathStack, preferredArch, cdhashesOut, cdhashCountOut, 0, &failed);
 
 	DEBUG_LOG("fileCaches: %s", path, fileCaches.description.UTF8String);
 	DEBUG_LOG("Finished collecting cdhashes for path: %s, found %u cdhashes, processed %d files", path, *cdhashCountOut, fileCaches.count);
+	return failed ? -1 : 0;
 }

@@ -28,16 +28,20 @@ typedef NS_ENUM(NSInteger, BootstrapErrorCode) {
 }
 
 - (void)prepareBootstrapWithCompletion:(void (^)(NSError *))completion;
-// Build-time opt-in. RootHide's bootstrap is isolated from Dopamine's /var/jb bootstrap.
-+ (BOOL)rootHidePortEnabled;
-+ (nullable NSString *)rootHideExistingRootWithError:(NSError * _Nullable * _Nullable)error;
-+ (uint64_t)rootHideBrandForPath:(NSString *)path;
 - (NSError *)updateVarJbSymlink;
 - (NSError *)ensurePrivatePrebootIsWritable;
 - (NSError *)installPackageManagers;
 - (NSError *)finalizeBootstrap;
 - (NSError *)deleteBootstrap;
 
+@end
+
+// Match the separate RootHidePort implementation category in DOBootstrapper.m.
+// Build-time opt-in; the hidden bootstrap never shares stock /var/jb state.
+@interface DOBootstrapper (RootHidePort)
++ (BOOL)rootHidePortEnabled;
++ (nullable NSString *)rootHideExistingRootWithError:(NSError * _Nullable * _Nullable)error;
++ (uint64_t)rootHideBrandForPath:(NSString *)path;
 @end
 
 NS_ASSUME_NONNULL_END

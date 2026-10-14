@@ -30,7 +30,7 @@ typedef struct {
 	uint32_t* Types;
 	uint32_t* Subtypes;
 } preferredArchInfo;
-void recurse_collect_untrusted_cdhashes(const char *path, const char *callerImagePath, const char *callerExecutablePath, const char *workingDir, preferredArchInfo* preferredArch, cdhash_t **cdhashesOut, uint32_t *cdhashCountOut);
+int recurse_collect_untrusted_cdhashes(const char *path, const char *callerImagePath, const char *callerExecutablePath, const char *workingDir, preferredArchInfo* preferredArch, cdhash_t **cdhashesOut, uint32_t *cdhashCountOut);
 
 static int trust_macho_recurse(const char *machoPath, const char *dlopenCallerImagePath, const char *dlopenCallerExecutablePath, const char *workingDir, xpc_object_t preferredArchsArray)
 {
@@ -56,7 +56,10 @@ static int trust_macho_recurse(const char *machoPath, const char *dlopenCallerIm
 
 	cdhash_t *cdhashes = NULL;
 	uint32_t cdhashesCount = 0;
-	recurse_collect_untrusted_cdhashes(machoPath, dlopenCallerImagePath, dlopenCallerExecutablePath, workingDir, &preferredArch, &cdhashes, &cdhashesCount);
+	if (recurse_collect_untrusted_cdhashes(machoPath, dlopenCallerImagePath, dlopenCallerExecutablePath, workingDir, &preferredArch, &cdhashes, &cdhashesCount) != 0) {
+		free(cdhashes);
+		return -1;
+	}
 	int result = 0;
 	if (cdhashes && cdhashesCount > 0)
 		result = jb_trustcache_add_cdhashes(cdhashes, cdhashesCount);

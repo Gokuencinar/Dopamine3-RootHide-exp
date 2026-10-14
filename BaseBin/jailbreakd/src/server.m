@@ -1,5 +1,6 @@
 #include <Foundation/Foundation.h>
 #include <bsm/libbsm.h>
+#include <errno.h>
 #include <libproc.h>
 
 #include <libjailbreak/libjailbreak.h>
@@ -164,7 +165,8 @@ void jailbreakd_received_message(mach_port_t port)
 					JBLogFunction(logFilePath, clientPid, tid, progname ? progname : "(null)", "%s", log);
 					xpc_dictionary_set_int64(reply, "result", 0);
 #else
-					abort();
+						// Unsupported logging requests must not terminate jailbreakd.
+						xpc_dictionary_set_int64(reply, "result", -ENOTSUP);
 #endif
 					break;
 				}
