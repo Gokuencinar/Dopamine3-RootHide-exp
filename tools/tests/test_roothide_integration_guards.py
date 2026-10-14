@@ -43,7 +43,7 @@ class RootHideGuardTests(unittest.TestCase):
 
     def test_blacklisted_spawn_tracks_child_pid(self) -> None:
         source = self.source("BaseBin/launchdhook/src/spawn_hook.c")
-        self.assertIn("roothide_is_active() && isBlacklistedPath(path)", source)
+        self.assertIn("isBlacklistedPath(path) || roothide_blacklisted_uikit_proxy(path, argv)", source)
         self.assertIn("allocBlacklistProcessId()", source)
         self.assertIn("commitBlacklistProcessId(trackedPid)", source)
 

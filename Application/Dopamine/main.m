@@ -18,18 +18,29 @@
 #ifndef RH3_FULL_APP_EXPERIMENTAL
 #define RH3_FULL_APP_EXPERIMENTAL 0
 #endif
+#ifndef ROOTHIDE3_BOOTSTRAP_READY
+#define ROOTHIDE3_BOOTSTRAP_READY 0
+#endif
 
 #if RH3_FULL_APP_EXPERIMENTAL
 // Included in the complete Dopamine executable to distinguish the guarded
 // RootHide experiment from the harmless UIKit-only diagnostic and stock app.
 __attribute__((used)) static const char RH3FullExperimentMarker[] =
     "RH3_FULL_APP_EXPERIMENTAL_GUARDED_V1";
+#if ROOTHIDE3_BOOTSTRAP_READY
+__attribute__((used)) static const char RH3ActivationMarker[] =
+    "RH3_HARDWARE_BETA_ACTIVATED_V1";
+#else
+__attribute__((used)) static const char RH3ActivationMarker[] =
+    "RH3_JAILBREAK_DISABLED_V1";
+#endif
 #endif
 
 int main(int argc, char * argv[]) {
 #if RH3_FULL_APP_EXPERIMENTAL
     // A live use also keeps the build marker in the final linked Mach-O.
     NSLog(@"RootHide 3 guarded full experiment: %s", RH3FullExperimentMarker);
+    NSLog(@"RootHide 3 bootstrap setting: %s", RH3ActivationMarker);
 #endif
 #if !RH3_INSTALLABLE_DIAGNOSTIC && !RH3_FULL_APP_EXPERIMENTAL
     if (argc >= 3) {

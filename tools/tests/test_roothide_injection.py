@@ -172,7 +172,7 @@ class RootHideInjectionTests(unittest.TestCase):
 
     def test_existing_blacklist_and_gate_remain_intact(self) -> None:
         launchd = source("BaseBin/launchdhook/src/spawn_hook.c")
-        self.assertIn("roothide_is_active() && isBlacklistedPath(path)", launchd)
+        self.assertIn("isBlacklistedPath(path) || roothide_blacklisted_uikit_proxy(path, argv)", launchd)
         self.assertIn('strncmp(envp[i], "DYLD_INSERT_LIBRARIES=", 22)', launchd)
         self.assertIn("roothide_spawn_uninjected(trackedPid, path, desc, argv, envp)", launchd)
         self.assertIn("posix_spawn_hook_shared(pid, path, desc, argv, envp", launchd)

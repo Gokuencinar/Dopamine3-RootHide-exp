@@ -13,6 +13,71 @@
 #include "common.h"
 #include "log.h"
 
+extern NSMutableSet<NSString *> *StoredAppIdentifiers;
+
+static void addStoredBundleIdentifier(NSMutableSet<NSString *> *identifiers, NSString *bundlePath)
+{
+	NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:[bundlePath stringByAppendingPathComponent:@"Info.plist"]];
+	NSString *identifier = info[@"CFBundleIdentifier"];
+	if ([identifier isKindOfClass:[NSString class]] && identifier.length > 0) {
+		[identifiers addObject:identifier];
+	}
+}
+
+// common.m's donor loader aborts if the applications directory cannot be
+// enumerated. launchd must be able to skip these optional filters safely.
+bool roothide_prepare_xpc_filters(void)
+{
+	if (!roothide_is_active()) return false;
+
+	@autoreleasepool {
+		NSFileManager *fm = [NSFileManager defaultManager];
+		NSString *applications = @"/private/var/containers/Bundle/Application";
+		NSError *error = nil;
+		NSArray<NSString *> *containers = [fm contentsOfDirectoryAtPath:applications error:&error];
+		if (!containers) {
+			JBLogError("RootHide XPC app identifier initialization failed: %s", error.description.UTF8String);
+			return false;
+		}
+
+		NSMutableSet<NSString *> *identifiers = [NSMutableSet new];
+		for (NSString *container in containers) {
+			NSString *containerPath = [applications stringByAppendingPathComponent:container];
+			NSDictionary *metadata = [NSDictionary dictionaryWithContentsOfFile:
+				[containerPath stringByAppendingPathComponent:@".com.apple.mobile_container_manager.metadata.plist"]];
+			if (![metadata[@"MCMMetadataIdentifier"] isKindOfClass:[NSString class]]) continue;
+			if ([fm fileExistsAtPath:[containerPath stringByAppendingPathComponent:@"_TrollStore"]] ||
+			    [fm fileExistsAtPath:[containerPath stringByAppendingPathComponent:@"_TrollStoreLite"]] ||
+			    ![fm fileExistsAtPath:[containerPath stringByAppendingPathComponent:@"iTunesMetadata.plist"]]) continue;
+
+			for (NSString *entry in [fm contentsOfDirectoryAtPath:containerPath error:nil]) {
+				if (![entry hasSuffix:@".app"]) continue;
+				NSString *appPath = [containerPath stringByAppendingPathComponent:entry];
+				NSDictionary *appInfo = [NSDictionary dictionaryWithContentsOfFile:[appPath stringByAppendingPathComponent:@"Info.plist"]];
+				if (![appInfo[@"CFBundleIdentifier"] isKindOfClass:[NSString class]]) continue;
+				addStoredBundleIdentifier(identifiers, appPath);
+				for (NSString *folder in @[@"PlugIns", @"Extensions"]) {
+					NSString *folderPath = [appPath stringByAppendingPathComponent:folder];
+					for (NSString *plugIn in [fm contentsOfDirectoryAtPath:folderPath error:nil]) {
+						addStoredBundleIdentifier(identifiers, [folderPath stringByAppendingPathComponent:plugIn]);
+					}
+				}
+			}
+		}
+		// Publish only a complete snapshot before the response hooks are installed.
+		StoredAppIdentifiers = identifiers;
+		return true;
+	}
+}
+
+bool roothide_filter_xpc_message(xpc_object_t xmsg)
+{
+	if (!roothide_is_active() || !xmsg || xpc_get_type(xmsg) != XPC_TYPE_DICTIONARY) return false;
+	@autoreleasepool {
+		return roothide_handle_xpc_msg(xmsg);
+	}
+}
+
 NSDictionary* cachedJobInfo(pid_t pid, bool blacklised)
 {
 	static NSMutableDictionary* cachedData = nil;
@@ -57,23 +122,28 @@ NSDictionary* cachedJobInfo(pid_t pid, bool blacklised)
 static bool check_path_in_jbroot(const char* real_path)
 {
 	static char real_jbroot[PATH_MAX]={0};
+	static bool resolved_jbroot = false;
 
 	static dispatch_once_t onceToken;
     dispatch_once(&onceToken,^{
-		assert(realpath(JBROOT_PATH("/"), real_jbroot) != NULL);
+		resolved_jbroot = (realpath(JBROOT_PATH("/"), real_jbroot) != NULL);
 	});
 
+	// An unavailable hidden root must not crash launchd or expose an unknown
+	// process path to a blacklisted client.
+	if (!resolved_jbroot || !real_path) return true;
 	if(!string_has_prefix(real_path, real_jbroot))
 		return false;
 
-	return real_path[strlen(real_jbroot)] == '/';
+	return real_path[strlen(real_jbroot)] == '/' || real_path[strlen(real_jbroot)] == '\0';
 }
 
 xpc_object_t (*orig_xpc_dictionary_create_reply)(xpc_object_t original);
 xpc_object_t new_xpc_dictionary_create_reply(xpc_object_t original)
 {
+	if (!orig_xpc_dictionary_create_reply) return NULL;
 	xpc_object_t reply = orig_xpc_dictionary_create_reply(original);
-	if (reply) // only return success if original is a XPC_TYPE_DICTIONARY
+	if (reply && original && xpc_get_type(original) == XPC_TYPE_DICTIONARY)
 	{
 		audit_token_t clientToken = {0};
 		xpc_dictionary_get_audit_token(original, &clientToken);
@@ -90,11 +160,14 @@ xpc_object_t new_xpc_dictionary_create_reply(xpc_object_t original)
 int (*orig_xpc_pipe_routine_reply)(xpc_object_t reply);
 int new_xpc_pipe_routine_reply(xpc_object_t reply)
 {
-	if (xpc_get_type(reply) == XPC_TYPE_DICTIONARY)
+	if (!orig_xpc_pipe_routine_reply) return ENOSYS;
+	if (reply && xpc_get_type(reply) == XPC_TYPE_DICTIONARY)
 	{
 		xpc_object_t original = xpc_dictionary_get_value(reply, "roothide-blacklisted-process-request");
 		if (original)
 		{
+			// The reply may hold the last reference to the original request.
+			xpc_retain(original);
 			xpc_dictionary_set_value(reply, "roothide-blacklisted-process-request", NULL);
 
 			audit_token_t clientToken = {0};
@@ -167,6 +240,7 @@ int new_xpc_pipe_routine_reply(xpc_object_t reply)
 					xpc_dictionary_set_int64(reply, "error", 3);
 				}
 			}
+			xpc_release(original);
 		}
 	}
 
@@ -233,6 +307,7 @@ void check_usreboot_msg(xpc_object_t xmsg)
 
 bool roothide_handle_xpc_msg(xpc_object_t xmsg)
 {
+	if (!roothide_is_active() || !xmsg || xpc_get_type(xmsg) != XPC_TYPE_DICTIONARY) return false;
 	audit_token_t clientToken = {0};
 	xpc_dictionary_get_audit_token(xmsg, &clientToken);
 
@@ -296,16 +371,15 @@ bool roothide_handle_xpc_msg(xpc_object_t xmsg)
 				xpc_dictionary_set_int64(xmsg, "pid", INT_MAX);
 			}
 		}
-		else if (subsystem == 3 && routine == 829) //don't touch
-		{
-			//...
-		}
-		else //don't touch
-		{
-			if(is_safe_bundle_identifier("com.roothide.manager")) {
-				launchd_panic("consistency corruption");
+			else if (subsystem == 3 && routine == 829) //don't touch
+			{
+				//...
 			}
-		}
+			else //don't touch
+			{
+				// Unknown launchd routines are passed through unchanged.
+				return false;
+			}
 
 		return true;
 	}

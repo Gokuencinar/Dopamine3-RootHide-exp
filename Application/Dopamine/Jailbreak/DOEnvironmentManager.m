@@ -21,6 +21,7 @@
 #import <libjailbreak/display.h>
 #import <libjailbreak/machine_info.h>
 #import <libjailbreak/carboncopy.h>
+#import <libjailbreak/roothider/common.h>
 
 #import <IOKit/IOKitLib.h>
 #import "DOUIManager.h"
@@ -323,6 +324,11 @@ extern char **environ;
 
 - (BOOL)isJailbrokenWithOtherJailbreak
 {
+    if ([DOBootstrapper rootHidePortEnabled]) {
+        // Do not classify TrollStore's platform-signed host app itself as
+        // a jailbreak. Inspect active jailbreak state instead.
+        return otherJailbreakActived(false);
+    }
     if (![self isJailbroken]) {
         uint32_t csFlags = 0;
         csops(getpid(), CS_OPS_STATUS, &csFlags, sizeof(csFlags));

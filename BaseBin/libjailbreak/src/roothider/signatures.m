@@ -1,6 +1,8 @@
 #include <choma/Fat.h>
 #include <choma/MachO.h>
 #include <choma/Host.h>
+#include <choma/CodeDirectory.h>
+#include <choma/MachOByteOrder.h>
 #include <mach-o/dyld.h>
 #include "../trustcache.h"
 #include "../roothider.h"
@@ -45,6 +47,67 @@ MachO* fat_find_preferred_slice(Fat *fat)
 }
 
 extern bool csd_superblob_is_adhoc_signed(CS_DecodedSuperBlob *superblob);
+
+// ChOma's csd_superblob_decode() trusts the index table and each embedded
+// blob's length. Check all of those untrusted offsets against the actual
+// LC_CODE_SIGNATURE allocation before passing it to the decoder. A detached
+// or CMS-signed SuperBlob still needs a usable CodeDirectory; the absence of
+// one must never be confused with a valid non-ad-hoc signature.
+static bool rh3_signature_blob_is_well_formed(const CS_SuperBlob *superblob, uint32_t availableSize)
+{
+	if (!superblob || availableSize < sizeof(CS_SuperBlob)) return false;
+	uint32_t magic = BIG_TO_HOST(superblob->magic);
+	uint32_t length = BIG_TO_HOST(superblob->length);
+	uint32_t count = BIG_TO_HOST(superblob->count);
+	if ((magic != CSMAGIC_EMBEDDED_SIGNATURE && magic != CSMAGIC_DETACHED_SIGNATURE) ||
+	    length < sizeof(CS_SuperBlob) || length > availableSize ||
+	    count > (length - sizeof(CS_SuperBlob)) / sizeof(CS_BlobIndex)) return false;
+
+	uint32_t indexEnd = sizeof(CS_SuperBlob) + count * sizeof(CS_BlobIndex);
+	bool hasUsableCodeDirectory = false;
+	for (uint32_t i = 0; i < count; i++) {
+		uint32_t type = BIG_TO_HOST(superblob->index[i].type);
+		uint32_t offset = BIG_TO_HOST(superblob->index[i].offset);
+		if (offset < indexEnd || offset > length || length - offset < sizeof(CS_GenericBlob))
+			return false;
+
+		const uint8_t *bytes = (const uint8_t *)superblob + offset;
+		CS_GenericBlob header;
+		memcpy(&header, bytes, sizeof(header));
+		uint32_t blobMagic = BIG_TO_HOST(header.magic);
+		uint32_t blobSize = BIG_TO_HOST(header.length);
+		if (blobSize < sizeof(CS_GenericBlob) || blobSize > length - offset) return false;
+
+		if (type == CSSLOT_CODEDIRECTORY ||
+		    (type >= CSSLOT_ALTERNATE_CODEDIRECTORIES && type < CSSLOT_ALTERNATE_CODEDIRECTORY_LIMIT)) {
+			// Avoid ChOma hashing a truncated or non-CodeDirectory blob.
+			if (blobMagic != CSMAGIC_CODEDIRECTORY ||
+			    blobSize < offsetof(CS_CodeDirectory, spare2) + sizeof(uint32_t)) return false;
+			const CS_CodeDirectory *cd = (const CS_CodeDirectory *)bytes;
+			uint8_t hashType = cd->hashType;
+			uint8_t hashSize = cd->hashSize;
+			bool supportedHash = (hashType == CS_HASHTYPE_SHA160_160 && hashSize == 20) ||
+			                     (hashType == CS_HASHTYPE_SHA256_160 && hashSize == 20) ||
+			                     (hashType == CS_HASHTYPE_SHA256_256 && hashSize == 32) ||
+			                     (hashType == CS_HASHTYPE_SHA384_384 && hashSize == 48);
+			uint32_t hashOffset = BIG_TO_HOST(cd->hashOffset);
+			uint32_t identOffset = BIG_TO_HOST(cd->identOffset);
+			uint32_t codeSlots = BIG_TO_HOST(cd->nCodeSlots);
+			uint32_t specialSlots = BIG_TO_HOST(cd->nSpecialSlots);
+			if (hashOffset > blobSize ||
+			    identOffset < offsetof(CS_CodeDirectory, spare2) + sizeof(uint32_t) ||
+			    identOffset >= hashOffset ||
+			    !memchr(bytes + identOffset, '\0', hashOffset - identOffset) ||
+			    (uint64_t)codeSlots * hashSize > blobSize - hashOffset ||
+			    (uint64_t)specialSlots * hashSize > hashOffset) return false;
+			if (supportedHash) hasUsableCodeDirectory = true;
+		} else if (type == CSSLOT_SIGNATURESLOT && blobMagic != CSMAGIC_BLOBWRAPPER) {
+			// Do not treat an arbitrary malformed CMS slot as a signed binary.
+			return false;
+		}
+	}
+	return hasUsableCodeDirectory;
+}
 
 NSString* resolveLoaderExecutablePaths(NSString *loadPath, NSString *loaderPath, NSString *mainExecutablePath)
 {
@@ -272,20 +335,41 @@ static void recurse_handler(NSString *loadPath, NSString *loaderPath, NSString *
 		}
 	}
 
-	// Calculate cdhash and add it to our array
-	bool cdhashWasKnown = true;
-	bool isAdhocSigned = false;
-		CS_SuperBlob *superblob = macho_read_code_signature(macho);
-		if (superblob) {
-		CS_DecodedSuperBlob *decodedSuperblob = csd_superblob_decode(superblob);
-		if (decodedSuperblob) {
-			if (csd_superblob_is_adhoc_signed(decodedSuperblob)) {
-				isAdhocSigned = true;
-				cdhash_t cdhash = {0};
-					if (csd_superblob_calculate_best_cdhash(decodedSuperblob, cdhash, NULL) == 0) {
-						if (!cdhashesContains(cdhash)) {
-							if (!is_cdhash_trustcached(cdhash)) {
-								// Even a previously trusted binary must have its dependencies examined.
+		// A signed Mach-O must contain a readable SuperBlob and CodeDirectory.
+		// ChOma does not bounds-check the SuperBlob index/child lengths itself.
+		bool isAdhocSigned = false;
+		uint32_t signatureOffset = 0, signatureSize = 0;
+		if (macho_find_code_signature_bounds(macho, &signatureOffset, &signatureSize) != 0 ||
+		    signatureSize < sizeof(CS_SuperBlob) ||
+		    signatureOffset > macho->archDescriptor.size ||
+		    signatureSize > macho->archDescriptor.size - signatureOffset) {
+			JBLogError("Missing or invalid code signature bounds for %s", realLoadPath.fileSystemRepresentation);
+			*failed = true;
+		} else {
+			CS_SuperBlob *superblob = macho_read_code_signature(macho);
+			if (!superblob) {
+				JBLogError("Missing or unreadable code signature for %s", realLoadPath.fileSystemRepresentation);
+				*failed = true;
+			} else {
+				if (!rh3_signature_blob_is_well_formed(superblob, signatureSize)) {
+					JBLogError("Malformed or missing CodeDirectory for %s", realLoadPath.fileSystemRepresentation);
+					*failed = true;
+				} else {
+					CS_DecodedSuperBlob *decodedSuperblob = csd_superblob_decode(superblob);
+					if (!decodedSuperblob) {
+						JBLogError("Failed to decode code signature for %s", realLoadPath.fileSystemRepresentation);
+						*failed = true;
+					} else {
+						cdhash_t cdhash = {0};
+						// Check the CodeDirectory for BOTH CMS and ad-hoc signatures.
+						// A syntactically present CMS is not a cryptographic verification.
+						if (csd_superblob_calculate_best_cdhash(decodedSuperblob, cdhash, NULL) != 0) {
+							JBLogError("Failed to calculate CDHash for %s", realLoadPath.fileSystemRepresentation);
+							*failed = true;
+						} else {
+							isAdhocSigned = csd_superblob_is_adhoc_signed(decodedSuperblob);
+							if (isAdhocSigned && !cdhashesContains(cdhash) &&
+							    !is_cdhash_trustcached(cdhash)) {
 								int ret = ensure_randomized_cdhash_for_slice(realLoadPath.fileSystemRepresentation, macho->archDescriptor.offset, cdhash);
 								if (ret == 0) {
 									cdhashesAdd(cdhash);
@@ -294,32 +378,22 @@ static void recurse_handler(NSString *loadPath, NSString *loaderPath, NSString *
 									*failed = true;
 								}
 							}
-							cdhashWasKnown = false;
 						}
-					} else {
-						JBLogError("Failed to calculate ad-hoc CDHash for %s", realLoadPath.fileSystemRepresentation);
-						*failed = true;
+						csd_superblob_free(decodedSuperblob);
 					}
 				}
-				csd_superblob_free(decodedSuperblob);
-			} else {
-				JBLogError("Failed to decode code signature for %s", realLoadPath.fileSystemRepresentation);
-				*failed = true;
+				free(superblob);
 			}
-			free(superblob);
-		} else {
-			// A mandatory Mach-O without a readable signature must not be
-			// misclassified as a valid non-ad-hoc binary. In particular,
-			// cdhashWasKnown=true would otherwise skip dependency inspection.
-			JBLogError("Missing or unreadable code signature for %s", realLoadPath.fileSystemRepresentation);
-			*failed = true;
 		}
 
-	if (cdhashWasKnown || // If we already knew the cdhash, we can skip parsing dependencies
-		!isAdhocSigned) { // If it was not ad hoc signed, we can safely skip it aswell
-		fat_free(fat);
-		return;
-	}
+		// If trust collection failed, never classify this Mach-O as exempt just
+		// because it was not ad-hoc signed (or was already in the trust cache).
+		if (*failed || !isAdhocSigned) {
+			fat_free(fat);
+			return;
+		}
+		// Always inspect dependencies for an ad-hoc Mach-O, even if its CDHash
+		// was already queued or trusted: dependencies may have changed since.
 
 	// Recurse this block on all dependencies
 	macho_enumerate_dependencies(macho, ^(const char *pathCStr, uint32_t cmd, struct dylib* dylib, bool *stop) {

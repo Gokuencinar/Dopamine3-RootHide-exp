@@ -20,10 +20,14 @@ except ImportError:
 
 EXPERIMENTAL_BUNDLE_ID = "com.gokuencinar.roothide3.fulltest"
 EXPERIMENTAL_DISPLAY_NAME = "RootHide 3 Experimental"
+HARDWARE_BETA_BUNDLE_ID = "com.gokuencinar.roothide3.hardwarebeta"
+HARDWARE_BETA_DISPLAY_NAME = "RootHide 3 Hardware Beta"
 GUARD_MARKER = b"RH3_FULL_APP_EXPERIMENTAL_GUARDED_V1"
+DISABLED_MARKER = b"RH3_JAILBREAK_DISABLED_V1"
+ACTIVE_MARKER = b"RH3_HARDWARE_BETA_ACTIVATED_V1"
 
 
-def check_full_identity(archive):
+def check_full_identity(archive, *, hardware_beta=False):
     """Identity, separation and defensive ZIP validation (portable fixture)."""
     errors = []
     contents = archive.infolist()
@@ -50,24 +54,32 @@ def check_full_identity(archive):
         "display_name": info.get("CFBundleDisplayName"),
         "executable_sha256": hashlib.sha256(archive.read(binary_path)).hexdigest(),
     }
-    if details["bundle_id"] != EXPERIMENTAL_BUNDLE_ID:
+    expected_id = HARDWARE_BETA_BUNDLE_ID if hardware_beta else EXPERIMENTAL_BUNDLE_ID
+    expected_display = HARDWARE_BETA_DISPLAY_NAME if hardware_beta else EXPERIMENTAL_DISPLAY_NAME
+    if details["bundle_id"] != expected_id:
         errors.append("Full experiment has incorrect or stock bundle identifier")
-    if details["display_name"] != EXPERIMENTAL_DISPLAY_NAME:
+    if details["display_name"] != expected_display:
         errors.append("Full experiment has incorrect display name")
     if info.get("CFBundleExecutable") != "Dopamine":
         errors.append("Full experiment has unexpected executable")
     if GUARD_MARKER not in archive.read(binary_path):
         errors.append("Full experiment lacks its compile-time safety marker")
+    expected_marker = ACTIVE_MARKER if hardware_beta else DISABLED_MARKER
+    forbidden_marker = DISABLED_MARKER if hardware_beta else ACTIVE_MARKER
+    if expected_marker not in archive.read(binary_path):
+        errors.append("Full experiment does not match expected bootstrap activation marker")
+    if forbidden_marker in archive.read(binary_path):
+        errors.append("Full experiment contains contradictory bootstrap activation markers")
     return errors, details
 
 
-def inspect_ipa(path):
+def inspect_ipa(path, *, hardware_beta=False):
     errors, details = check_ipa(path)
     if not path.is_file():
         return errors, details
     try:
         with zipfile.ZipFile(path) as archive:
-            identity_errors, identity_details = check_full_identity(archive)
+            identity_errors, identity_details = check_full_identity(archive, hardware_beta=hardware_beta)
             errors.extend(identity_errors)
             details.update(identity_details)
     except (OSError, ValueError, zipfile.BadZipFile, plistlib.InvalidFileException) as exc:
@@ -82,16 +94,20 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--ipa", type=Path, default=Path("Application/RootHide3-Full-Experimental.ipa"))
     parser.add_argument("--json", action="store_true")
+    parser.add_argument("--hardware-beta", action="store_true",
+                        help="Explicitly verify a manually activated, untested hardware beta")
     args = parser.parse_args()
-    errors, details = inspect_ipa(args.ipa)
+    errors, details = inspect_ipa(args.ipa, hardware_beta=args.hardware_beta)
     report = {
         "status": "PASS" if not errors else "FAIL",
-        "classification": "FULL DOPAMINE PORT / ROOT HIDE JAILBREAK DISABLED",
+        "classification": ("UNTESTED HARDWARE BETA / DANGEROUS JAILBREAK ENABLED"
+                           if args.hardware_beta else
+                           "FULL DOPAMINE PORT / ROOT HIDE JAILBREAK DISABLED"),
         "details": details,
         "errors": errors,
         "apple_provisioning_verified": False,
         "device_bootstrap_verified": False,
-        "roothide_runtime_enabled": False,
+        "roothide_runtime_enabled": args.hardware_beta,
     }
     if args.json:
         print(json.dumps(report, indent=2))

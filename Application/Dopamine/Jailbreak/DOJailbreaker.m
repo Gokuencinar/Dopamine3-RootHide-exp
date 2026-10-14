@@ -413,6 +413,63 @@ static void *rh3_boomerang_server(void *opaque)
                            userInfo:@{NSLocalizedDescriptionKey: reason}];
 }
 
+// exec_cmd() waits without a deadline. A hung opainject would block the
+// jailbreak before its boomerang timeout even starts. Only the RootHide
+// launchd path uses this bounded helper; stock Dopamine is unchanged.
+- (NSError *)rh3InjectLaunchdWithTimeout
+{
+    pid_t child = 0;
+    int started = exec_cmd_nowait(&child, JBROOT_PATH("/basebin/opainject"),
+                                 "1", JBROOT_PATH("/basebin/launchdhook.dylib"), NULL);
+    if (started != 0 || child <= 1) {
+        return [self rh3LaunchdInjectionError:
+            [NSString stringWithFormat:@"RootHide opainject failed to start (%d)", started]];
+    }
+
+    // Waiting on an observable child is preferable to blocking in exec_cmd.
+    // A timeout does NOT assert the launchd side effects were rolled back.
+    const CFAbsoluteTime deadline = CFAbsoluteTimeGetCurrent() + 45.0;
+    int status = 0;
+    while (CFAbsoluteTimeGetCurrent() < deadline) {
+        pid_t waited = waitpid(child, &status, WNOHANG);
+        if (waited == child) {
+            if (WIFEXITED(status) && WEXITSTATUS(status) == 0) return nil;
+            return [self rh3LaunchdInjectionError:
+                [NSString stringWithFormat:@"RootHide opainject exited unsuccessfully (status %d)", status]];
+        }
+        if (waited == -1 && errno != EINTR) {
+            return [self rh3LaunchdInjectionError:
+                [NSString stringWithFormat:@"Cannot wait for RootHide opainject (errno %d)", errno]];
+        }
+        usleep(100000);
+    }
+
+    // Never leave a known suspended/injecting child running indefinitely.
+    // Reap only our child; never signal launchd (the injection TARGET).
+    (void)kill(child, SIGTERM);
+    CFAbsoluteTime grace = CFAbsoluteTimeGetCurrent() + 1.0;
+    while (CFAbsoluteTimeGetCurrent() < grace) {
+        pid_t waited = waitpid(child, &status, WNOHANG);
+        if (waited == child || (waited == -1 && errno == ECHILD)) {
+            return [self rh3LaunchdInjectionError:
+                @"RootHide opainject exceeded 45 seconds; launchd state is unknown and reboot is disabled"];
+        }
+        if (waited == -1 && errno != EINTR) break;
+        usleep(100000);
+    }
+    (void)kill(child, SIGKILL);
+    // WNOHANG only: signal delivery/reaping can fail. A further activation
+    // must be refused rather than assuming an injected launchd is healthy.
+    for (int i = 0; i < 20; i++) {
+        pid_t waited = waitpid(child, &status, WNOHANG);
+        if (waited == child || (waited == -1 && errno == ECHILD)) break;
+        if (waited == -1 && errno != EINTR) break;
+        usleep(100000);
+    }
+    return [self rh3LaunchdInjectionError:
+        @"RootHide opainject timed out and was terminated if possible; launchd state requires manual device recovery"];
+}
+
 - (NSError *)injectRootHideLaunchdHookSafely
 {
     NSError *rootError = nil;
@@ -514,11 +571,10 @@ static void *rh3_boomerang_server(void *opaque)
             [NSString stringWithFormat:@"RootHide jbctl returned an unsuccessful status (%d)", status]];
     }
 
-    int result = exec_cmd(JBROOT_PATH("/basebin/opainject"), "1", JBROOT_PATH("/basebin/launchdhook.dylib"), NULL);
-    if (result) {
+    NSError *injectionError = [self rh3InjectLaunchdWithTimeout];
+    if (injectionError) {
         mach_port_destroy(mach_task_self(), serverPort);
-        return [self rh3LaunchdInjectionError:
-            [NSString stringWithFormat:@"RootHide launchd injection failed (%d)", result]];
+        return injectionError;
     }
     if (dispatch_semaphore_wait(context.completed, dispatch_time(DISPATCH_TIME_NOW, 60 * NSEC_PER_SEC)) != 0) {
         mach_port_destroy(mach_task_self(), serverPort);
@@ -750,6 +806,29 @@ static void *rh3_boomerang_server(void *opaque)
                                                 code:JBErrorCodeFailedBasebinTrustcache
                                             userInfo:@{NSLocalizedDescriptionKey:
                                             @"RootHide 3 runtime is not validated. Jailbreak and removal are disabled in this experimental build."}];
+        return;
+    }
+    // The hidden bootstrap has only been adapted for the arm64e iOS 15/16
+    // family. Do not patch a newer kernel or an incompatible device merely
+    // because stock Dopamine happens to support it.
+    NSOperatingSystemVersion os = NSProcessInfo.processInfo.operatingSystemVersion;
+    if (![DOEnvironmentManager sharedManager].isArm64e ||
+        os.majorVersion < 15 || os.majorVersion > 16) {
+        if (didRemove) *didRemove = NO;
+        if (showLogs) *showLogs = NO;
+        if (errOut) *errOut = [NSError errorWithDomain:JBErrorDomain
+                                                code:JBErrorCodeFailedExploitation
+                                            userInfo:@{NSLocalizedDescriptionKey:
+                                            @"RootHide 3 hardware beta currently accepts only arm64e devices on iOS 15 or 16."}];
+        return;
+    }
+    if ([[DOEnvironmentManager sharedManager] isJailbrokenWithOtherJailbreak]) {
+        if (didRemove) *didRemove = NO;
+        if (showLogs) *showLogs = NO;
+        if (errOut) *errOut = [NSError errorWithDomain:JBErrorDomain
+                                                code:JBErrorCodeFailedExploitation
+                                            userInfo:@{NSLocalizedDescriptionKey:
+                                            @"Existing jailbreak detected: reboot to an unjailbroken state before testing RootHide 3."}];
         return;
     }
 #endif

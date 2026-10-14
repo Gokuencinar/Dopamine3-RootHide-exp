@@ -107,14 +107,45 @@ int __posix_spawn_orig_wrapper(pid_t *restrict pid, const char *restrict path,
 					   char *const argv[restrict],
 					   char *const envp[restrict])
 {
+	// Match RootHide 2's PID/uniqueid bookkeeping. XPC reply hiding uses
+	// this cache to tie a launchd job to the process that actually owns it.
+	// Do not dereference the API's optional pid output when it is NULL.
+	pid_t localPid = 0;
+	pid_t *recordedPid = pid ? pid : &localPid;
 	// we need to disable the crash reporter during the orig call
 	// otherwise the child process inherits the exception ports
 	// and this would trip jailbreak detections
 	crashreporter_pause();	
-	int r = __posix_spawn_inline(pid, path, desc, argv, envp);
+	int r = __posix_spawn_inline(recordedPid, path, desc, argv, envp);
 	crashreporter_resume();
+	if (r == 0 && *recordedPid > 0 && roothide_is_active()) {
+		register_job(*recordedPid);
+	}
 
 	return r;
+}
+
+// launchd commonly spawns UIKit apps through xpcproxy: path alone is then
+// /usr/libexec/xpcproxy, not the app executable. Recognize *only* the
+// UIKitApplication:<bundle id>[...] label in argv[1]. No substring matching,
+// which could accidentally classify unrelated launchd services as apps.
+static bool roothide_blacklisted_uikit_proxy(const char *path,
+                                            char *const argv[restrict])
+{
+	if (!path || strcmp(path, "/usr/libexec/xpcproxy") != 0 ||
+	    !argv || !argv[0] || !argv[1]) return false;
+	static const char prefix[] = "UIKitApplication:";
+	const char *label = argv[1];
+	if (strncmp(label, prefix, sizeof(prefix) - 1) != 0) return false;
+	const char *identifier = label + sizeof(prefix) - 1;
+	const char *suffix = strchr(identifier, '[');
+	if (!suffix || suffix == identifier) return false;
+	const size_t length = (size_t)(suffix - identifier);
+	if (length >= 256) return false;
+	char bundleId[256];
+	memcpy(bundleId, identifier, length);
+	bundleId[length] = '\0';
+	return isBlacklistedApp(bundleId);
 }
 
 int __posix_spawn_hook(pid_t *restrict pid, const char *restrict path,
@@ -257,7 +288,8 @@ int __posix_spawn_hook(pid_t *restrict pid, const char *restrict path,
 
 	// Blacklisted apps are launched without tweak injection. Their identifiers
 	// are read from the RootHide configuration under the active jailbreak root.
-	if (path && roothide_is_active() && isBlacklistedPath(path)) {
+		if (path && roothide_is_active() &&
+		    (isBlacklistedPath(path) || roothide_blacklisted_uikit_proxy(path, argv))) {
 		// Record the child PID before its first userspace instructions execute;
 		// the server uses this record to deny RootHide IPC to the child.
 		pid_t *trackedPid = allocBlacklistProcessId();

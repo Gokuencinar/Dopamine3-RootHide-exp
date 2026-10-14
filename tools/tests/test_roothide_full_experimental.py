@@ -5,7 +5,9 @@ from pathlib import Path
 import unittest
 import zipfile
 from tools.verify_roothide_full_experimental import (
-    check_full_identity, GUARD_MARKER, EXPERIMENTAL_BUNDLE_ID, EXPERIMENTAL_DISPLAY_NAME
+    check_full_identity, GUARD_MARKER, DISABLED_MARKER, ACTIVE_MARKER,
+    EXPERIMENTAL_BUNDLE_ID, EXPERIMENTAL_DISPLAY_NAME,
+    HARDWARE_BETA_BUNDLE_ID, HARDWARE_BETA_DISPLAY_NAME
 )
 from tools.tests.test_verify_roothide_build import thin_macho
 
@@ -16,15 +18,17 @@ def source(name):
     return (ROOT / name).read_text(encoding="utf-8")
 
 
-def fixture(*, identifier=EXPERIMENTAL_BUNDLE_ID, marker=True, extra=None):
+def fixture(*, identifier=EXPERIMENTAL_BUNDLE_ID, display=EXPERIMENTAL_DISPLAY_NAME,
+            marker=True, hardware_beta=False, extra=None):
     memory = io.BytesIO()
     info = plistlib.dumps({"CFBundleIdentifier": identifier,
-                           "CFBundleDisplayName": EXPERIMENTAL_DISPLAY_NAME,
+                           "CFBundleDisplayName": display,
                            "CFBundleExecutable": "Dopamine"})
     with zipfile.ZipFile(memory, "w") as archive:
         archive.writestr("Payload/Dopamine.app/Info.plist", info)
         archive.writestr("Payload/Dopamine.app/Dopamine",
-                         thin_macho() + (GUARD_MARKER if marker else b""))
+                         thin_macho() + (GUARD_MARKER if marker else b"") +
+                         (ACTIVE_MARKER if hardware_beta else DISABLED_MARKER))
         if extra:
             archive.writestr(extra, b"x")
     memory.seek(0)
@@ -34,9 +38,9 @@ def fixture(*, identifier=EXPERIMENTAL_BUNDLE_ID, marker=True, extra=None):
 class FullExperimentalTests(unittest.TestCase):
     def test_distinct_identity_and_guards_in_build_configuration(self):
         make = source("Application/Makefile")
-        self.assertIn("PRODUCT_BUNDLE_IDENTIFIER=" + EXPERIMENTAL_BUNDLE_ID, make)
-        self.assertIn("INFOPLIST_KEY_CFBundleDisplayName='RootHide 3 Experimental'", make)
-        self.assertIn("RH3_FULL_APP_EXPERIMENTAL=1 ROOTHIDE3_BOOTSTRAP_READY=0", make)
+        self.assertIn("ROOTHIDE_EXPERIMENT_ID := " + EXPERIMENTAL_BUNDLE_ID, make)
+        self.assertIn("ROOTHIDE_EXPERIMENT_NAME := RootHide 3 Experimental", make)
+        self.assertIn("RH3_FULL_APP_EXPERIMENTAL=1 ROOTHIDE3_BOOTSTRAP_READY=$(ROOTHIDE_BOOTSTRAP_GATE)", make)
         self.assertIn("Dopamine/Dopamine.entitlements", make)
         self.assertIn("ROOTHIDE_EXPERIMENTAL_BUILD", source(".github/workflows/main.yml"))
         self.assertIn("RootHide3-Full-Experimental.ipa", source(".github/workflows/main.yml"))
@@ -75,6 +79,15 @@ class FullExperimentalTests(unittest.TestCase):
                      {"extra": "Payload/Dopamine.app/../escape"}):
             with self.subTest(args=args), zipfile.ZipFile(fixture(**args)) as archive:
                 self.assertTrue(check_full_identity(archive)[0])
+
+    def test_hardware_beta_identity_and_marker_never_confused_with_safe_build(self):
+        memory = fixture(identifier=HARDWARE_BETA_BUNDLE_ID,
+                         display=HARDWARE_BETA_DISPLAY_NAME, hardware_beta=True)
+        with zipfile.ZipFile(memory) as archive:
+            self.assertEqual(check_full_identity(archive, hardware_beta=True)[0], [])
+            self.assertTrue(check_full_identity(archive, hardware_beta=False)[0])
+        with zipfile.ZipFile(fixture()) as archive:
+            self.assertTrue(check_full_identity(archive, hardware_beta=True)[0])
 
 
 if __name__ == "__main__":

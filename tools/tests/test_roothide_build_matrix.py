@@ -13,6 +13,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[2]
 MAKEFILE = ROOT / "Application" / "Makefile"
 BUNDLE_ID = "com.gokuencinar.roothide3.fulltest"
+BETA_BUNDLE_ID = "com.gokuencinar.roothide3.hardwarebeta"
 
 
 class RootHideBuildMatrixTests(unittest.TestCase):
@@ -24,9 +25,12 @@ class RootHideBuildMatrixTests(unittest.TestCase):
         self.assertLess(nightly_metadata, full_selector)
         self.assertLess(full_selector, stock_nightly)
         experimental = makefile[full_selector:stock_nightly]
-        self.assertIn("PRODUCT_BUNDLE_IDENTIFIER=" + BUNDLE_ID, experimental)
+        self.assertIn("PRODUCT_BUNDLE_IDENTIFIER=$(ROOTHIDE_EXPERIMENT_ID)", experimental)
+        self.assertIn("ROOTHIDE_EXPERIMENT_ID := " + BUNDLE_ID, makefile)
         self.assertIn("RH3_FULL_APP_EXPERIMENTAL=1", experimental)
-        self.assertIn("ROOTHIDE3_BOOTSTRAP_READY=0", experimental)
+        self.assertIn("ROOTHIDE3_BOOTSTRAP_READY=$(ROOTHIDE_BOOTSTRAP_GATE)", experimental)
+        self.assertIn("ROOTHIDE_BOOTSTRAP_GATE := 0", makefile)
+        self.assertIn("ROOTHIDE_BOOTSTRAP_GATE := 1", makefile)
         self.assertIn("$(DOPAMINE_NIGHTLY_DEFINITIONS)", experimental)
 
     def test_effective_xcodebuild_args_for_all_four_build_modes(self):
@@ -62,6 +66,38 @@ class RootHideBuildMatrixTests(unittest.TestCase):
                         self.assertNotIn("RH3_FULL_APP_EXPERIMENTAL=1", command)
                     self.assertEqual("NIGHTLY=1" in command, nightly == "1")
                     self.assertEqual("matrix-test-sha" in command, nightly == "1")
+
+    def test_manual_hardware_beta_build_has_distinct_gate_and_identity(self):
+        make = shutil.which("gmake") or shutil.which("make")
+        if not make:
+            self.skipTest("GNU Make unavailable; macOS CI tests real recipes")
+        for nightly in ("0", "1"):
+            with self.subTest(nightly=nightly):
+                result = subprocess.run(
+                    [make, "--no-print-directory", "-n", "-C", "Application",
+                     "Dopamine.ipa", "ROOTHIDE_EXPERIMENTAL_BUILD=1",
+                     "ROOTHIDE_HARDWARE_TEST=YES", f"NIGHTLY={nightly}",
+                     "COMMIT_HASH=hardware-test-sha"],
+                    cwd=ROOT, encoding="utf-8", errors="replace",
+                    capture_output=True, check=False,
+                )
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                command = next(line for line in result.stdout.splitlines()
+                               if line.lstrip().startswith("xcodebuild "))
+                self.assertIn("PRODUCT_BUNDLE_IDENTIFIER=" + BETA_BUNDLE_ID, command)
+                self.assertIn("ROOTHIDE3_BOOTSTRAP_READY=1", command)
+                self.assertIn("RH3_FULL_APP_EXPERIMENTAL=1", command)
+                self.assertNotIn(BUNDLE_ID, command)
+                self.assertEqual("hardware-test-sha" in command, nightly == "1")
+        result = subprocess.run(
+            [make, "--no-print-directory", "-n", "-C", "Application",
+             "Dopamine.ipa", "ROOTHIDE_EXPERIMENTAL_BUILD=0",
+             "ROOTHIDE_HARDWARE_TEST=YES"],
+            cwd=ROOT, encoding="utf-8", errors="replace",
+            capture_output=True, check=False,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("requires ROOTHIDE_EXPERIMENTAL_BUILD=1", result.stderr)
 
 
 if __name__ == "__main__":

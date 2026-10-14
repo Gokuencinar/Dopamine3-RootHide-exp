@@ -30,6 +30,19 @@ Dopamine.ipa: build/Build/Products/Debug-iphoneos/Dopamine.app
 # The explicit RootHide build selector takes priority over NIGHTLY. The
 # latter only adds metadata; disabling nightly must never select stock
 # Dopamine's bundle ID or re-enable its bootstrap on a RootHide build.
+ROOTHIDE_BOOTSTRAP_GATE := 0
+ROOTHIDE_EXPERIMENT_ID := com.gokuencinar.roothide3.fulltest
+ROOTHIDE_EXPERIMENT_NAME := RootHide 3 Experimental
+ifeq ($(ROOTHIDE_HARDWARE_TEST),YES)
+ifneq ($(ROOTHIDE_EXPERIMENTAL_BUILD),1)
+$(error ROOTHIDE_HARDWARE_TEST=YES requires ROOTHIDE_EXPERIMENTAL_BUILD=1)
+endif
+# Dangerous manual-only build. Never set in the scheduled/push CI.
+ROOTHIDE_BOOTSTRAP_GATE := 1
+ROOTHIDE_EXPERIMENT_ID := com.gokuencinar.roothide3.hardwarebeta
+ROOTHIDE_EXPERIMENT_NAME := RootHide 3 Hardware Beta
+endif
+
 ifeq ($(NIGHTLY), 1)
 DOPAMINE_NIGHTLY_DEFINITIONS := NIGHTLY=1 COMMIT_HASH=\"$(COMMIT_HASH)\"
 endif
@@ -37,7 +50,7 @@ endif
 ifeq ($(ROOTHIDE_EXPERIMENTAL_BUILD), 1)
 build/Build/Products/Debug-iphoneos/Dopamine.app: FORCE
 	@echo "Building full RootHide 3 experimental app with protected jailbreak entrypoint"
-	xcodebuild -scheme Dopamine -derivedDataPath build -destination 'generic/platform=iOS' CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO PRODUCT_BUNDLE_IDENTIFIER=com.gokuencinar.roothide3.fulltest INFOPLIST_KEY_CFBundleDisplayName='RootHide 3 Experimental' GCC_PREPROCESSOR_DEFINITIONS='RH3_FULL_APP_EXPERIMENTAL=1 ROOTHIDE3_BOOTSTRAP_READY=0 $(DOPAMINE_NIGHTLY_DEFINITIONS)'
+	xcodebuild -scheme Dopamine -derivedDataPath build -destination 'generic/platform=iOS' CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO PRODUCT_BUNDLE_IDENTIFIER=$(ROOTHIDE_EXPERIMENT_ID) INFOPLIST_KEY_CFBundleDisplayName='$(ROOTHIDE_EXPERIMENT_NAME)' GCC_PREPROCESSOR_DEFINITIONS='RH3_FULL_APP_EXPERIMENTAL=1 ROOTHIDE3_BOOTSTRAP_READY=$(ROOTHIDE_BOOTSTRAP_GATE) $(DOPAMINE_NIGHTLY_DEFINITIONS)'
 else ifeq ($(NIGHTLY), 1)
 build/Build/Products/Debug-iphoneos/Dopamine.app: FORCE
 	xcodebuild -scheme Dopamine -derivedDataPath build -destination 'generic/platform=iOS' CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO GCC_PREPROCESSOR_DEFINITIONS='$(DOPAMINE_NIGHTLY_DEFINITIONS)'
