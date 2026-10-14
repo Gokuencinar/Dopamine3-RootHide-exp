@@ -172,6 +172,41 @@ requires the packaged `bootstrapper`, `dopamine`, `jailbreakd` executables
 and all six expected dyldhook binaries, with negative tests for missing or
 malformed Mach-O payloads.
 
+## Conservative recovery hardening from earlier Dopamine and RootHide versions
+
+Comparison with the local RootHide 2 donor and previous Dopamine behavior
+identified two patterns not safe to import unchanged: the donor could remove
+unrecognized/half-extracted `.jbroot` directories, while stock Dopamine's
+recovery of preboot/dyld assets assumes a conventional `/var/jb` root. Neither
+operation may be applied to an uncertain RootHide 3 container. Instead the
+new RootHide-only recovery path keeps the original root and AppGroup data
+untouched, records installation stages, rejects malformed ownership markers,
+orphaned AppGroups, leftover dependency staging/backup directories and
+partially executed package scripts. Interruption at `running-script` stops
+reinstallation for explicit manual repair; the non-idempotent donor script
+is **never** rerun automatically after a possible partial execution.
+
+The RootHide BaseBin replacement preserves the Dopamine `.safe_mode` marker
+or rolls back the replacement if preservation fails. Before experimental
+launchd injection, the app validates the owned hidden root and essential
+on-disk executables, checks the marker type and atomically enables safe mode
+(no tweak injection). In the RootHide-only launchd handshake, `jbctl` must
+exit successfully within 15 seconds and the boomerang IPC must complete
+within 60 seconds; errors abort the attempted activation without requesting
+a userspace reboot, with a separately retained IPC context to avoid a
+detached-thread reference to a dead stack. The original stock Dopamine 3
+handshake is unchanged. A bootstrap preparation failure now triggers
+post-exploitation cleanup for RootHide before any launchd hook attempt.
+
+These mechanisms reduce foreseeable mistakes and hang paths, **not** boot
+loop risk to zero. Once opainject has modified launchd, an IPC timeout
+cannot safely undo those process/kernel modifications. No automatic
+panic-loop recovery, working RootHide startup, or real hardware rollback
+has been proven. Before enabling RootHide, resolve xpcproxy blacklist
+bypass, verify all dyld/kernel hooks and signatures, and test interrupted
+install/boot, userspace reboot and recovery on a spare supported iPhone.
+No production device should install the compile-only artifact.
+
 ## Reproducible macOS diagnostic build
 
 The experimental fork uses `.github/workflows/main.yml` on

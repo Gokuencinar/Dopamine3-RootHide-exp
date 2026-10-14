@@ -44,6 +44,12 @@ static NSString *RH3PendingState(NSString *root)
                                         encoding:NSUTF8StringEncoding error:nil];
 }
 
+static BOOL RH3KnownPendingState(NSString *stage)
+{
+    return [@[@"creating", @"layout", @"prepared", @"running-script", @"script-complete"]
+            containsObject:stage];
+}
+
 static NSError *RH3WritePendingState(NSString *root, NSString *stage)
 {
     NSString *path = [root stringByAppendingPathComponent:RH3PendingMarker];
@@ -61,6 +67,26 @@ static BOOL RH3IsRealDirectory(NSString *path)
 {
     struct stat st;
     return lstat(path.fileSystemRepresentation, &st) == 0 && S_ISDIR(st.st_mode);
+}
+
+// Staged dependency files can contain the only copies of overwritten binaries.
+// A crash loses the in-memory rollback journal, so leave every backup intact
+// and require manual inspection instead of repeating a partial transaction.
+static NSError *RH3CheckInterruptedOperations(NSString *root)
+{
+    NSError *readError = nil;
+    NSArray<NSString *> *entries = [NSFileManager.defaultManager
+                                    contentsOfDirectoryAtPath:root error:&readError];
+    if (!entries) return readError ?: RH3Error(BootstrapErrorCodeFailedReplacing,
+                                              @"Unable to inspect RootHide recovery state");
+    for (NSString *entry in entries) {
+        if ([entry hasPrefix:@".roothide3-deps-"] ||
+            [entry isEqualToString:@"basebin.roothide3-backup"]) {
+            return RH3Error(BootstrapErrorCodeFailedReplacing,
+                            [NSString stringWithFormat:@"Interrupted RootHide transaction at %@; preserve backups for manual recovery", entry]);
+        }
+    }
+    return nil;
 }
 
 // Rewrite only absolute links into our old, owned directories. Keep links to
@@ -167,13 +193,32 @@ static NSError *RH3Error(BootstrapErrorCode code, NSString *message)
             return nil;
         }
         NSString *ownMarker = [root stringByAppendingPathComponent:RH3InstalledMarker];
+        NSString *pendingPath = [root stringByAppendingPathComponent:RH3PendingMarker];
         NSString *pending = RH3PendingState(root);
+        struct stat pendingInfo;
+        int pendingStatus = lstat(pendingPath.fileSystemRepresentation, &pendingInfo);
+        if ((pendingStatus == 0 && (!S_ISREG(pendingInfo.st_mode) || !RH3KnownPendingState(pending))) ||
+            (pendingStatus != 0 && errno != ENOENT)) {
+            if (error) *error = RH3Error(BootstrapErrorCodeFailedReplacing,
+                                        @"Unknown or damaged RootHide 3 installation state; manual recovery required");
+            return nil;
+        }
         struct stat installedInfo;
-        BOOL installed = lstat(ownMarker.fileSystemRepresentation, &installedInfo) == 0 &&
-                         S_ISREG(installedInfo.st_mode) &&
+        int installedStatus = lstat(ownMarker.fileSystemRepresentation, &installedInfo);
+        BOOL installed = installedStatus == 0 && S_ISREG(installedInfo.st_mode) &&
                          [[NSString stringWithContentsOfFile:ownMarker
                                                     encoding:NSUTF8StringEncoding error:nil] isEqualToString:@"3"];
-        if (!installed && !([@[@"creating", @"layout", @"prepared", @"script-complete"] containsObject:pending])) {
+        if ((installedStatus == 0 && !installed) || (installedStatus != 0 && errno != ENOENT)) {
+            if (error) *error = RH3Error(BootstrapErrorCodeFailedReplacing,
+                                        @"Damaged RootHide 3 installed marker; manual recovery required");
+            return nil;
+        }
+        if (installed && pending && ![pending isEqualToString:@"script-complete"]) {
+            if (error) *error = RH3Error(BootstrapErrorCodeFailedReplacing,
+                                        @"Conflicting RootHide 3 installed and pending stages; manual recovery required");
+            return nil;
+        }
+        if (!installed && !RH3KnownPendingState(pending)) {
             if (error) *error = RH3Error(BootstrapErrorCodeFailedReplacing,
                 [NSString stringWithFormat:@"Unowned or unknown .jbroot at %@; refusing to adopt or delete it", root]);
             return nil;
@@ -206,6 +251,29 @@ static NSError *RH3Error(BootstrapErrorCode code, NSString *message)
             return nil;
         }
         foundRoot = root;
+    }
+    // A rename or removal can crash after changing the primary container but
+    // before its AppGroup partner. Never create another root over orphaned
+    // RootHide/RootHide2 data, and never try to repair unknown ownership.
+    NSArray<NSString *> *secondaries = [fm contentsOfDirectoryAtPath:RH3AppGroupDirectory
+                                                               error:&directoryError];
+    if (!secondaries) {
+        if (error) *error = directoryError;
+        return nil;
+    }
+    for (NSString *entry in secondaries) {
+        if ([entry hasPrefix:@".jbroot-"] && [entry containsString:@".removing-roothide3-"]) {
+            if (error) *error = RH3Error(BootstrapErrorCodeFailedReplacing,
+                                        @"Interrupted RootHide 3 AppGroup removal needs manual recovery");
+            return nil;
+        }
+        if (!RH3BrandFromName(entry)) continue;
+        NSString *partner = [RH3RootDirectory stringByAppendingPathComponent:entry];
+        if (!RH3IsRealDirectory(partner)) {
+            if (error) *error = RH3Error(BootstrapErrorCodeFailedReplacing,
+                [NSString stringWithFormat:@"Orphaned RootHide AppGroup %@; refusing to create or remove a bootstrap", entry]);
+            return nil;
+        }
     }
     return foundRoot;
 }
@@ -459,11 +527,12 @@ static NSError *RH3Error(BootstrapErrorCode code, NSString *message)
     if (!error) return nil;
 
 cleanup_both:
-    // These directories were created exclusively by this attempt.
-    [fm removeItemAtPath:secondary error:nil];
 cleanup_root:
-    [fm removeItemAtPath:root error:nil];
-    return error ?: RH3Error(BootstrapErrorCodeFailedExtracting, @"RootHide bootstrap layout creation failed");
+    // A failed extraction can leave the only available recovery state in these
+    // containers. Never recursively delete even a newly allocated .jbroot;
+    // the explicit 'creating' marker prevents accidental reuse by this port.
+    return error ?: RH3Error(BootstrapErrorCodeFailedExtracting,
+                            @"RootHide bootstrap layout incomplete; manual recovery required");
 }
 
 - (NSError *)rh3RerandomizeRoot:(NSString **)rootPtr
@@ -526,14 +595,43 @@ cleanup_root:
     NSString *oldBasebin = [root stringByAppendingPathComponent:@"basebin"];
     NSString *backup = [root stringByAppendingPathComponent:@"basebin.roothide3-backup"];
     NSError *error = nil;
-    if ([fm fileExistsAtPath:backup]) {
+    struct stat backupInfo;
+    if (lstat(backup.fileSystemRepresentation, &backupInfo) == 0) {
         return RH3Error(BootstrapErrorCodeFailedReplacing,
                         @"A previous RootHide basebin backup exists; refusing to overwrite it");
     }
-    BOOL hadBasebin = [fm fileExistsAtPath:oldBasebin];
+    if (errno != ENOENT)
+        return RH3Error(BootstrapErrorCodeFailedReplacing, @"Unable to inspect RootHide BaseBin backup");
+    struct stat basebinInfo;
+    BOOL hadBasebin = lstat(oldBasebin.fileSystemRepresentation, &basebinInfo) == 0;
+    if (hadBasebin && !S_ISDIR(basebinInfo.st_mode))
+        return RH3Error(BootstrapErrorCodeFailedReplacing, @"RootHide BaseBin is not a real directory");
+    if (!hadBasebin && errno != ENOENT)
+        return RH3Error(BootstrapErrorCodeFailedReplacing, @"Unable to inspect existing RootHide BaseBin");
+    // A disabled-tweaks setting is stored inside the old BaseBin. Preserve it
+    // before replacing the directory, including on a bootstrap retry.
+    NSString *safeModePath = [oldBasebin stringByAppendingPathComponent:@".safe_mode"];
+    struct stat safeModeInfo;
+    BOOL preserveSafeMode = hadBasebin && lstat(safeModePath.fileSystemRepresentation, &safeModeInfo) == 0;
+    if (preserveSafeMode && !S_ISREG(safeModeInfo.st_mode))
+        return RH3Error(BootstrapErrorCodeFailedReplacing, @"Unsafe RootHide safe-mode marker type");
+    if (hadBasebin && !preserveSafeMode && errno != ENOENT)
+        return RH3Error(BootstrapErrorCodeFailedReplacing, @"Unable to inspect RootHide safe-mode marker");
     if (hadBasebin && ![fm moveItemAtPath:oldBasebin toPath:backup error:&error]) return error;
     NSString *archive = [NSBundle.mainBundle.bundlePath stringByAppendingPathComponent:@"basebin.tar"];
     error = [self extractTar:archive toPath:root];
+    if (!error && preserveSafeMode) {
+        NSString *newSafeMode = [oldBasebin stringByAppendingPathComponent:@".safe_mode"];
+        struct stat newInfo;
+        if (lstat(newSafeMode.fileSystemRepresentation, &newInfo) == 0) {
+            if (!S_ISREG(newInfo.st_mode))
+                error = RH3Error(BootstrapErrorCodeFailedReplacing, @"Unsafe extracted safe-mode marker type");
+        } else if (errno != ENOENT) {
+            error = RH3Error(BootstrapErrorCodeFailedReplacing, @"Unable to inspect new safe-mode marker");
+        }
+        if (!error && ![[NSData data] writeToFile:newSafeMode atomically:YES])
+            error = RH3Error(BootstrapErrorCodeFailedReplacing, @"Unable to preserve RootHide safe mode");
+    }
     if (error) {
         NSError *rollbackError = nil;
         if ([fm attributesOfItemAtPath:oldBasebin error:nil] &&
@@ -667,7 +765,11 @@ cleanup_root:
                              stage, rollbackError.localizedDescription]);
         }
     }
-    [fm removeItemAtPath:stage error:nil];
+    NSError *cleanupError = nil;
+    if (![fm removeItemAtPath:stage error:&cleanupError])
+        return RH3Error(BootstrapErrorCodeFailedReplacing,
+                        [NSString stringWithFormat:@"RootHide dependency staging could not be removed at %@: %@; manual recovery required",
+                         stage, cleanupError.localizedDescription]);
     return error;
 }
 
@@ -714,9 +816,17 @@ cleanup_root:
         return;
     }
     if (root) {
+        error = RH3CheckInterruptedOperations(root);
+        if (error) { completion(error); return; }
+        NSString *stage = RH3PendingState(root);
+        if ([stage isEqualToString:@"creating"] || [stage isEqualToString:@"running-script"]) {
+            completion(RH3Error(BootstrapErrorCodeFailedReplacing,
+                @"Interrupted RootHide extraction or setup script needs manual recovery"));
+            return;
+        }
         // Re-randomizing a half-installed root would make an interrupted
         // transaction harder to recover. Keep its jbrand until setup finishes.
-        if (!RH3PendingState(root)) {
+        if (!stage) {
             [[DOUIManager sharedInstance] sendLog:@"Re-randomizing RootHide bootstrap" debug:NO];
             error = [self rh3RerandomizeRoot:&root];
             if (error) { completion(error); return; }
@@ -774,6 +884,8 @@ cleanup_root:
     if (![root isEqualToString:ownedRoot])
         return RH3Error(BootstrapErrorCodeFailedFinalising,
                         @"Active RootHide root differs from its verified owned container");
+    rootError = RH3CheckInterruptedOperations(root);
+    if (rootError) return rootError;
     NSFileManager *fm = NSFileManager.defaultManager;
     NSString *marker = [root stringByAppendingPathComponent:RH3InstalledMarker];
     NSString *script = [root stringByAppendingPathComponent:@"prep_bootstrap.sh"];
@@ -781,6 +893,13 @@ cleanup_root:
     BOOL ranInitialSetup = NO;
     BOOL installed = [[NSString stringWithContentsOfFile:marker
                                                encoding:NSUTF8StringEncoding error:nil] isEqualToString:@"3"];
+    if ([pending isEqualToString:@"script-complete"] &&
+        [self fileOrSymlinkExistsAtPath:script])
+        return RH3Error(BootstrapErrorCodeFailedFinalising,
+                        @"RootHide setup script still exists after completion; manual recovery required");
+    if ([pending isEqualToString:@"running-script"])
+        return RH3Error(BootstrapErrorCodeFailedFinalising,
+                        @"RootHide setup script execution was interrupted; manual recovery required");
     if (!installed && ![@[@"prepared", @"script-complete"] containsObject:pending])
         return RH3Error(BootstrapErrorCodeFailedFinalising, @"RootHide bootstrap is not fully prepared");
     if (!installed && [pending isEqualToString:@"prepared"] &&
@@ -788,13 +907,17 @@ cleanup_root:
         return RH3Error(BootstrapErrorCodeFailedFinalising,
                         @"RootHide setup was interrupted while executing its script; manual recovery is required");
     if ([pending isEqualToString:@"prepared"] && [fm fileExistsAtPath:script]) {
+        // Do this BEFORE launching the non-idempotent donor script. If the
+        // process crashes during execution, never run the script a second time.
+        NSError *stateError = RH3WritePendingState(root, @"running-script");
+        if (stateError) return stateError;
         [[DOUIManager sharedInstance] sendLog:@"Finalizing isolated RootHide bootstrap" debug:NO];
         int result = exec_cmd_trusted(JBROOT_PATH("/bin/sh"), script.fileSystemRepresentation, NULL);
         if (result) {
             return RH3Error(BootstrapErrorCodeFailedFinalising,
-                            [NSString stringWithFormat:@"RootHide prep_bootstrap.sh failed (%d)", result]);
+                            [NSString stringWithFormat:@"RootHide prep_bootstrap.sh failed (%d); manual recovery required", result]);
         }
-        NSError *stateError = RH3WritePendingState(root, @"script-complete");
+        stateError = RH3WritePendingState(root, @"script-complete");
         if (stateError) return stateError;
         pending = @"script-complete";
         ranInitialSetup = YES;

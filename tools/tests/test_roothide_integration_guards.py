@@ -172,7 +172,7 @@ class RootHideGuardTests(unittest.TestCase):
         creation = source[start:end]
         self.assertLess(creation.index('RH3WritePendingState(root, @"creating")'),
                         creation.index("decompressZstd:archive"))
-        self.assertIn('@[@"creating", @"layout", @"prepared", @"script-complete"]', source)
+        self.assertIn('@[@"creating", @"layout", @"prepared", @"running-script", @"script-complete"]', source)
 
     def test_macos_ci_unpacks_xz_sdk_with_correct_decoder(self) -> None:
         workflow = self.source(".github/workflows/main.yml")

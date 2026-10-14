@@ -11,6 +11,9 @@
 #import "DOUIManager.h"
 #import "DOPreferenceManager.h"
 #import <sys/stat.h>
+#import <sys/wait.h>
+#import <errno.h>
+#import <signal.h>
 #import <compression.h>
 #import <xpf/xpf.h>
 #import <dlfcn.h>
@@ -64,6 +67,17 @@ typedef NS_ENUM(NSInteger, JBErrorCode) {
     JBErrorCodeFailedInitFakeLib             = -13,
     JBErrorCodeFailedDuplicateApps           = -14,
 };
+
+// Hold the boomerang response context independently of the calling stack;
+// timed-out RootHide launchd injection cannot leave a detached thread using
+// expired stack memory.
+@interface RH3BoomerangContext : NSObject
+@property (nonatomic, assign) mach_port_t serverPort;
+@property (nonatomic, strong) dispatch_semaphore_t completed;
+@end
+
+@implementation RH3BoomerangContext
+@end
 
 @implementation DOJailbreaker
 
@@ -374,8 +388,149 @@ void *boomerang_server(struct boomerang_info *info)
     return NULL;
 }
 
+static void *rh3_boomerang_server(void *opaque)
+{
+    @autoreleasepool {
+        RH3BoomerangContext *context = (__bridge_transfer RH3BoomerangContext *)opaque;
+        while (true) {
+            xpc_object_t message = nil;
+            // Destroying the receive right on timeout makes receive fail;
+            // the thread then releases its retained context and exits.
+            if (xpc_pipe_receive(context.serverPort, &message) != 0) break;
+            if (message && jbserver_received_boomerang_xpc_message(&gBoomerangServer, message) == JBS_BOOMERANG_DONE) {
+                dispatch_semaphore_signal(context.completed);
+                break;
+            }
+        }
+    }
+    return NULL;
+}
+
+- (NSError *)rh3LaunchdInjectionError:(NSString *)reason
+{
+    return [NSError errorWithDomain:JBErrorDomain
+                               code:JBErrorCodeFailedLaunchdInjection
+                           userInfo:@{NSLocalizedDescriptionKey: reason}];
+}
+
+- (NSError *)injectRootHideLaunchdHookSafely
+{
+    NSError *rootError = nil;
+    NSString *root = [DOBootstrapper rootHideExistingRootWithError:&rootError];
+    const char *activeRoot = gSystemInfo.jailbreakInfo.rootPath;
+    if (rootError) return rootError;
+    if (!root || !activeRoot || ![root isEqualToString:@(activeRoot)] ||
+        ![DOBootstrapper rootHideBrandForPath:root]) {
+        return [self rh3LaunchdInjectionError:@"RootHide launchd injection requires a verified, active hidden root"];
+    }
+
+    // Reject partially installed hooks and unexpected symlinks before
+    // modifying launchd. This is intentionally stricter than stock Dopamine.
+    for (NSString *name in @[@"jbctl", @"opainject", @"launchdhook.dylib", @"systemhook.dylib"]) {
+        NSString *path = [[root stringByAppendingPathComponent:@"basebin"] stringByAppendingPathComponent:name];
+        struct stat info = {0};
+        if (lstat(path.fileSystemRepresentation, &info) != 0 || !S_ISREG(info.st_mode) || info.st_size < 32) {
+            return [self rh3LaunchdInjectionError:
+                [NSString stringWithFormat:@"RootHide launchd prerequisite is missing or unsafe: %@", name]];
+        }
+    }
+
+    // Force the first experimental boot into Dopamine's established no-tweak
+    // mode. The user may explicitly re-enable tweaks after hardware testing.
+    NSString *safeMode = [root stringByAppendingPathComponent:@"basebin/.safe_mode"];
+    struct stat safeModeInfo = {0};
+    if (lstat(safeMode.fileSystemRepresentation, &safeModeInfo) == 0) {
+        if (!S_ISREG(safeModeInfo.st_mode))
+            return [self rh3LaunchdInjectionError:@"RootHide safe-mode marker is not a regular file"];
+    } else if (errno != ENOENT) {
+        return [self rh3LaunchdInjectionError:@"Could not inspect RootHide safe-mode marker"];
+    }
+    if (![[NSData data] writeToFile:safeMode atomically:YES]) {
+        return [self rh3LaunchdInjectionError:@"Could not prepare RootHide safe mode before launchd injection"];
+    }
+
+    mach_port_t serverPort = MACH_PORT_NULL;
+    kern_return_t kr = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &serverPort);
+    if (kr != KERN_SUCCESS) return [self rh3LaunchdInjectionError:@"Could not allocate RootHide boomerang port"];
+    kr = mach_port_insert_right(mach_task_self(), serverPort, serverPort, MACH_MSG_TYPE_MAKE_SEND);
+    if (kr != KERN_SUCCESS) {
+        mach_port_destroy(mach_task_self(), serverPort);
+        return [self rh3LaunchdInjectionError:@"Could not prepare RootHide boomerang port"];
+    }
+
+    RH3BoomerangContext *context = [RH3BoomerangContext new];
+    context.serverPort = serverPort;
+    context.completed = dispatch_semaphore_create(0);
+    void *retained = (__bridge_retained void *)context;
+    pthread_t thread;
+    int threadError = pthread_create(&thread, NULL, rh3_boomerang_server, retained);
+    if (threadError) {
+        (void)CFBridgingRelease(retained);
+        mach_port_destroy(mach_task_self(), serverPort);
+        return [self rh3LaunchdInjectionError:
+            [NSString stringWithFormat:@"Could not start RootHide boomerang server (%d)", threadError]];
+    }
+    pthread_detach(thread);
+
+    posix_spawnattr_t attr;
+    int attributeError = posix_spawnattr_init(&attr);
+    BOOL attrInitialized = (attributeError == 0);
+    if (attrInitialized) {
+        attributeError = posix_spawnattr_set_registered_ports_np(&attr,
+            (mach_port_t[]){MACH_PORT_NULL, MACH_PORT_NULL, serverPort}, 3);
+    }
+    pid_t child = 0;
+    int spawnError = attributeError;
+    if (!spawnError) {
+        const char *jbctl = JBROOT_PATH("/basebin/jbctl");
+        spawnError = posix_spawn(&child, jbctl, NULL, &attr,
+            (char *const *)(const char *[]){jbctl, "internal", "launchd_stash_port", NULL}, NULL);
+    }
+    if (attrInitialized) posix_spawnattr_destroy(&attr);
+    if (spawnError) {
+        mach_port_destroy(mach_task_self(), serverPort);
+        return [self rh3LaunchdInjectionError:
+            [NSString stringWithFormat:@"RootHide jbctl launch failed (%d)", spawnError]];
+    }
+
+    int status = 0;
+    BOOL childFinished = NO;
+    CFAbsoluteTime until = CFAbsoluteTimeGetCurrent() + 15.0;
+    while (CFAbsoluteTimeGetCurrent() < until) {
+        pid_t waited = waitpid(child, &status, WNOHANG);
+        if (waited == child) { childFinished = YES; break; }
+        if (waited < 0 && errno != EINTR) break;
+        usleep(100000);
+    }
+    if (!childFinished) {
+        kill(child, SIGTERM);
+        (void)waitpid(child, &status, WNOHANG);
+        mach_port_destroy(mach_task_self(), serverPort);
+        return [self rh3LaunchdInjectionError:@"RootHide jbctl timed out; activation aborted (helper termination unconfirmed)"];
+    }
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+        mach_port_destroy(mach_task_self(), serverPort);
+        return [self rh3LaunchdInjectionError:
+            [NSString stringWithFormat:@"RootHide jbctl returned an unsuccessful status (%d)", status]];
+    }
+
+    int result = exec_cmd(JBROOT_PATH("/basebin/opainject"), "1", JBROOT_PATH("/basebin/launchdhook.dylib"), NULL);
+    if (result) {
+        mach_port_destroy(mach_task_self(), serverPort);
+        return [self rh3LaunchdInjectionError:
+            [NSString stringWithFormat:@"RootHide launchd injection failed (%d)", result]];
+    }
+    if (dispatch_semaphore_wait(context.completed, dispatch_time(DISPATCH_TIME_NOW, 60 * NSEC_PER_SEC)) != 0) {
+        mach_port_destroy(mach_task_self(), serverPort);
+        return [self rh3LaunchdInjectionError:@"RootHide launchd handshake timed out; no userspace reboot will be requested"];
+    }
+    mach_port_destroy(mach_task_self(), serverPort);
+    return nil;
+}
+
 - (NSError *)injectLaunchdHook
 {
+    if ([DOBootstrapper rootHidePortEnabled]) return [self injectRootHideLaunchdHookSafely];
     // Host a boomerang server that will be used by launchdhook to get the jailbreak primitives from this app
     mach_port_t serverPort = MACH_PORT_NULL;
     mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &serverPort);
@@ -632,7 +787,13 @@ void *boomerang_server(struct boomerang_info *info)
     }
     
     *errOut = [[DOEnvironmentManager sharedManager] prepareBootstrap];
-    if (*errOut) return;
+    if (*errOut) {
+        // A RootHide bootstrap transaction may be incomplete here. Do not
+        // proceed into launchd injection with live post-exploitation state.
+        // Keep Dopamine's original error path unchanged.
+        if ([DOBootstrapper rootHidePortEnabled]) [self cleanUpPostExploitation];
+        return;
+    }
     if ([DOBootstrapper rootHidePortEnabled]) {
         setenv("PATH", "/sbin:/bin:/usr/sbin:/usr/bin:/rootfs/sbin:/rootfs/bin:/rootfs/usr/sbin:/rootfs/usr/bin", 1);
     }
