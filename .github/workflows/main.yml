@@ -221,14 +221,14 @@ jobs:
       # Save it in a plainly quarantined diagnostic artifact so developers can
       # inspect linker output without distributing it as a jailbreak release.
       - name: Inspect quarantined RootHide build
-        if: steps.roothide_port.outputs.is_port == 'true'
+        if: steps.roothide_port.outputs.is_port == 'true' && env.ROOTHIDE_HARDWARE_TEST != 'YES'
         run: |
           set -euo pipefail
           python3 tools/verify_roothide_build.py --ipa Application/Dopamine.ipa --json | tee roothide-build-inspection.json
           printf 'ROOT HIDE 3: COMPILE-ONLY, NOT INSTALLABLE AS ROOTHIDE\nCommit: %s\nActivation: DISABLED\nRuntime/device verification: NONE\n' "$GITHUB_SHA" > ROOT_HIDE_DO_NOT_INSTALL.txt
 
       - name: Upload quarantined RootHide compile artifact
-        if: steps.roothide_port.outputs.is_port == 'true'
+        if: steps.roothide_port.outputs.is_port == 'true' && env.ROOTHIDE_HARDWARE_TEST != 'YES'
         uses: actions/upload-artifact@v4
         with:
           name: RootHide3-COMPILE-ONLY-NOT-FOR-INSTALL
