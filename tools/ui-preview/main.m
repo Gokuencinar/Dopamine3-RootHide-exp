@@ -46,7 +46,7 @@ static UILabel *Label(NSString *text, CGFloat size, UIColor *color) {
 @end
 @implementation RHPreviewController
 - (BOOL)actionMenuShowsChevronForAction:(UIAction *)action { return [@[@"settings", @"credits"] containsObject:action.identifier]; }
-- (BOOL)actionMenuActionIsEnabled:(UIAction *)action { return YES; }
+- (BOOL)actionMenuActionIsEnabled:(UIAction *)action { return [@[@"settings", @"credits"] containsObject:action.identifier]; }
 - (UIStatusBarStyle)preferredStatusBarStyle { return UIStatusBarStyleLightContent; }
 - (void)viewDidLoad {
     [super viewDidLoad]; self.overrideUserInterfaceStyle=UIUserInterfaceStyleDark;
@@ -54,14 +54,24 @@ static UILabel *Label(NSString *text, CGFloat size, UIColor *color) {
     UIImageView *background=[[UIImageView alloc] initWithImage:theme.image]; background.frame=self.view.bounds;
     background.autoresizingMask=UIViewAutoresizingFlexibleWidth|UIViewAutoresizingFlexibleHeight;
     background.contentMode=UIViewContentModeScaleAspectFill; background.clipsToBounds=YES; [self.view addSubview:background];
-    UILabel *provenance=Label(@"VISTA PREVIA UIKIT · ESTADO SIMULADO\nNo es una captura de la IPA instalada", 11, UIColor.whiteColor);
-    provenance.textAlignment=NSTextAlignmentCenter; provenance.backgroundColor=[UIColor colorWithWhite:0 alpha:0.7];
+    // Render the provenance inside the preview UI itself. A separate raster
+    // layer stays visible when Preferences-style cells affect text rendering.
+    CGFloat width=UIScreen.mainScreen.bounds.size.width;
+    UIGraphicsImageRenderer *renderer=[[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(width,40)];
+    UIImage *noticeImage=[renderer imageWithActions:^(UIGraphicsImageRendererContext *context) {
+        [[UIColor colorWithWhite:0 alpha:0.7] setFill]; UIRectFill(CGRectMake(0,0,width,40));
+        NSMutableParagraphStyle *style=[NSMutableParagraphStyle new]; style.alignment=NSTextAlignmentCenter;
+        [@"VISTA PREVIA UIKIT · ESTADO SIMULADO\nNo es una captura de la IPA instalada" drawInRect:CGRectMake(6,5,width-12,34)
+           withAttributes:@{NSFontAttributeName:[UIFont systemFontOfSize:11],NSForegroundColorAttributeName:UIColor.whiteColor,NSParagraphStyleAttributeName:style}];
+    }];
+    UIImageView *provenance=[[UIImageView alloc] initWithImage:noticeImage]; provenance.translatesAutoresizingMaskIntoConstraints=NO;
     [self.view addSubview:provenance];
     [NSLayoutConstraint activateConstraints:@[[provenance.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor],
        [provenance.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor], [provenance.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
        [provenance.heightAnchor constraintEqualToConstant:40]]];
     BOOL credits=[NSProcessInfo.processInfo.arguments containsObject:@"--credits"];
     if (credits) [self buildCreditsBelow:provenance]; else [self buildMainBelow:provenance];
+    [self.view bringSubviewToFront:provenance];
 }
 - (void)buildMainBelow:(UIView *)banner {
     UIStackView *stack=[UIStackView new]; stack.axis=UILayoutConstraintAxisVertical;
