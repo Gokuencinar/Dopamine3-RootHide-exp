@@ -38,12 +38,22 @@ typedef void posix_spawn_file_actions_t;
 #define POSIX_SPAWN_START_SUSPENDED 128
 #define SIGCONT 19
 #define SIGKILL 9
+#ifndef WNOHANG
 #define WNOHANG 1
+#endif
 #define RTLD_NOLOAD 16
 #define RTLD_LAZY 1
 #define JBROOT_PATH(x) x
 #define JBLogError(...) ((void)0)
 #define JBLogDebug(...) ((void)0)
+// macOS stdlib.h also declares waitpid. Keep fake calls distinct from host
+// libc; the production function below is redirected by these macros too.
+#define waitpid rh_test_waitpid
+#define getpid rh_test_getpid
+#define kill rh_test_kill
+#define usleep rh_test_usleep
+#define dlopen rh_test_dlopen
+#define dlclose rh_test_dlclose
 static bool exec_patch_enabled;
 static struct { int hook, close, trust_error, trust_calls, init_error, read_error,
     spawn_error, patch_error, resume_error, init, destroy, spawn, patch, resume,

@@ -1,5 +1,9 @@
 # RootHide 3 — beta con instalación del jailbreak habilitada
 
+**Esta variante se limita a iOS 15/16. No es la variante de iOS 18 solicitada.**
+El estado y los bloqueos del objetivo nuevo se documentan en
+[IOS18-SIDELOADING.md](IOS18-SIDELOADING.md).
+
 Esta variante permite ejecutar los exploits de Dopamine e instalar y activar el
 bootstrap oculto del port. No se ha probado en un dispositivo físico. La
 compilación y los tests de host no prueban estabilidad de launchd, dyld,
@@ -27,8 +31,10 @@ ocultación, instalación de paquetes ni recuperación tras un fallo.
 2. Instalar la IPA identificada como **Hardware Beta**. Abrirla y revisar que el
    modelo/iOS sean los esperados. Elegir el gestor de paquetes y pulsar jailbreak.
 3. Antes del workaround de memoria y de los exploits se comprueban arquitectura,
-   iOS, disponibilidad de exploits, estado del bootstrap y recursos fijados por
-   hash. Si se rechaza la prueba, se muestra el motivo y se permite cerrar.
+   iOS, disponibilidad de exploits y recursos fijados por hash. La inspección de
+   otros contenedores se adelanta si el host tiene permisos; en una instalación
+   convencional se aplaza hasta obtener privilegios, antes de crear o modificar
+   el bootstrap. Si se rechaza la prueba, se muestra el motivo y se permite cerrar.
 4. La instalación usa sus propios contenedores `.jbroot-*`, comprueba los
    paquetes RootHide y evita instalar las dependencias convencionales en `/var/jb`.
    La inyección en launchd tiene plazos de espera y exige el handshake.

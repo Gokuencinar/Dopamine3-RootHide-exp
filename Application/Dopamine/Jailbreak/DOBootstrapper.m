@@ -333,8 +333,15 @@ static NSError *RH3Error(BootstrapErrorCode code, NSString *message)
 
 - (NSError *)rootHidePreflightError
 {
-    // Read-only: perform this before exploitation as well as validating again
-    // during installation. Never adopt another bootstrap or erase its state.
+    // Bundled resources are readable before exploitation even when sideloaded.
+    // Foreign-container checks need privileges: ordinary AltStore installations
+    // must defer those until ensureJailbreakRootExists/prepareBootstrap below.
+    NSInteger version = NSProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 16 ? 1900 : 1800;
+    NSError *assetError = [self rh3VerifyAssetsForVersion:version];
+    if (assetError) return assetError;
+    if (![[DOEnvironmentManager sharedManager] isInstalledThroughTrollStore] && geteuid() != 0)
+        return nil;
+    // Privileged hosts can reject conflicts earlier. No mutations here.
     struct stat visibleRoot;
     if (lstat("/var/jb", &visibleRoot) == 0)
         return RH3Error(BootstrapErrorCodeFailedReplacing,
@@ -353,8 +360,7 @@ static NSError *RH3Error(BootstrapErrorCode code, NSString *message)
             return RH3Error(BootstrapErrorCodeFailedReplacing,
                             @"Interrupted RootHide extraction or setup script needs manual recovery before another activation.");
     }
-    NSInteger version = NSProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 16 ? 1900 : 1800;
-    return [self rh3VerifyAssetsForVersion:version];
+    return nil;
 }
 
 - (NSError *)rh3BuildPackageSourcesInRoot:(NSString *)root version:(NSInteger)version

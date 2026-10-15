@@ -49,6 +49,16 @@ class RootHideHardwarePreflightTests(unittest.TestCase):
         self.assertIn("RootHide3-HARDWARE-BETA-JAILBREAK-ENABLED", workflow)
         self.assertIn("python3 tools/roothide_port_audit.py --strict", workflow)
 
+    def test_sideloaded_app_defers_privileged_filesystem_checks_but_rechecks_before_creation(self):
+        source = (ROOT / "Application/Dopamine/Jailbreak/DOBootstrapper.m").read_text(encoding="utf-8")
+        preflight = source.split("- (NSError *)rootHidePreflightError", 1)[1].split("- (NSError *)rh3BuildPackageSourcesInRoot:", 1)[0]
+        self.assertLess(preflight.index("rh3VerifyAssetsForVersion:version"), preflight.index("isInstalledThroughTrollStore"))
+        self.assertLess(preflight.index("isInstalledThroughTrollStore"), preflight.index('lstat("/var/jb"'))
+        self.assertIn("geteuid() != 0", preflight)
+        prepare = source.split("- (void)prepareRootHideBootstrapWithCompletion:(void (^)(NSError *))completion\n{", 1)[1].split("- (NSError *)finalizeRootHideBootstrap", 1)[0]
+        self.assertLess(prepare.index('fileOrSymlinkExistsAtPath:@"/var/jb"'), prepare.index("rh3CreateRoot:root"))
+        self.assertLess(prepare.index("rootHideExistingRootWithError:&error"), prepare.index("rh3CreateRoot:root"))
+
     def test_trollstore_platform_entitlement_not_equated_with_jailbreak(self):
         source = (ROOT / "Application/Dopamine/Jailbreak/DOEnvironmentManager.m").read_text(encoding="utf-8")
         method = source[source.index("- (BOOL)isJailbrokenWithOtherJailbreak"):
