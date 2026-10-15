@@ -9,13 +9,14 @@ import hashlib
 import json
 from pathlib import Path
 import plistlib
+import struct
 import sys
 import zipfile
 
 try:
-    from .verify_roothide_build import check_ipa, ROOT
+    from .verify_roothide_build import check_ipa, ROOT, validate_macho, THIN_MAGICS, FAT_MAGICS
 except ImportError:
-    from verify_roothide_build import check_ipa, ROOT
+    from verify_roothide_build import check_ipa, ROOT, validate_macho, THIN_MAGICS, FAT_MAGICS
 
 
 EXPERIMENTAL_BUNDLE_ID = "com.gokuencinar.roothide3.fulltest"
@@ -73,6 +74,63 @@ def check_full_identity(archive, *, hardware_beta=False):
     return errors, details
 
 
+def check_embedded_deployment(archive):
+    """Reject bundled code with a newer minimum OS than the enclosing app."""
+    errors, checked = [], 0
+    try:
+        info = plistlib.loads(archive.read("Payload/Dopamine.app/Info.plist"))
+        parts = str(info.get("MinimumOSVersion", "")).split(".")
+        if not 1 <= len(parts) <= 3 or not all(p.isdigit() for p in parts):
+            raise ValueError("Missing valid MinimumOSVersion")
+        version = [int(p) for p in parts] + [0] * (3 - len(parts))
+        app_minimum = (version[0] << 16) | (version[1] << 8) | version[2]
+        for member in archive.infolist():
+            if member.is_dir() or not member.filename.startswith("Payload/Dopamine.app/"):
+                continue
+            with archive.open(member) as stream:
+                magic = stream.read(4)
+                if magic not in THIN_MAGICS and magic not in FAT_MAGICS:
+                    continue
+                content = magic + stream.read()
+            structural_error = validate_macho(content)
+            if structural_error:
+                errors.append(f"Invalid embedded Mach-O {member.filename}: {structural_error}")
+                continue
+            slices = [memoryview(content)]
+            if magic in FAT_MAGICS:
+                endian, fat64 = FAT_MAGICS[magic]
+                slices = []
+                for i in range(struct.unpack_from(endian + "I", content, 4)[0]):
+                    entry = 8 + i * (32 if fat64 else 20)
+                    offset, size = struct.unpack_from(endian + ("QQ" if fat64 else "II"), content, entry + 8)
+                    slices.append(memoryview(content)[offset:offset + size])
+            for data in slices:
+                endian = THIN_MAGICS[bytes(data[:4])]
+                cursor, minimums = 32, []
+                for _ in range(struct.unpack_from(endian + "I", data, 16)[0]):
+                    cmd, size = struct.unpack_from(endian + "II", data, cursor)
+                    if cmd == 0x32:
+                        if size < 24:
+                            raise ValueError(f"Truncated LC_BUILD_VERSION: {member.filename}")
+                        platform, minimum = struct.unpack_from(endian + "II", data, cursor + 8)
+                        if platform != 2:
+                            errors.append(f"Non-iOS platform in {member.filename}")
+                        minimums.append(minimum)
+                    elif cmd == 0x25:
+                        if size < 16:
+                            raise ValueError(f"Truncated LC_VERSION_MIN_IPHONEOS: {member.filename}")
+                        minimums.append(struct.unpack_from(endian + "I", data, cursor + 8)[0])
+                    cursor += size
+                checked += 1
+                if not minimums:
+                    errors.append(f"Missing minimum iOS in {member.filename}")
+                elif max(minimums) > app_minimum:
+                    errors.append(f"Embedded code requires a newer iOS than the app: {member.filename}")
+    except (KeyError, ValueError, struct.error, plistlib.InvalidFileException) as exc:
+        errors.append(f"Unable to verify embedded deployment: {exc}")
+    return errors, checked
+
+
 def inspect_ipa(path, *, hardware_beta=False):
     errors, details = check_ipa(path)
     if not path.is_file():
@@ -82,6 +140,9 @@ def inspect_ipa(path, *, hardware_beta=False):
             identity_errors, identity_details = check_full_identity(archive, hardware_beta=hardware_beta)
             errors.extend(identity_errors)
             details.update(identity_details)
+            deployment_errors, checked = check_embedded_deployment(archive)
+            errors.extend(deployment_errors)
+            details["embedded_macho_slices_checked"] = checked
     except (OSError, ValueError, zipfile.BadZipFile, plistlib.InvalidFileException) as exc:
         errors.append(f"Invalid experimental IPA: {exc}")
     source = (ROOT / "Application/Dopamine/Jailbreak/DOBootstrapper.m").read_text(encoding="utf-8")

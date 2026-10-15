@@ -12,6 +12,10 @@ ocultación, instalación de paquetes ni recuperación tras un fallo.
 - `RH3_FULL_APP_EXPERIMENTAL=1`, `ROOTHIDE3_BOOTSTRAP_READY=1`.
 - Solo arm64e con iOS 15/16 y una combinación de exploits disponible en Dopamine.
   No se amplía la compatibilidad de los exploits por activar esta variante.
+- Se corrige el mínimo de carga de `Titan.framework` de 26.1 a 15.0 para
+  alinearlo con la aplicación. Sus rangos de explotación del Info.plist se
+  conservan. El verificador rechaza binarios embebidos con un mínimo superior
+  al declarado por la app.
 - Firma de ldid con los entitlements privados de Dopamine. Necesita un
   instalador compatible; una firma convencional puede perder permisos necesarios.
 
