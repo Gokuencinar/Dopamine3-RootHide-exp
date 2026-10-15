@@ -96,7 +96,8 @@ void patchedtest(mach_port_t task, uint64_t remoteLoadAddress)
 }
 
 #define DYLD_INFO_MAX_SEARCH_INDEX 200
-int task_set_dyld_info(uint64_t task, uint64_t addr, uint64_t size)
+int task_set_dyld_info(uint64_t task, uint64_t addr, uint64_t size,
+                       uint64_t expectedAddr, uint64_t expectedSize)
 {
     static uint32_t all_image_info_addr_offset=0, all_image_info_size_offset=0, info_offset=0;
 
@@ -115,24 +116,35 @@ int task_set_dyld_info(uint64_t task, uint64_t addr, uint64_t size)
         uint64_t selftask = task_self();
         JBLogDebug("task_set_dyld_info: selftask=%llx", selftask);
 
+        if (!selftask || !dyldInfo.all_image_info_addr || !dyldInfo.all_image_info_size) return;
         int i=0;
+        unsigned matches = 0;
+        uint32_t candidateOffset = 0;
         for(; i<DYLD_INFO_MAX_SEARCH_INDEX; i++)
         {
-            if(kread64(selftask + i*8)==dyldInfo.all_image_info_addr
-             && kread64(selftask + (i+1)*8)==dyldInfo.all_image_info_size) {
+            uint64_t pair[2] = {0};
+            if (kreadbuf(selftask + i*8, pair, sizeof(pair)) != 0) return;
+            if(pair[0]==dyldInfo.all_image_info_addr
+             && pair[1]==dyldInfo.all_image_info_size) {
                 JBLogDebug("task_set_dyld_info: all_image_info_addr offset=[%d]0x%x", i, i*8 );
                 JBLogDebug("task_set_dyld_info: all_image_info_size offset=[%d]0x%x", i+1, (i+1)*8 );
 
-                all_image_info_addr_offset = i*8;
-                all_image_info_size_offset = (i+1)*8;
-
-                break;
+                candidateOffset = i*8;
+                matches++;
             }
         }
-        for(; i<(DYLD_INFO_MAX_SEARCH_INDEX+0); i++) {
+        if (matches != 1) {
+            return;
+        }
+        all_image_info_addr_offset = candidateOffset;
+        all_image_info_size_offset = candidateOffset + 8;
+        // XNU 11215 task.h/task.c updates just the address/size pair. Do not
+        // apply the donor's unexplained 48-byte pattern clearing on iOS 18.
+        if (__builtin_available(iOS 18.0, *)) return;
+        for(i=(int)(all_image_info_size_offset/8)+1; i<DYLD_INFO_MAX_SEARCH_INDEX; i++) {
             uint64_t info[6] = {1,0,0,0,1,0};
             uint8_t buffer[sizeof(info)] = {0};
-            kreadbuf(task + i*8, buffer, sizeof(buffer));
+            if (kreadbuf(selftask + i*8, buffer, sizeof(buffer)) != 0) return;
             if(memcmp(buffer, info, sizeof(info))==0) {
                 JBLogDebug("task_set_dyld_info: info offset=[%d]0x%x\n", i, i*8);
                 info_offset = i*8;
@@ -143,22 +155,28 @@ int task_set_dyld_info(uint64_t task, uint64_t addr, uint64_t size)
 
     if(all_image_info_addr_offset==0 || all_image_info_size_offset==0) {
         JBLogError("invalid all_image_info_addr/size offset");
-        abort();
         return -1;
     }
 
-    if(info_offset) {
+    // Confirm the discovered layout against task_info for THIS target before
+    // modifying anything. A failed read, race or different layout is an error.
+    uint64_t current[2] = {0};
+    if (kreadbuf(task + all_image_info_addr_offset, current, sizeof(current)) != 0 ||
+        current[0] != expectedAddr || current[1] != expectedSize ||
+        !addr || !size || addr > UINT64_MAX - size) return -1;
+
+    if (__builtin_available(iOS 18.0, *)) {
+        // No legacy pattern writes.
+    } else if(info_offset) {
         uint64_t info[6] = {0};
-        kwritebuf(task + info_offset, info, sizeof(info));
+        if (kwritebuf(task + info_offset, info, sizeof(info)) != 0) return -1;
     } else if(task != proc_task(proc_find(1))) {
         JBLogError("invalid info offset");
-        abort();
         return -1;
     }
 
-    kwrite64(task + all_image_info_addr_offset, addr);
-    kwrite64(task + all_image_info_size_offset, size);
-    return 0;
+    uint64_t replacement[2] = {addr, size};
+    return kwritebuf(task + all_image_info_addr_offset, replacement, sizeof(replacement));
 }
 
 void analyzeSegmentsLayout(struct mach_header_64* header, uint64_t* vmSpace, bool* hasZeroFill)
@@ -296,18 +314,19 @@ struct DYLDINFO* loadDyldInfo(const char* path)
     kern_return_t kr;
     void* dyld = MAP_FAILED;
 
-    struct DYLDINFO* result = malloc(sizeof(struct DYLDINFO));
-    memset(result, 0, sizeof(struct DYLDINFO));
+    struct DYLDINFO* result = calloc(1, sizeof(struct DYLDINFO));
+    if (!result) return NULL;
 
-    result->loadDyldCache_function = get_symbol(path, "__ZN5dyld313loadDyldCacheERKNS_18SharedCacheOptionsEPNS_19SharedCacheLoadInfoE");
-    JBLogDebug("loadDyldCache function: %llx", result->loadDyldCache_function);
-    if(result->loadDyldCache_function == 0) {
-        JBLogError("loadDyldInfo: loadDyldCache_function not found in %s", path);
-        goto failed;
+    // Only the iOS 15 arm64e spinlock workaround calls loadDyldCache.
+    // Requiring this legacy symbol on newer dyld versions rejects otherwise
+    // usable iOS 18 images before the normal entrypoint path is even tried.
+#ifdef __arm64e__
+    if (!__builtin_available(iOS 16.0, *)) {
+        result->loadDyldCache_function = get_symbol(path, "__ZN5dyld313loadDyldCacheERKNS_18SharedCacheOptionsEPNS_19SharedCacheLoadInfoE");
+        if (!result->loadDyldCache_function) goto failed;
+        result->loadDyldCache_trampoline = get_symbol(path, "_ORIG__ZN5dyld313loadDyldCacheERKNS_18SharedCacheOptionsEPNS_19SharedCacheLoadInfoE");
     }
-
-    result->loadDyldCache_trampoline = get_symbol(path, "_ORIG__ZN5dyld313loadDyldCacheERKNS_18SharedCacheOptionsEPNS_19SharedCacheLoadInfoE");
-    JBLogDebug("loadDyldCache orig trampoline: %llx", result->loadDyldCache_trampoline);
+#endif
 
     fd = open(path, O_RDONLY);
     if(fd<0) {
@@ -612,6 +631,12 @@ int proc_patch_dyld_internal(pid_t pid, bool spinlockFixOnly)
 {
     int ret = 0;
 
+    bool iOS15Arm64e = false;
+#ifdef __arm64e__
+    if (!__builtin_available(iOS 16.0, *)) iOS15Arm64e = true;
+#endif
+    if (spinlockFixOnly && (!iOS15Arm64e || !dyld_patch_enabled())) return -1;
+
     kern_return_t kr;
     task_port_t task = MACH_PORT_NULL;
     vm_address_t  remoteLoadAddress = 0;
@@ -621,12 +646,18 @@ int proc_patch_dyld_internal(pid_t pid, bool spinlockFixOnly)
 
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
-        assert((stockDyldInfo=loadDyldInfo("/usr/lib/dyld")) != NULL);
-        assert((patchedDyldInfo=loadDyldInfo(JBROOT_PATH("/basebin/.fakelib/dyld"))) != NULL);
+        stockDyldInfo = loadDyldInfo("/usr/lib/dyld");
+        patchedDyldInfo = loadDyldInfo(JBROOT_PATH("/basebin/.fakelib/dyld"));
     });
 
     if(stockDyldInfo == NULL || patchedDyldInfo == NULL) {
         JBLogError("load dyld failed");
+        return -1;
+    }
+    if (spinlockFixOnly && (!stockDyldInfo->loadDyldCache_function ||
+                           !patchedDyldInfo->loadDyldCache_function ||
+                           !patchedDyldInfo->loadDyldCache_trampoline)) {
+        JBLogError("Missing iOS 15 spinlock symbol or trampoline");
         return -1;
     }
 
@@ -672,16 +703,6 @@ int proc_patch_dyld_internal(pid_t pid, bool spinlockFixOnly)
 
     if(spinlockFixOnly)
     {
-        bool iOS15Arm64e = false;
-#ifdef __arm64e__
-        if (!__builtin_available(iOS 16.0, *))
-        {
-            iOS15Arm64e = true;
-        }
-#endif
-        assert(iOS15Arm64e == true);
-        assert(dyld_patch_enabled());
-
         uint64_t loadDyldCache_old = dyld_address + stockDyldInfo->loadDyldCache_function;
         uint64_t loadDyldCache_new = remoteLoadAddress + patchedDyldInfo->loadDyldCache_function;
         uint64_t loadDyldCache_orig = remoteLoadAddress + patchedDyldInfo->loadDyldCache_trampoline;
@@ -693,7 +714,8 @@ int proc_patch_dyld_internal(pid_t pid, bool spinlockFixOnly)
             goto failed;
         }
 
-        if(task_set_dyld_info(mach_task, dyld_address + stockDyldInfo->all_image_info_addr, stockDyldInfo->all_image_info_size) != 0) {
+        if(task_set_dyld_info(mach_task, dyld_address + stockDyldInfo->all_image_info_addr, stockDyldInfo->all_image_info_size,
+                              dyldInfo.all_image_info_addr, dyldInfo.all_image_info_size) != 0) {
             JBLogError("task_set_dyld_info failed");
             goto failed;
         }
@@ -801,7 +823,8 @@ reentry_end:
         goto failed;
     }
 
-    if(task_set_dyld_info(mach_task, remoteLoadAddress + patchedDyldInfo->all_image_info_addr, patchedDyldInfo->all_image_info_size) != 0) {
+    if(task_set_dyld_info(mach_task, remoteLoadAddress + patchedDyldInfo->all_image_info_addr, patchedDyldInfo->all_image_info_size,
+                          dyldInfo.all_image_info_addr, dyldInfo.all_image_info_size) != 0) {
         JBLogError("task_set_dyld_info failed");
         goto failed;
     }

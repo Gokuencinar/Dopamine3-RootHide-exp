@@ -14,7 +14,7 @@ class RootHideHardwarePreflightTests(unittest.TestCase):
         self.assertIn("NSError *preflightError = [self rootHidePreflightError]", entry)
         preflight = source.split("- (NSError *)rootHidePreflightError", 1)[1].split("- (void)runWithError:", 1)[0]
         self.assertIn("NSProcessInfo.processInfo.operatingSystemVersion", preflight)
-        self.assertIn("os.majorVersion < 15 || os.majorVersion > 16", preflight)
+        self.assertIn("!rh3_bootstrap_version_for_os((int)os.majorVersion)", preflight)
         self.assertIn("isArm64e", preflight)
         self.assertIn("isSupported", preflight)
         self.assertIn("isJailbrokenWithOtherJailbreak", preflight)

@@ -13,8 +13,9 @@
 
 
 // strlcpy and strlcat are already provided by main.S in Dopamine 3.x.
-// The loader symbol below is not guaranteed to exist on iOS 18+.
-#if IOS < 18
+// Match roothider.c, including the iOS 18 image. MachOMerger resolves this
+// against the actual dyld before any child process is redirected to it.
+#if IOS <= 18
 
 .global _MACHOMERGER_ORIG__ZN5dyld46Loader18expandAtLoaderPathERNS_12RuntimeStateEPKcRKNS0_11LoadOptionsEPKS0_bPc
 .global _MACHOMERGER_HOOKTRAMPOLINE__ZN5dyld46Loader18expandAtLoaderPathERNS_12RuntimeStateEPKcRKNS0_11LoadOptionsEPKS0_bPc

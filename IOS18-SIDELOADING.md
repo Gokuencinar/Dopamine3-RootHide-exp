@@ -1,60 +1,77 @@
-# Objetivo: RootHide en iOS 18 mediante sideloading
+# Candidata experimental de RootHide para iOS 18
 
-Requisito del usuario, 15/10/2026: instalar la IPA con AltStore u otra plataforma
-de sideloading, y usar el jailbreak con RootHide en los iPhone compatibles con
-iOS 18. **La beta arm64e/iOS 15-16 no satisface ese requisito.**
+Esta revisión permite intentar el port en iOS 18 con la variante manual
+Hardware Beta. No existe evidencia de instalación o arranque en un iPhone.
+El build ordinario conserva el jailbreak deshabilitado.
 
-## Alcance real de la base
+## Alcance
 
-Dopamine 3.0.11 declara soporte en iOS 18.0-18.7.1 para A12/A13: iPhone XS,
-XS Max, XR, familia iPhone 11 y SE de segunda generación. En el código, la
-combinación es ClearSword/DarkSword y momentarius. Titan no proporciona un
-bypass para iOS 18 en A14 y posteriores; sus rangos terminan en 17.3.1.
+La base Dopamine 3.0.11, commit `448ff1a83d2bb807346f1f3d36332e4afbf9794a`,
+incluye ClearSword/DarkSword y momentarius para A12/A13 en iOS 18.0-18.7.1:
+XS, XS Max, XR, familia 11 y SE de segunda generación. A14 y posteriores con
+iOS 18 siguen sin una combinación de exploits disponible en esta base. No se
+han alterado los rangos de exploits ni sustituido su comprobación por un
+simple número de versión.
 
-Fuentes primarias: [Dopamine 3.0](https://github.com/opa334/Dopamine/releases/tag/3.0),
-[página del desarrollador](https://ellekit.space/dopamine/), y los Info.plist de
-los exploits de esta base, fijada en `448ff1a83d2bb807346f1f3d36332e4afbf9794a`.
-El soporte de Dopamine no prueba el soporte del port RootHide.
+Fuentes: [Dopamine 3.0](https://github.com/opa334/Dopamine/releases/tag/3.0),
+[desarrollador](https://ellekit.space/dopamine/).
 
-## Bloqueos confirmados en este port
+## Cambios del port
 
-1. `DOJailbreaker.rootHidePreflightError` rechaza iOS 17 y posteriores antes de
-   explotar. `prepareRootHideBootstrapWithCompletion:` también los rechaza antes
-   de extraer archivos. Cambiar solo esos límites no adapta RootHide a iOS 18.
-2. Solo se incluyen los bootstraps RootHide `1800` y `1900`. La selección,
-   repositorios y paquetes están adaptados a iOS 15/16, sin evidencia de
-   compatibilidad de instalación en iOS 18.
-3. El código del donante en `roothider/unsandbox2.m` usa estructuras vnode y
-   namecache y escrituras con `offsetof` de sus cabeceras. Despacha desde iOS
-   16.4 sin distinguir iOS 18. Además, la ruta exige símbolos nchashtbl y
-   nchashmask que no produce el XPF de esta base. No hay validación de estos
-   parches para los kernels de iOS 18; no deben habilitarse por extrapolación.
-4. Launchd, dyld, confianza, registro de aplicaciones y eliminación necesitan
-   adaptación y pruebas en la combinación concreta de dispositivo/build. No
-   existe en este repositorio evidencia de un arranque RootHide en iOS 18.
+- Perfil común a preflight e instalador: 1800 para iOS 15; 1900 para iOS 16 e
+  iOS 18 experimental. Otros sistemas, incluidos 17 y 26, se rechazan. Se
+  reutiliza el userspace arm64e fijado por SHA-256; no es un bootstrap nuevo
+  certificado para iOS 18. Dopamine también utiliza 1900 como familia de
+  userspace posterior, sin que eso pruebe los paquetes específicos de RootHide.
+- El instalador vuelve a exigir `isSupported` antes de crear el contenedor.
+  Se conservan aislamiento de /var/jb, comprobación de propietario,
+  transacciones, fallo estricto de setup y arranque sin tweaks.
+- El hook `Loader::expandAtLoaderPath` y su trampolín se incluyen en el binario
+  de dyld para iOS 18. La firma coincide con
+  [Apple dyld-1285.19, Loader.cpp](https://github.com/apple-oss-distributions/dyld/blob/dyld-1285.19/dyld/Loader.cpp).
+  MachOMerger debe resolverlo en el dyld real del dispositivo; si falta,
+  retorna error. No se adivinan offsets de instrucciones ni se afirma que
+  todos los builds conserven ese símbolo.
+- La carga de dyld deja de exigir `loadDyldCache` fuera de iOS 15 arm64e:
+  ese símbolo y su trampolín son exclusivos de la corrección del spinlock.
+  Una imagen no cargable devuelve error en vez de abortar el daemon mediante
+  un assert. También se comprueba el fallo de asignación de memoria.
+- Se excluyen del enlace unsandbox.m, unsandbox1.m y unsandbox2.m. El informe
+  anterior los describía como bloqueo de la ruta activa; las referencias
+  demuestran que no se invocan. La elevación activa usa las primitivas de
+  Dopamine 3, no esos layouts vnode/namecache del donante. Sus símbolos no se
+  anuncian como adaptados a iOS 18.
+- Para actualizar la información de dyld en task, se busca un único par
+  dirección/tamaño en el task propio y se contrasta con task_info del objetivo.
+  Se rechazan lecturas fallidas, ambigüedad, discrepancia y overflow. En iOS 18
+  se escribe exclusivamente ese par y se comprueba el resultado. Se suprime
+  el borrado heurístico de 48 bytes del donante, sin justificación en
+  [XNU 11215 task.h](https://github.com/apple-oss-distributions/xnu/blob/xnu-11215.81.4/osfmk/kern/task.h)
+  ni en [task_set_dyld_info de Apple](https://github.com/apple-oss-distributions/xnu/blob/xnu-11215.81.4/osfmk/kern/task.c).
+  Es una adaptación experimental basada en fuente, pendiente de contraste
+  con el kernel real; no garantiza atomicidad ni estabilidad.
 
-## Sideloading: corrección independiente ya implementada
+## Evidencia y trabajo pendiente
 
-La base de Dopamine conserva su vía de firma e instalación convencional; no se
-debe equiparar sideloading a permisos privados concedidos por TrollStore. El
-preflight inicial verifica recursos dentro del bundle, pero difiere la lectura
-de otros contenedores cuando la app está en el sandbox. Tras elevar privilegios,
-se vuelven a comprobar los conflictos y la propiedad antes de modificar archivos.
+Los tests de host comprueban selección del perfil, exclusiones de build,
+enlace de hooks y guardas. En macOS un harness compila la función real de
+actualización del task con memoria simulada: éxito, offsets ambiguos/ausentes,
+discrepancia del objetivo, lectura y escritura fallidas. No usa un kernel real.
 
-La firma final del dispositivo la realiza el instalador con su certificado y
-perfil. No se ha producido ni probado aquí una firma Apple para un iPhone. La
-presencia de entitlements en la IPA ad hoc no demuestra que iOS los conceda.
-No se debe anunciar esta beta como instalada/probada mediante AltStore.
+No están probados firmware/dpkg/gestores del bootstrap 1900 en iOS 18, firma
+real de AltStore, merge del dyld del dispositivo, arranque de launchd,
+registro de apps, ocultación, reinicio ni eliminación. Tests e IPA compilada
+no resuelven esas incertidumbres. No distribuir como jailbreak funcional o
+compatible con todos los iPhone de iOS 18.
 
-La [guía enlazada por el desarrollador](https://ios.cfw.guide/installing-dopamine/)
-describe la instalación convencional de Dopamine. No es una certificación de
-este port y no sustituye la inspección de una IPA realmente refirmada.
+El preflight permite sideloading convencional: comprueba recursos del bundle
+y difiere las lecturas privilegiadas hasta después de la elevación. La firma
+final depende del certificado y perfil del instalador. La
+[guía enlazada por Dopamine](https://ios.cfw.guide/installing-dopamine/)
+describe su instalación convencional, sin certificar este port.
 
-## Criterio para entregar una beta de iOS 18
-
-Adaptar primero las rutas anteriores, verificar offsets/símbolos contra kernels
-reales del rango elegido y el bootstrap/gestores para iOS 18. Después compilar,
-inspeccionar la IPA refirmada y probar instalación, explotación, bootstrap,
-arranque sin tweaks, gestores, reinicio y eliminación. Registrar modelo,
-versión/build, commit y logs. Sin esos resultados, solo se puede declarar una
-candidata no validada; no un jailbreak RootHide funcional para iOS 18.
+Para pasar de candidata a soporte probado hace falta un iPhone A12/A13 con
+build exacto, copia de datos y logs de instalación, primer arranque sin tweaks,
+gestor, rejailbreak tras reinicio y eliminación. Cada fallo debe conservar su
+estado de recuperación; no forzar la continuación modificando offsets,
+hashes o marcadores.

@@ -6,6 +6,7 @@
 //
 
 #import "DOJailbreaker.h"
+#import "RootHideBootstrapProfile.h"
 #import "DOEnvironmentManager.h"
 #import "DOExploitManager.h"
 #import "DOUIManager.h"
@@ -788,8 +789,8 @@ static void *rh3_boomerang_server(void *opaque)
     NSString *reason = nil;
     NSOperatingSystemVersion os = NSProcessInfo.processInfo.operatingSystemVersion;
     DOEnvironmentManager *environment = [DOEnvironmentManager sharedManager];
-    if (!environment.isArm64e || os.majorVersion < 15 || os.majorVersion > 16)
-        reason = @"RootHide 3 hardware beta currently accepts only arm64e devices on iOS 15 or 16.";
+    if (!environment.isArm64e || !rh3_bootstrap_version_for_os((int)os.majorVersion))
+        reason = @"RootHide 3 hardware beta requires arm64e on iOS 15, 16 or experimental iOS 18.";
     else if (![environment isSupported])
         reason = @"No compatible Dopamine exploit combination is available for this device and iOS build.";
     else if ([environment isJailbrokenWithOtherJailbreak])

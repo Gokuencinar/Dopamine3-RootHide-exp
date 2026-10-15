@@ -13,6 +13,10 @@ LDFLAGS = -larchive -lbsm -L../.build -F ../_external/frameworks -lchoma
 # copy exports the same function names with an incompatible pause/resume ABI;
 # do not link a second crash reporter into libjailbreak.
 ROOTHIDE_SOURCES = $(filter-out src/roothider/crashreporter.m,$(wildcard src/roothider/*.c src/roothider/*.m src/roothider/*.cpp))
+# The active port uses Dopamine 3's sandbox/credential primitives. These
+# unused donor implementations write namecache/vnode layouts from iOS 16;
+# do not ship them as callable kernel-patching entrypoints on newer kernels.
+ROOTHIDE_SOURCES := $(filter-out src/roothider/unsandbox.m src/roothider/unsandbox1.m src/roothider/unsandbox2.m,$(ROOTHIDE_SOURCES))
 LDFLAGS += -lc++
 
 sign: $(TARGET)

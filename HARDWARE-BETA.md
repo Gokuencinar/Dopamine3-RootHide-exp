@@ -1,7 +1,9 @@
 # RootHide 3 — beta con instalación del jailbreak habilitada
 
-**Esta variante se limita a iOS 15/16. No es la variante de iOS 18 solicitada.**
-El estado y los bloqueos del objetivo nuevo se documentan en
+**Candidata experimental: iOS 15/16 y ahora iOS 18, pendiente de prueba física.**
+En iPhone con iOS 18, los exploits de esta base se limitan a A12/A13 hasta 18.7.1.
+No permite hacer jailbreak a todos los iPhone que pueden ejecutar iOS 18.
+Los cambios y límites pendientes se documentan en
 [IOS18-SIDELOADING.md](IOS18-SIDELOADING.md).
 
 Esta variante permite ejecutar los exploits de Dopamine e instalar y activar el
@@ -14,14 +16,16 @@ ocultación, instalación de paquetes ni recuperación tras un fallo.
 - Aplicación: **RootHide 3 Hardware Beta**.
 - Bundle: `com.gokuencinar.roothide3.hardwarebeta`.
 - `RH3_FULL_APP_EXPERIMENTAL=1`, `ROOTHIDE3_BOOTSTRAP_READY=1`.
-- Solo arm64e con iOS 15/16 y una combinación de exploits disponible en Dopamine.
+- Solo arm64e con iOS 15, 16 o experimental 18 y una combinación de exploits disponible en Dopamine.
   No se amplía la compatibilidad de los exploits por activar esta variante.
 - Se corrige el mínimo de carga de `Titan.framework` de 26.1 a 15.0 para
   alinearlo con la aplicación. Sus rangos de explotación del Info.plist se
   conservan. El verificador rechaza binarios embebidos con un mínimo superior
   al declarado por la app.
 - Firma de ldid con los entitlements privados de Dopamine. Necesita un
-  instalador compatible; una firma convencional puede perder permisos necesarios.
+  instalador compatible. La instalación convencional conserva la vía de
+  elevación de Dopamine y no presupone permisos de TrollStore; no se ha
+  probado una IPA refirmada por AltStore en un dispositivo.
 
 ## Instalación y comprobaciones
 

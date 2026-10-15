@@ -6,6 +6,7 @@
 //
 
 #import "DOBootstrapper.h"
+#import "RootHideBootstrapProfile.h"
 #import "DOBootstrapper+zstd.h"
 #import "DOEnvironmentManager.h"
 #import "DOUIManager.h"
@@ -336,7 +337,9 @@ static NSError *RH3Error(BootstrapErrorCode code, NSString *message)
     // Bundled resources are readable before exploitation even when sideloaded.
     // Foreign-container checks need privileges: ordinary AltStore installations
     // must defer those until ensureJailbreakRootExists/prepareBootstrap below.
-    NSInteger version = NSProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 16 ? 1900 : 1800;
+    NSInteger version = rh3_bootstrap_version_for_os((int)NSProcessInfo.processInfo.operatingSystemVersion.majorVersion);
+    if (!version)
+        return RH3Error(BootstrapErrorCodeFailedExtracting, @"No RootHide bootstrap profile for this iOS version");
     NSError *assetError = [self rh3VerifyAssetsForVersion:version];
     if (assetError) return assetError;
     if (![[DOEnvironmentManager sharedManager] isInstalledThroughTrollStore] && geteuid() != 0)
@@ -826,15 +829,15 @@ cleanup_root:
                             @"RootHide donor packages require an arm64e device; arm64 is unsupported"));
         return;
     }
-    // The donor bootstrap format is verified for iOS 15 and 16 only. Never
-    // silently use stock Procursus on an unverified newer iOS version.
-    if (@available(iOS 17.0, *)) {
+    // iOS 18 reuses the pinned arm64e 1900 userspace as an experimental
+    // candidate. Never substitute a stock arm64 Procursus archive or infer
+    // support for future OS versions from a >= comparison.
+    NSInteger version = rh3_bootstrap_version_for_os((int)NSProcessInfo.processInfo.operatingSystemVersion.majorVersion);
+    if (!version || ![[DOEnvironmentManager sharedManager] isSupported]) {
         completion(RH3Error(BootstrapErrorCodeFailedExtracting,
-                           @"RootHide bootstrap for iOS 17+ is not validated; refusing to install stock Procursus"));
+                           @"No RootHide bootstrap profile or Dopamine exploit combination for this device/iOS"));
         return;
     }
-    NSInteger version = 1800;
-    if (@available(iOS 16.0, *)) version = 1900;
     NSError *error = [self rh3VerifyAssetsForVersion:version];
     if (error) { completion(error); return; }
 

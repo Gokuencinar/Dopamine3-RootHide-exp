@@ -60,8 +60,6 @@ int roothide_patch_proc(pid_t pid);
 
 int unrestrict(pid_t pid, int (*callback)(pid_t), bool resume);
 
-int unsandbox(const char* dir, const char* file);
-
 int ensure_dyld_trustcache(const char* path);
 
 int ensure_randomized_cdhash(const char* inputPath, void* cdhashOut);

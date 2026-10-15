@@ -11,9 +11,10 @@
 
 #define ROOTHIDE_LOADER_PREFIX "@loader_path/.jbroot"
 
-// The dyld4 loader hook is only known on the iOS 15-17 dyld layouts.
-// Keep the iOS 18+/26 MachOMerger images free of an unresolved symbol.
-#if IOS < 18
+// Apple dyld-1285.19/dyld/Loader.cpp retains this exact C++ signature.
+// MachOMerger must resolve it in the device's actual dyld; source-level ABI
+// agreement alone is not evidence of compatibility with every iOS 18 build.
+#if IOS <= 18
 
 typedef struct Loader Loader;
 typedef struct LoadOptions LoadOptions;
