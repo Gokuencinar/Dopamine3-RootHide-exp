@@ -58,6 +58,16 @@ class RootHideHardwarePreflightTests(unittest.TestCase):
         self.assertLess(method.index("return otherJailbreakActived(false)"),
                         method.index("if (csFlags & CS_PLATFORM_BINARY)"))
 
+    def test_only_hardware_beta_root_helper_can_remove_owned_bootstrap(self):
+        source = (ROOT / "Application/Dopamine/main.m").read_text(encoding="utf-8")
+        helper = source.split("#if RH3_FULL_APP_EXPERIMENTAL && ROOTHIDE3_BOOTSTRAP_READY", 1)[1].split("#endif", 1)[0]
+        self.assertIn('argc != 3 || strcmp(argv[2], "delete-bootstrap") || geteuid() != 0', helper)
+        self.assertLess(helper.index("geteuid() != 0"), helper.index("deleteBootstrap]"))
+        self.assertIn("return 77", helper)
+        self.assertIn("if (error)", helper)
+        self.assertIn("return 1", helper)
+        self.assertNotIn("setJailbreakHidden", helper)
+
 
 if __name__ == "__main__":
     unittest.main()

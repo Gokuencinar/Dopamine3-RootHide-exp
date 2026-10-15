@@ -52,6 +52,8 @@ La opción de eliminación de esta app utiliza el camino de RootHide 3 y verific
 la propiedad de ambos contenedores. Solo debe intentarse cuando el entorno esté
 operativo; su funcionamiento real tampoco se ha probado. Los marcadores de
 recuperación impiden eliminar estados ambiguos y pueden exigir recuperación manual.
+La beta permite además el helper root de eliminación tras reiniciar sin jailbreak;
+este devuelve error real si no puede verificar o eliminar su propio bootstrap.
 
 ## Generar la variante
 

@@ -11,6 +11,7 @@
 #import "DOEnvironmentManager.h"
 #import <libjailbreak/info.h>
 #import <libjailbreak/jbclient_xpc.h>
+#import <unistd.h>
 
 #ifndef RH3_INSTALLABLE_DIAGNOSTIC
 #define RH3_INSTALLABLE_DIAGNOSTIC 0
@@ -37,6 +38,23 @@ __attribute__((used)) static const char RH3ActivationMarker[] =
 #endif
 
 int main(int argc, char * argv[]) {
+#if RH3_FULL_APP_EXPERIMENTAL && ROOTHIDE3_BOOTSTRAP_READY && !RH3_INSTALLABLE_DIAGNOSTIC
+    // The hardware beta needs its root helper for offline removal after a
+    // reboot. Permit exactly this operation; never run stock TrollStore actions.
+    if (argc >= 2 && !strcmp(argv[1], "trollstore")) {
+        if (argc != 3 || strcmp(argv[2], "delete-bootstrap") || geteuid() != 0) return 77;
+        @autoreleasepool {
+            // The RootHide implementation verifies ownership and both linked
+            // containers before quarantining and removing either of them.
+            NSError *error = [[DOBootstrapper new] deleteBootstrap];
+            if (error) {
+                NSLog(@"RootHide 3 removal helper failed: %@", error.localizedDescription);
+                return 1;
+            }
+            return 0;
+        }
+    }
+#endif
 #if RH3_FULL_APP_EXPERIMENTAL
     // A live use also keeps the build marker in the final linked Mach-O.
     NSLog(@"RootHide 3 guarded full experiment: %s", RH3FullExperimentMarker);
