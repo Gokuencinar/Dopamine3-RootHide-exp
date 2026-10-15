@@ -1,21 +1,8 @@
-# RootHide 3 experimental hardware gate
+# Pruebas en un iPhone
 
-There are **no successful device tests** recorded for this port. Do not create
-or commit fictitious pass results to make the CI gate green. The static
-`--strict` gate requires both code activation review and real logs tied to
-the exact tested commit.
+Todavía no hay resultados de hardware registrados para este port. Cuando se pruebe, hay que guardar los logs de cada caso en `validation/logs/`, quitar los datos personales y calcular su SHA-256.
 
-After a compiled and independently inspected IPA is available, authorized
-testers should validate on disposable/recoverable arm64e iOS 15/16 devices
-with a full backup and an explicit recovery plan. Test the initial boot, the
-isolated hidden bootstrap, filesystem/process hiding, RootHide package
-manager installation, tweak injection and blacklist, subsequent boot and
-userspace reboot, uninstall/recovery, and the coexistence policy with
-ordinary Dopamine.
-
-Only when all checks truly pass, save a redacted log for each under
-`validation/logs/`, calculate its SHA-256, and create
-`validation/device-tests.json` with the schema:
+El archivo `validation/device-tests.json` usa este formato:
 
 ```json
 {
@@ -32,11 +19,8 @@ Only when all checks truly pass, save a redacted log for each under
 }
 ```
 
-The eight scenario keys are defined in `tools/roothide_port_audit.py`.
-Each must have real matching evidence. Log hashing is an integrity check,
-**not** a guarantee of correctness or cryptographic attestation of a device.
-Never commit device identifiers, passwords, tokens or personal app data.
+Es un ejemplo de estructura, no un resultado de prueba. Las ocho claves de escenarios están definidas en `tools/roothide_port_audit.py`: cubren arranque, bootstrap aislado, ocultación, gestores, inyección y blacklist, reinicios, eliminación y convivencia con Dopamine.
 
-The `tested_commit` must be an ancestor of the current branch. Only commits
-touching `validation/` may follow that tested source revision; any source
-change invalidates the evidence, forcing a fresh device validation.
+Cada resultado necesita su log real. El hash comprueba que el archivo no ha cambiado; no demuestra por sí mismo que la prueba sea correcta. No subas identificadores del dispositivo, contraseñas, tokens o datos de apps.
+
+`tested_commit` debe ser un antecesor de la rama actual. Después solo se permiten cambios en `validation/`; cualquier cambio fuera de esa carpeta exige volver a validar. No se añaden resultados ficticios para hacer pasar la auditoría.

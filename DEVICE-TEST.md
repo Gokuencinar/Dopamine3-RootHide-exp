@@ -1,54 +1,14 @@
-# RootHide 3 — test de instalación en iPhone
+# App de diagnóstico
 
-Esta rama genera **dos artefactos muy diferentes**. No los confundas:
+`RootHide3-Device-Test.ipa` sirve para probar la instalación y apertura de una app sencilla. No lleva código de jailbreak, bootstrap ni instaladores de paquetes.
 
-| Artefacto Actions | Uso | Jailbreak disponible |
-| --- | --- | --- |
-| `RootHide3-Device-Test-APP-ONLY` | Instalar y abrir la GUI en un iPhone de pruebas | **No.** Interfaz informativa sin acciones de instalación/explotación/reinicio |
-| `RootHide3-COMPILE-ONLY-NOT-FOR-INSTALL` | Inspección de binarios y build del port | **No verificado. No instalar.** |
+Su identificador es `com.gokuencinar.roothide3.diagnostic`. Necesita refirmarse para instalarla en un iPhone. Que esta app abra correctamente no demuestra que la beta de jailbreak funcione.
 
-El primero incluye `RootHide3-Device-Test.ipa`, con bundle ID
-`com.gokuencinar.roothide3.diagnostic` y nombre visible `RootHide 3 Test`.
-El artefacto se construye desde `Application/Diagnostic/` como una aplicación
-UIKit mínima **independiente**: no compila ni enlaza el ejecutable convencional
-de Dopamine, explotaciones, bibliotecas BaseBin, hooks, binarios de jailbreak
-o instaladores. El verificador exige que la IPA contenga únicamente el
-ejecutable y `Info.plist`, con un marcador exclusivo de diagnóstico.
-La macro de activación RootHide del port convencional sigue en `0`.
-**No reemplaza** la app estable de Dopamine.
-
-## Instalación
-
-1. En GitHub Actions, abre el último workflow de tu commit y descarga
-   `RootHide3-Device-Test-APP-ONLY`. Descomprime el artefacto y localiza
-   `RootHide3-Device-Test.ipa`.
-2. La IPA de CI se firma **ad hoc** con `ldid` y un plist de entitlements
-   vacío. Esto no es una firma de distribución de Apple. Puedes intentar
-   instalarla mediante un instalador compatible con firmas ad hoc, como
-   **TrollStore en las versiones de iOS que lo admiten**, o volver a firmarla
-   con tu propia identidad/provisioning mediante una herramienta legítima
-   de sideloading. No existe compatibilidad de instalación universal.
-3. Abre `RootHide 3 Test` y comprueba que aparecen el título y el texto
-   «Diagnostic build», sin botones de jailbreak. Registra modelo, versión
-   de iOS y cualquier error de instalación, cierre o lanzamiento.
-4. Para retirar la prueba, borra únicamente la app `RootHide 3 Test`.
-   No ejecutes opciones de desinstalación del jailbreak estable.
-
-**Alcance:** verifica formato de IPA, instalación y lanzamiento de la
-interfaz; no verifica que se pueda arrancar un jailbreak RootHide en iOS
-15/16/17+, ni instalación oculta, jailbreakd, blacklist, `dyld`, `launchd`,
-trustcache, kernel patches o recuperación. Que pueda instalarse una GUI
-no demuestra que el port sea funcional.
-
-## Compilación en macOS
-
-El diagnóstico no necesita compilar BaseBin ni el jailbreak. En macOS con
-Xcode Command Line Tools, el SDK de iOS y `ldid` disponibles:
+Para generarla en macOS:
 
 ```sh
-make -C Application diagnostic
+gmake -C Application diagnostic
 python3 tools/verify_roothide_device_test.py --ipa Application/RootHide3-Device-Test.ipa --json
 ```
 
-No ejecutar el objetivo `update` del Makefile raíz en un dispositivo:
-está diseñado para el Dopamine convencional y no para la app de prueba.
+La variante que permite intentar el jailbreak está explicada en [HARDWARE-BETA.md](HARDWARE-BETA.md).

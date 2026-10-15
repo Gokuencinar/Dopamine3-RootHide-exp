@@ -66,7 +66,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 tools/verify_roothide_device_test.py --ipa Application/RootHide3-Device-Test.ipa --json | tee roothide-device-test-inspection.json
-          printf 'ROOT HIDE 3 — STANDALONE UI INSTALL/OPEN TEST ONLY\nKernel/jailbreak code: NOT LINKED\nNo bootstrap files or package installers.\nAd-hoc signed: requires compatible installer or legitimate re-signing for the device.\n' > ROOT_HIDE_DEVICE_TEST_README.txt
+          printf 'RootHide 3: app de diagnóstico.\nSirve para probar instalación y apertura; no incluye jailbreak ni bootstrap.\nNecesita refirmarse con un instalador compatible.\n' > ROOT_HIDE_DEVICE_TEST_README.txt
 
       - name: Upload standalone device-test IPA
         uses: actions/upload-artifact@v4
@@ -237,7 +237,7 @@ jobs:
         run: |
           set -euo pipefail
           python3 tools/verify_roothide_build.py --ipa Application/Dopamine.ipa --json | tee roothide-build-inspection.json
-          printf 'ROOT HIDE 3: COMPILE-ONLY, NOT INSTALLABLE AS ROOTHIDE\nCommit: %s\nActivation: DISABLED\nRuntime/device verification: NONE\n' "$GITHUB_SHA" > ROOT_HIDE_DO_NOT_INSTALL.txt
+          printf 'RootHide 3: paquete para revisar la compilación.\nRevisión: %s\nJailbreak desactivado. Sin pruebas en un iPhone.\n' "$GITHUB_SHA" > ROOT_HIDE_DO_NOT_INSTALL.txt
 
       - name: Upload quarantined RootHide compile artifact
         if: steps.roothide_port.outputs.is_port == 'true' && env.ROOTHIDE_HARDWARE_TEST != 'YES'
@@ -261,7 +261,7 @@ jobs:
           set -euo pipefail
           cp Application/Dopamine.ipa Application/RootHide3-Full-Experimental.ipa
           python3 tools/verify_roothide_full_experimental.py --ipa Application/RootHide3-Full-Experimental.ipa --json | tee roothide-full-experimental-inspection.json
-          printf 'ROOT HIDE 3 — FULL DOPAMINE COMPONENTS, NOT FUNCTIONAL JAILBREAK\nCommit: %s\nBundle: com.gokuencinar.roothide3.fulltest\nRootHide bootstrap gate: 0 / stock fallback blocked\nContains original Dopamine/RootHide exploit components and private entitlements.\nNo tests on a device: use only on disposable test hardware with compatible installation/signing.\n' "$GITHUB_SHA" > ROOT_HIDE_FULL_EXPERIMENTAL_README.txt
+          printf 'RootHide 3: app completa con el jailbreak desactivado.\nRevisión: %s\nNecesita refirmarse. Para intentar el jailbreak, usa la Hardware Beta.\nConsulta FULL-EXPERIMENTAL.md.\n' "$GITHUB_SHA" > ROOT_HIDE_FULL_EXPERIMENTAL_README.txt
 
       - name: Upload guarded full experimental app
         if: steps.roothide_port.outputs.is_port == 'true' && env.ROOTHIDE_HARDWARE_TEST != 'YES'
@@ -282,7 +282,7 @@ jobs:
           cp Application/Dopamine.ipa Application/RootHide3-Hardware-Beta.ipa
           python3 tools/verify_roothide_full_experimental.py --hardware-beta --ipa Application/RootHide3-Hardware-Beta.ipa --json | tee roothide-hardware-beta-inspection.json
           shasum -a 256 Application/RootHide3-Hardware-Beta.ipa > RootHide3-Hardware-Beta.ipa.sha256
-          printf 'ROOT HIDE 3 — UNVALIDATED HARDWARE BETA, JAILBREAK ENABLED\nCommit: %s\nBundle: com.gokuencinar.roothide3.hardwarebeta\nRequires arm64e, iOS 15/16 or experimental iOS 18 (A12/A13 up to 18.7.1), and a compatible Dopamine exploit combination.\nDo not test over another bootstrap. Initial activation forces tweaks off.\nInstallation, launchd/dyld stability, hiding and recovery have NOT been verified on a device.\nSee HARDWARE-BETA.md for testing and recovery.\n' "$GITHUB_SHA" > ROOT_HIDE_HARDWARE_BETA_README.txt
+          printf 'RootHide 3: beta con el intento de jailbreak habilitado.\nRevisión: %s\nEn iOS 18 admite A12/A13 hasta 18.7.1. También arm64e con iOS 15/16 y exploits compatibles.\nEmpieza sin tweaks. No se ha probado en un iPhone.\nHaz una copia de tus datos y consulta HARDWARE-BETA.md.\n' "$GITHUB_SHA" > ROOT_HIDE_HARDWARE_BETA_README.txt
 
       - name: Upload jailbreak-enabled RootHide hardware beta
         if: steps.roothide_port.outputs.is_port == 'true' && env.ROOTHIDE_HARDWARE_TEST == 'YES'
