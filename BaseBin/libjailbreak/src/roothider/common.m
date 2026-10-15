@@ -4,6 +4,7 @@
 #include <spawn.h>
 #include <dlfcn.h>
 #include <signal.h>
+#include <sys/wait.h>
 #include <libgen.h>
 #include <sandbox.h>
 #include <libproc.h>
@@ -719,22 +720,19 @@ void exec_set_patch(bool enabled)
 }
 int exec_cmd_roothide_spawn(pid_t* pidp, const char* path, const posix_spawn_file_actions_t *fap, const posix_spawnattr_t *attrp, char *const argv[], char *const envp[])
 {
-    posix_spawnattr_t attr = NULL;
-    if(!attrp) {
-        posix_spawnattr_init(&attr);
-        attrp = &attr;
-    }
-
+    if (pidp) *pidp = 0;
     int argc = 0;
     for(int i=0; argv && argv[i]; i++) {
         argc++;
     }
 
     bool need_patch_child = exec_patch_enabled;
-    if(dlopen("systemhook.dylib", RTLD_NOLOAD)) {
+    void *systemhook = dlopen(JBROOT_PATH("/basebin/systemhook.dylib"), RTLD_NOLOAD | RTLD_LAZY);
+    if(systemhook) {
     /* if systemhook has been loaded into the current process,
         it means posix_spawn has been hooked and we can skip patching. */
         need_patch_child = false;
+        dlclose(systemhook);
     } else if(argc==3 && strcmp(argv[1],"trollstore")==0 && strcmp(argv[2],"delete-bootstrap")==0) {
         // skip patching for trollstore bootstrap delete
         need_patch_child = false;
@@ -747,20 +745,33 @@ int exec_cmd_roothide_spawn(pid_t* pidp, const char* path, const posix_spawn_fil
         }
     }
 
-    short flags=0;
-    posix_spawnattr_getflags(attrp, &flags);
+    posix_spawnattr_t attr = NULL;
+    if (!attrp) {
+        int result = posix_spawnattr_init(&attr);
+        if (result != 0) return result;
+        attrp = &attr;
+    }
+    short flags = 0;
+    int ret = posix_spawnattr_getflags(attrp, &flags);
+    if (ret != 0) goto cleanup;
     bool should_resume = (flags & POSIX_SPAWN_START_SUSPENDED) == 0;
 
     JBLogDebug("exec_cmd_roothide_spawn path=%s flags=%x", path, flags);
     if (argv) for (int i = 0; argv[i]; i++) JBLogDebug("\targs[%d] = %s", i, argv[i]);
     if (envp) for (int i = 0; envp[i]; i++) JBLogDebug("\tenvp[%d] = %s", i, envp[i]);
 
-    posix_spawnattr_setflags(attrp, flags | POSIX_SPAWN_START_SUSPENDED);
+    ret = posix_spawnattr_setflags(attrp, flags | POSIX_SPAWN_START_SUSPENDED);
+    if (ret != 0) goto cleanup;
 
 	pid_t pidval = 0;
 	if (!pidp) pidp = &pidval;
-    int ret = posix_spawn(pidp, path, fap, attrp, argv, envp);
+    *pidp = 0;
+    ret = posix_spawn(pidp, path, fap, attrp, argv, envp);
     pid_t pid = *pidp;
+    if (ret == 0 && pid <= 1) ret = ECHILD;
+    // This helper may borrow the caller's attributes. Do not leak the
+    // START_SUSPENDED bit into its next spawn, including on spawn failure.
+    (void)posix_spawnattr_setflags(attrp, flags);
 
     JBLogDebug("spawn ret=%d pid=%d", ret, pid);
 
@@ -770,18 +781,28 @@ int exec_cmd_roothide_spawn(pid_t* pidp, const char* path, const posix_spawn_fil
             // will fail before launchdhook injected and dyld patched, eg: opainject...
             if(jbdSpawnPatchChild(pid, should_resume) != 0) {
                 JBLogError("Failed to patch spawned process (%d) %s", pid, path);
-                //jailbreak internal spawn, just let it hang forever so that we could get a panic log
-                //kill(pid, SIGQUIT); //core dump
-                //kill(pid, SIGKILL);
-                return 202;
+                ret = 202;
             }
         } else {
             if (should_resume) {
-                kill(pid, SIGCONT);
+                if (kill(pid, SIGCONT) != 0) ret = errno;
             }
         }
     }
 
+    if (ret != 0 && pid > 1) {
+        // Never strand a known suspended child when patching/resuming fails.
+        // Reap only our child, without introducing another unbounded wait.
+        (void)kill(pid, SIGKILL);
+        for (int attempt = 0; attempt < 20; attempt++) {
+            pid_t waited = waitpid(pid, NULL, WNOHANG);
+            if (waited == pid || (waited < 0 && errno == ECHILD)) break;
+            if (waited < 0 && errno != EINTR) break;
+            usleep(10000);
+        }
+        *pidp = 0;
+    }
+cleanup:
     if(attr) {
         posix_spawnattr_destroy(&attr);
         attrp = NULL;

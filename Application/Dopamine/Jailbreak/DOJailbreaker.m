@@ -836,6 +836,9 @@ static void *rh3_boomerang_server(void *opaque)
     }
 #endif
     BOOL removeJailbreakEnabled = [[DOPreferenceManager sharedManager] boolPreferenceValueForKey:@"removeJailbreakEnabled" fallback:NO];
+    // opainject/jbctl and dyld generation run before the RootHide patch daemon
+    // is available. Enable child patching only after launchd and dyld are ready.
+    if ([DOBootstrapper rootHidePortEnabled]) exec_set_patch(false);
     BOOL tweaksEnabled = [[DOPreferenceManager sharedManager] boolPreferenceValueForKey:@"tweakInjectionEnabled" fallback:YES];
     BOOL idownloadEnabled = [[DOPreferenceManager sharedManager] boolPreferenceValueForKey:@"idownloadEnabled" fallback:NO];
     BOOL appJITEnabled = [[DOPreferenceManager sharedManager] boolPreferenceValueForKey:@"appJITEnabled" fallback:YES];

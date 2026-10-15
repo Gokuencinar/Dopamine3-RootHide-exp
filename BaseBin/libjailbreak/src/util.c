@@ -22,6 +22,7 @@
 #include <sys/mount.h>
 #include <stdatomic.h>
 #include <errno.h>
+#include "roothider/common.h"
 extern char **environ;
 
 #define FAKE_PHYSPAGE_TO_MAP 0x13370000
@@ -858,7 +859,9 @@ int __exec_cmd_internal_va(bool suspended, bool root, bool waitForExit, pid_t *p
 	}
 
 	pid_t spawnedPid = 0;
-	int spawnError = posix_spawn(&spawnedPid, binary, NULL, &attr, (char *const *)argv, envToUse);
+	int spawnError = roothide_is_active()
+		? exec_cmd_roothide_spawn(&spawnedPid, binary, NULL, &attr, (char *const *)argv, envToUse)
+		: posix_spawn(&spawnedPid, binary, NULL, &attr, (char *const *)argv, envToUse);
 	if (attr) posix_spawnattr_destroy(&attr);
 	if (spawnError != 0) return spawnError;
 

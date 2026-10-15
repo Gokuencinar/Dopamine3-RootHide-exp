@@ -32,6 +32,10 @@ ocultación, instalación de paquetes ni recuperación tras un fallo.
 4. La instalación usa sus propios contenedores `.jbroot-*`, comprueba los
    paquetes RootHide y evita instalar las dependencias convencionales en `/var/jb`.
    La inyección en launchd tiene plazos de espera y exige el handshake.
+   Los comandos internos usan el helper de spawn de RootHide solo con un
+   contenedor oculto activo. El parcheo de hijos permanece desactivado hasta
+   preparar launchd/dyld; los fallos posteriores terminan y recogen al hijo
+   conocido, con espera acotada, y restauran los flags de spawn del llamante.
 5. La activación experimental fuerza inicialmente el modo sin tweaks mediante
    `.safe_mode`. No instalar tweaks antes de comprobar arranque, gestor de
    paquetes, rutas del bootstrap y reinicio. Cada nueva inyección desde esta beta
