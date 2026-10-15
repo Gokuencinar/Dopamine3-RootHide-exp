@@ -16,6 +16,7 @@ all: basebin.tar
 subprojects: ChOma XPF MachOMerger opainject libjailbreak systemhook forkfix launchdhook hookd boomerang jbctl idownloadd watchdoghook rootlesshooks roothidehooks jailbreakd bootstrapper dopamine
 
 ChOma: .build .include
+	@python3 ../tools/apply_choma_fixes.py
 	@$(MAKE) -C ChOma TARGET=ios DISABLE_SIGNING=1 DISABLE_TESTS=1 DYLIB_LDFLAGS="-install_name @loader_path/libchoma.dylib"
 	@ldid -Cadhoc -s ChOma/output/ios/lib/libchoma.dylib
 	@cp ChOma/output/ios/lib/libchoma.dylib .build

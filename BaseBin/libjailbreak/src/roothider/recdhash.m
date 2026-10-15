@@ -205,6 +205,19 @@ int ensure_randomized_cdhash_for_slice(const char* inputPath, uint64_t offset, v
 			}
 		}
 
+		// Validate page geometry/hash type through the bounded consumer before
+		// the first on-disk mutation. Unsupported signatures stay untouched.
+		CS_CodeDirectory codeDir;
+		if(csd_blob_read(bestCDBlob, 0, sizeof(CS_CodeDirectory), &codeDir) != 0) {
+			JBLogError("Error: failed to read code directory: %s\n", inputPath);
+			break;
+		}
+		CODE_DIRECTORY_APPLY_BYTE_ORDER(&codeDir, BIG_TO_HOST_APPLIER);
+		uint8_t pageHash[CC_SHA384_DIGEST_LENGTH];
+		if (!code_directory_calculate_page_hash(&codeDir, macho, 0, pageHash)) {
+			JBLogError("Error: unsupported code page layout: %s\n", inputPath);
+			break;
+		}
 		*rd2 = jbinfo(jbrand);
 
 		JBLogDebug("randomize cdhash with %016llX: %s\n", *rd2, inputPath);
@@ -214,15 +227,6 @@ int ensure_randomized_cdhash_for_slice(const char* inputPath, uint64_t offset, v
 			break;
 		}
 
-		CS_CodeDirectory codeDir;
-		if(csd_blob_read(bestCDBlob, 0, sizeof(CS_CodeDirectory), &codeDir) != 0) {
-			JBLogError("Error: failed to read code directory: %s\n", inputPath);
-			break;
-		}
-
-		CODE_DIRECTORY_APPLY_BYTE_ORDER(&codeDir, BIG_TO_HOST_APPLIER);
-
-		uint8_t pageHash[codeDir.hashSize];
 		if(!code_directory_calculate_page_hash(&codeDir, macho, 0, pageHash)) {
 			JBLogError("Error: failed to calculate page hash: %s\n", inputPath);
 			break;

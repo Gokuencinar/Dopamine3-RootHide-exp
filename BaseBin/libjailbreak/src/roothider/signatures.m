@@ -94,6 +94,13 @@ static bool rh3_signature_blob_is_well_formed(const CS_SuperBlob *superblob, uin
 			uint32_t identOffset = BIG_TO_HOST(cd->identOffset);
 			uint32_t codeSlots = BIG_TO_HOST(cd->nCodeSlots);
 			uint32_t specialSlots = BIG_TO_HOST(cd->nSpecialSlots);
+			// Only the page layouts supported by the patched ChOma consumer.
+			// pageSize=0 is an unpaged signature; it is streamed in fixed chunks.
+			uint32_t codeLimit = BIG_TO_HOST(cd->codeLimit);
+			if (cd->pageSize != 0 && cd->pageSize != 12 && cd->pageSize != 14) return false;
+			if (!codeLimit) return false;
+			uint64_t pageBytes = cd->pageSize ? (UINT64_C(1) << cd->pageSize) : codeLimit;
+			if (1 + ((uint64_t)codeLimit - 1) / pageBytes != codeSlots) return false;
 			if (hashOffset > blobSize ||
 			    identOffset < offsetof(CS_CodeDirectory, spare2) + sizeof(uint32_t) ||
 			    identOffset >= hashOffset ||

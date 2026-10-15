@@ -161,11 +161,27 @@ class RootHideTrustRecursionTests(unittest.TestCase):
                 memcpy(bytes + directory_offset + sizeof(CS_CodeDirectory), "test", 5);
                 directory->hashType = CS_HASHTYPE_SHA256_256;
                 directory->hashSize = 32;
+                directory->pageSize = 12;
+                write_be32(&directory->codeLimit, 1);
                 CS_GenericBlob *wrapper = (CS_GenericBlob *)(bytes + wrapper_offset);
                 write_be32(&wrapper->magic, CSMAGIC_BLOBWRAPPER);
                 write_be32(&wrapper->length, 16);
 
                 CHECK(rh3_signature_blob_is_well_formed(blob, (uint32_t)total_size));
+                directory->pageSize = 20;
+                CHECK(!rh3_signature_blob_is_well_formed(blob, (uint32_t)total_size));
+                directory->pageSize = 255;
+                CHECK(!rh3_signature_blob_is_well_formed(blob, (uint32_t)total_size));
+                directory->pageSize = 0;
+                CHECK(rh3_signature_blob_is_well_formed(blob, (uint32_t)total_size));
+                directory->pageSize = 14;
+                CHECK(rh3_signature_blob_is_well_formed(blob, (uint32_t)total_size));
+                directory->pageSize = 12;
+                write_be32(&directory->codeLimit, 4097);
+                CHECK(!rh3_signature_blob_is_well_formed(blob, (uint32_t)total_size));
+                write_be32(&directory->codeLimit, 0);
+                CHECK(!rh3_signature_blob_is_well_formed(blob, (uint32_t)total_size));
+                write_be32(&directory->codeLimit, 1);
                 // A structurally valid ad-hoc signature may have no CMS slot.
                 write_be32(&blob->count, 1);
                 write_be32(&blob->length, (uint32_t)wrapper_offset);
