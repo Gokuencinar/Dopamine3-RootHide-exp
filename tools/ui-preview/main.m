@@ -83,7 +83,7 @@ static UILabel *Label(NSString *text, CGFloat size, UIColor *color) {
     for (NSArray *entry in entries) [actions addObject:[UIAction actionWithTitle:L(entry[0]) image:[UIImage systemImageNamed:entry[1]] identifier:entry[2] handler:^(__kindof UIAction *action) {}]];
     DOActionMenuView *menu=[[DOActionMenuView alloc] initWithActions:actions delegate:self]; [stack addArrangedSubview:menu];
     // The original button's initial appearance; its execution/logging controller is deliberately absent.
-    DOActionMenuButton *button=[DOActionMenuButton buttonWithAction:[UIAction actionWithTitle:@"Jailbreak" image:[UIImage systemImageNamed:@"lock.open"] handler:^(__kindof UIAction *action) {}] chevron:NO];
+    DOActionMenuButton *button=[DOActionMenuButton buttonWithAction:[UIAction actionWithTitle:@"Jailbreak" image:[UIImage systemImageNamed:@"lock.open"] identifier:nil handler:^(__kindof UIAction *action) {}] chevron:NO];
     button.backgroundColor=[DOThemeManager menuColorWithAlpha:1]; button.layer.cornerRadius=14;
     button.contentHorizontalAlignment=UIControlContentHorizontalAlignmentCenter;
     [button.heightAnchor constraintEqualToConstant:60].active=YES; [stack addArrangedSubview:button];
@@ -116,7 +116,7 @@ static UILabel *Label(NSString *text, CGFloat size, UIColor *color) {
               [label.leadingAnchor constraintEqualToAnchor:container.leadingAnchor constant:20], [label.bottomAnchor constraintEqualToAnchor:container.bottomAnchor constant:-5]]];
             [stack addArrangedSubview:container];
         } else if (item[@"title"]) {
-            DOActionMenuButton *button=[DOActionMenuButton buttonWithAction:[UIAction actionWithTitle:L(item[@"title"]) image:[UIImage systemImageNamed:item[@"image"]] handler:^(__kindof UIAction *action) {}] chevron:NO];
+            DOActionMenuButton *button=[DOActionMenuButton buttonWithAction:[UIAction actionWithTitle:L(item[@"title"]) image:[UIImage systemImageNamed:item[@"image"]] identifier:nil handler:^(__kindof UIAction *action) {}] chevron:NO];
             [button.heightAnchor constraintEqualToConstant:44].active=YES; [stack addArrangedSubview:button];
         }
     }
@@ -124,7 +124,7 @@ static UILabel *Label(NSString *text, CGFloat size, UIColor *color) {
 @end
 
 @interface RHPreviewDelegate : UIResponder <UIApplicationDelegate>
-@property UIWindow *window;
+@property (nonatomic, strong) UIWindow *window;
 @end
 @implementation RHPreviewDelegate
 - (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)options {
