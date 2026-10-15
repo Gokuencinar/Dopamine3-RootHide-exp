@@ -18,17 +18,28 @@ on:
         type: boolean
         required: true
         default: false
+      ui_preview:
+        description: 'Capture isolated UIKit previews and update credits in the pinned native beta'
+        type: boolean
+        required: true
+        default: false
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
+  ui-preview:
+    if: github.event_name == 'workflow_dispatch' && inputs.ui_preview == true
+    uses: ./.github/workflows/ui-preview.yml
+    permissions:
+      contents: read
+      actions: read
   # A completely standalone UIKit-only application. Build it independently so
   # unfinished jailbreak libraries and RootHide port failures cannot prevent
   # generation of the harmless install/open smoke-test IPA.
   device-test:
-    if: startsWith(github.head_ref || github.ref_name, 'roothide-')
+    if: startsWith(github.head_ref || github.ref_name, 'roothide-') && !(github.event_name == 'workflow_dispatch' && inputs.ui_preview == true)
     runs-on: macos-15
     steps:
       - name: Checkout
@@ -69,6 +80,7 @@ jobs:
             ${{ github.workspace }}/ROOT_HIDE_DEVICE_TEST_README.txt
 
   build:
+    if: github.event_name != 'workflow_dispatch' || inputs.ui_preview != true
     runs-on: macos-15
     env:
       # Only an explicit manual dispatch can enable the hardware variant.

@@ -62,6 +62,27 @@
 			<key>cell</key>
 			<string>PSGroupCell</string>
 			<key>label</key>
+			<string>RootHide 3 port</string>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>headerCellClass</key>
+			<string>DOCreditsCell</string>
+			<key>names</key>
+			<array>
+				<dict>
+					<key>name</key>
+					<string>Gokuencinar</string>
+					<key>link</key>
+					<string>https://github.com/Gokuencinar/Dopamine3-RootHide-exp</string>
+				</dict>
+			</array>
+		</dict>
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>label</key>
 			<string>Developers</string>
 		</dict>
 		<dict>

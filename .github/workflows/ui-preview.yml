@@ -1,0 +1,71 @@
+name: RootHide UI preview and credits IPA
+on:
+  workflow_dispatch:
+  workflow_call:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  preview:
+    runs-on: macos-15
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - name: Capture isolated UIKit previews
+        run: bash tools/ui-preview/capture.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RootHide3-UI-PREVIEWS-NOT-DEVICE-SCREENSHOTS
+          path: ui-preview/captures/
+          if-no-files-found: error
+          retention-days: 7
+  credits-ipa:
+    runs-on: macos-15
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install signing utility
+        uses: dhinakg/procursus-action@4526d5e64410da26bea8073926c0bf8e779293f1
+        with:
+          packages: ldid
+      - name: Retrieve pinned native beta
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run download 38767332372 --repo "$GITHUB_REPOSITORY" --name RootHide3-HARDWARE-BETA-JAILBREAK-ENABLED --dir base-artifact
+      - name: Update credit resource and re-sign
+        run: |
+          set -euo pipefail
+          echo 'ec1244f2da916ed29cb7fe0b47e159f2b6a915291feb41bccbbde5cfe4a09792  base-artifact/Application/RootHide3-Hardware-Beta.ipa' | shasum -a 256 -c -
+          mkdir -p credits-stage
+          ditto -x -k base-artifact/Application/RootHide3-Hardware-Beta.ipa credits-stage
+          cp Application/Dopamine/UI/Settings/Credits.plist credits-stage/Payload/Dopamine.app/Credits.plist
+          python3 - <<'PY'
+          import json,os,plistlib
+          from pathlib import Path
+          app=Path('credits-stage/Payload/Dopamine.app')
+          items=plistlib.loads((app/'Credits.plist').read_bytes())['items']
+          names=[n['name'] for i in items for n in i.get('names',[])]
+          assert names.count('Gokuencinar')==1 and 'opa334' in names
+          record=dict(native_commit='403be3422399e7c1b47a6929407c362161321e9a',resource_commit=os.environ['GITHUB_SHA'],operation='Credits.plist resource update and ad-hoc re-sign; no native rebuild')
+          Path('credits-resource-revision.json').write_text(json.dumps(record,indent=2))
+          (app/'credits-resource-revision.json').write_text(json.dumps(record,indent=2))
+          PY
+          ldid -SApplication/Dopamine/Dopamine.entitlements credits-stage/Payload/Dopamine.app/Dopamine
+          ldid -s credits-stage/Payload/Dopamine.app
+          cd credits-stage
+          zip -qry ../RootHide3-iOS18-Gokuencinar.ipa Payload
+          cd ..
+          python3 tools/verify_roothide_full_experimental.py --hardware-beta --ipa RootHide3-iOS18-Gokuencinar.ipa --json > credits-ipa-inspection.json
+          shasum -a 256 RootHide3-iOS18-Gokuencinar.ipa > RootHide3-iOS18-Gokuencinar.ipa.sha256
+          cp tools/ui-preview/README.md CREDITS-IPA-README.md
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RootHide3-HARDWARE-BETA-GOKUENCINAR-CREDITS
+          path: |
+            RootHide3-iOS18-Gokuencinar.ipa
+            RootHide3-iOS18-Gokuencinar.ipa.sha256
+            credits-resource-revision.json
+            credits-ipa-inspection.json
+            CREDITS-IPA-README.md
+          if-no-files-found: error
+          retention-days: 7
