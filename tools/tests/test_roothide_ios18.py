@@ -109,6 +109,17 @@ int main(int argc, char **argv) {
                         prepare.index("rh3CreateRoot:root"))
         self.assertNotIn("RootHide bootstrap for iOS 17+", prepare)
 
+    def test_existing_bootstrap_cannot_silently_cross_os_or_archive_abi(self):
+        source = (ROOT / "Application/Dopamine/Jailbreak/DOBootstrapper.m").read_text()
+        self.assertIn('@"OSMajor": @(NSProcessInfo.processInfo.operatingSystemVersion.majorVersion)', source)
+        self.assertIn('@"ArchiveABI": @(version)', source)
+        self.assertIn("st.st_uid != 0", source)
+        self.assertIn("majorVersion < 18) return nil", source)
+        prepare = source.split("- (void)prepareRootHideBootstrapWithCompletion:(void (^)(NSError *))completion\n{", 1)[1]
+        self.assertLess(prepare.index("RH3CheckBootstrapProfile(root, version)"), prepare.index("rh3RerandomizeRoot:&root"))
+        create = source.split("- (NSError *)rh3CreateRoot:", 1)[1].split("- (NSError *)rh3RerandomizeRoot:", 1)[0]
+        self.assertLess(create.index('Could not persist RootHide bootstrap OS/ABI profile'), create.index('RH3WritePendingState(root, @"layout")'))
+
     def test_old_kernel_namecache_implementations_are_excluded(self):
         makefile = (ROOT / "BaseBin/libjailbreak/Makefile").read_text()
         self.assertIn("$(filter-out src/roothider/unsandbox.m src/roothider/unsandbox1.m src/roothider/unsandbox2.m,", makefile)

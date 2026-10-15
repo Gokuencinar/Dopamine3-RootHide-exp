@@ -33,6 +33,30 @@ static NSString *const RH3InstalledMarker = @".installed_roothide3";
 static NSString *const RH3PendingMarker = @".installing_roothide3";
 static NSError *RH3Error(BootstrapErrorCode code, NSString *message);
 
+static NSDictionary *RH3BootstrapProfile(NSInteger version)
+{
+    return @{@"Schema": @1, @"OSMajor": @(NSProcessInfo.processInfo.operatingSystemVersion.majorVersion),
+             @"ArchiveABI": @(version)};
+}
+
+static NSError *RH3CheckBootstrapProfile(NSString *root, NSInteger version)
+{
+    NSString *path = [root stringByAppendingPathComponent:@".roothide3-bootstrap-profile.plist"];
+    struct stat st;
+    if (lstat(path.fileSystemRepresentation, &st) != 0) {
+        // Preserve recovery for old iOS 15/16 test roots. An iOS 18 attempt
+        // may never infer that an unrecorded old root has the right userspace.
+        if (errno == ENOENT && NSProcessInfo.processInfo.operatingSystemVersion.majorVersion < 18) return nil;
+        return RH3Error(BootstrapErrorCodeFailedReplacing,
+                        @"Existing RootHide bootstrap has no readable OS/ABI profile; remove it using its original version before installing this candidate");
+    }
+    if (!S_ISREG(st.st_mode) || st.st_uid != 0 ||
+        ![[NSDictionary dictionaryWithContentsOfFile:path] isEqualToDictionary:RH3BootstrapProfile(version)])
+        return RH3Error(BootstrapErrorCodeFailedReplacing,
+                        @"Existing RootHide bootstrap OS/ABI profile differs; automatic cross-version migration is not supported");
+    return nil;
+}
+
 // Every unfinished root is explicitly owned by this port. In particular, a
 // RootHide 2 .jbroot (or a crashed older build without our marker) is NEVER
 // interpreted as a recoverable RootHide 3 installation.
@@ -362,6 +386,8 @@ static NSError *RH3Error(BootstrapErrorCode code, NSString *message)
         if ([stage isEqualToString:@"creating"] || [stage isEqualToString:@"running-script"])
             return RH3Error(BootstrapErrorCodeFailedReplacing,
                             @"Interrupted RootHide extraction or setup script needs manual recovery before another activation.");
+        error = RH3CheckBootstrapProfile(root, version);
+        if (error) return error;
     }
     return nil;
 }
@@ -557,6 +583,11 @@ static NSError *RH3Error(BootstrapErrorCode code, NSString *message)
         ![fm createSymbolicLinkAtPath:[secondary stringByAppendingPathComponent:@".jbroot"]
                     withDestinationPath:root error:&error]) goto cleanup_both;
 
+    if (![RH3BootstrapProfile(version) writeToFile:
+          [root stringByAppendingPathComponent:@".roothide3-bootstrap-profile.plist"] atomically:YES]) {
+        error = RH3Error(BootstrapErrorCodeFailedExtracting, @"Could not persist RootHide bootstrap OS/ABI profile");
+        goto cleanup_both;
+    }
     error = [self rh3BuildPackageSourcesInRoot:root version:version];
     if (!error) error = RH3WritePendingState(root, @"layout");
     if (!error) return nil;
@@ -872,6 +903,8 @@ cleanup_root:
         }
         // Re-randomizing a half-installed root would make an interrupted
         // transaction harder to recover. Keep its jbrand until setup finishes.
+        error = RH3CheckBootstrapProfile(root, version);
+        if (error) { completion(error); return; }
         if (!stage) {
             [[DOUIManager sharedInstance] sendLog:@"Re-randomizing RootHide bootstrap" debug:NO];
             error = [self rh3RerandomizeRoot:&root];

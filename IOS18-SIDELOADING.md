@@ -26,6 +26,9 @@ Fuentes: [Dopamine 3.0](https://github.com/opa334/Dopamine/releases/tag/3.0),
 - El instalador vuelve a exigir `isSupported` antes de crear el contenedor.
   Se conservan aislamiento de /var/jb, comprobación de propietario,
   transacciones, fallo estricto de setup y arranque sin tweaks.
+  Los contenedores nuevos registran el sistema mayor y ABI del archivo. Se
+  rechaza reutilizar en iOS 18 un contenedor antiguo sin ese perfil, o uno
+  cuyo perfil difiera, antes de re-randomizarlo o modificarlo.
 - El hook `Loader::expandAtLoaderPath` y su trampolín se incluyen en el binario
   de dyld para iOS 18. La firma coincide con
   [Apple dyld-1285.19, Loader.cpp](https://github.com/apple-oss-distributions/dyld/blob/dyld-1285.19/dyld/Loader.cpp).
