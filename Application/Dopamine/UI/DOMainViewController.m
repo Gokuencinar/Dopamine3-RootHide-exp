@@ -306,6 +306,22 @@
     [[DOUIManager sharedInstance] startLogCapture];
     
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
+#if RH3_FULL_APP_EXPERIMENTAL
+        // Even the contiguous-memory workaround can restart backboardd. Reject
+        // incompatible hardware, foreign roots and damaged assets before it.
+        NSError *preflightError = [jailbreaker rootHidePreflightError];
+        if (preflightError) {
+            [[DOUIManager sharedInstance] sendLog:preflightError.localizedDescription debug:NO];
+            dispatch_async(dispatch_get_main_queue(), ^{
+                UIAlertController *alert = [UIAlertController alertControllerWithTitle:DOLocalizedString(@"Log_Error")
+                    message:preflightError.localizedDescription preferredStyle:UIAlertControllerStyleAlert];
+                [alert addAction:[UIAlertAction actionWithTitle:DOLocalizedString(@"Button_Close")
+                    style:UIAlertActionStyleCancel handler:^(UIAlertAction *action) { exit(0); }]];
+                [self presentViewController:alert animated:YES completion:nil];
+            });
+            return;
+        }
+#endif
         if ([jailbreaker contiguousMappingWorkaroundNeeded]) {
             
             cpu_subtype_t cpuFamily = 0;

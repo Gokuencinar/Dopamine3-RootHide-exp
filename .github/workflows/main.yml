@@ -12,6 +12,12 @@ on:
     paths-ignore:
       - ".gitignore"
   workflow_dispatch:
+    inputs:
+      hardware_beta:
+        description: 'Build the unvalidated RootHide jailbreak-enabled hardware beta'
+        type: boolean
+        required: true
+        default: false
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -64,6 +70,9 @@ jobs:
 
   build:
     runs-on: macos-15
+    env:
+      # Only an explicit manual dispatch can enable the hardware variant.
+      ROOTHIDE_HARDWARE_TEST: ${{ github.event_name == 'workflow_dispatch' && inputs.hardware_beta == true && 'YES' || 'NO' }}
     steps:
       - name: Xcode Setup
         uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # peeled commit for v1
@@ -235,7 +244,7 @@ jobs:
       # privileged entitlements, using a distinct bundle ID. Its entry points
       # explicitly refuse stock jailbreak/removal until RootHide is validated.
       - name: Verify full experimental RootHide 3 IPA
-        if: steps.roothide_port.outputs.is_port == 'true'
+        if: steps.roothide_port.outputs.is_port == 'true' && env.ROOTHIDE_HARDWARE_TEST != 'YES'
         run: |
           set -euo pipefail
           cp Application/Dopamine.ipa Application/RootHide3-Full-Experimental.ipa
@@ -243,7 +252,7 @@ jobs:
           printf 'ROOT HIDE 3 — FULL DOPAMINE COMPONENTS, NOT FUNCTIONAL JAILBREAK\nCommit: %s\nBundle: com.gokuencinar.roothide3.fulltest\nRootHide bootstrap gate: 0 / stock fallback blocked\nContains original Dopamine/RootHide exploit components and private entitlements.\nNo tests on a device: use only on disposable test hardware with compatible installation/signing.\n' "$GITHUB_SHA" > ROOT_HIDE_FULL_EXPERIMENTAL_README.txt
 
       - name: Upload guarded full experimental app
-        if: steps.roothide_port.outputs.is_port == 'true'
+        if: steps.roothide_port.outputs.is_port == 'true' && env.ROOTHIDE_HARDWARE_TEST != 'YES'
         uses: actions/upload-artifact@v4
         with:
           name: RootHide3-FULL-EXPERIMENTAL-JAILBREAK-DISABLED
@@ -253,6 +262,29 @@ jobs:
             ${{ github.workspace }}/Application/RootHide3-Full-Experimental.ipa
             ${{ github.workspace }}/roothide-full-experimental-inspection.json
             ${{ github.workspace }}/ROOT_HIDE_FULL_EXPERIMENTAL_README.txt
+
+      - name: Verify jailbreak-enabled RootHide hardware beta
+        if: steps.roothide_port.outputs.is_port == 'true' && env.ROOTHIDE_HARDWARE_TEST == 'YES'
+        run: |
+          set -euo pipefail
+          cp Application/Dopamine.ipa Application/RootHide3-Hardware-Beta.ipa
+          python3 tools/verify_roothide_full_experimental.py --hardware-beta --ipa Application/RootHide3-Hardware-Beta.ipa --json | tee roothide-hardware-beta-inspection.json
+          shasum -a 256 Application/RootHide3-Hardware-Beta.ipa > RootHide3-Hardware-Beta.ipa.sha256
+          printf 'ROOT HIDE 3 — UNVALIDATED HARDWARE BETA, JAILBREAK ENABLED\nCommit: %s\nBundle: com.gokuencinar.roothide3.hardwarebeta\nRequires arm64e, iOS 15/16 and a compatible Dopamine exploit combination.\nDo not test over another bootstrap. Initial activation forces tweaks off.\nInstallation, launchd/dyld stability, hiding and recovery have NOT been verified on a device.\nSee HARDWARE-BETA.md for testing and recovery.\n' "$GITHUB_SHA" > ROOT_HIDE_HARDWARE_BETA_README.txt
+
+      - name: Upload jailbreak-enabled RootHide hardware beta
+        if: steps.roothide_port.outputs.is_port == 'true' && env.ROOTHIDE_HARDWARE_TEST == 'YES'
+        uses: actions/upload-artifact@v4
+        with:
+          name: RootHide3-HARDWARE-BETA-JAILBREAK-ENABLED
+          if-no-files-found: error
+          retention-days: 7
+          path: |
+            ${{ github.workspace }}/Application/RootHide3-Hardware-Beta.ipa
+            ${{ github.workspace }}/roothide-hardware-beta-inspection.json
+            ${{ github.workspace }}/RootHide3-Hardware-Beta.ipa.sha256
+            ${{ github.workspace }}/ROOT_HIDE_HARDWARE_BETA_README.txt
+            ${{ github.workspace }}/HARDWARE-BETA.md
 
       # Compile first so early RootHide port errors are visible in CI, but
       # never upload an unverified stock artifact as a RootHide release.

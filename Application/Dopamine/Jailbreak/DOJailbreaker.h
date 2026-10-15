@@ -18,6 +18,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (void)runWithError:(NSError **)errOut didRemoveJailbreak:(BOOL*)didRemove showLogs:(BOOL *)showLogs;
 - (void)finalize;
+- (nullable NSError *)rootHidePreflightError;
 
 - (BOOL)contiguousMappingWorkaroundNeeded;
 - (void)applyContiguousMappingWorkaround;

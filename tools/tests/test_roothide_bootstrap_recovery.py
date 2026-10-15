@@ -60,6 +60,8 @@ class RootHideBootstrapRecoveryContracts(unittest.TestCase):
         self.assertIn('if ([pending isEqualToString:@"running-script"])', finalize)
         self.assertIn('RootHide setup script still exists after completion', finalize)
         self.assertIn("manual recovery required", finalize)
+        self.assertIn('exec_cmd_trusted(JBROOT_PATH("/bin/sh"), "-e", script.fileSystemRepresentation, NULL)', finalize)
+        self.assertLess(finalize.index("RootHide setup returned without removing its script"), completed)
         self.assertNotIn('RH3WritePendingState(root, @"prepared")', finalize)
 
     def test_interrupted_stages_block_repreparation_before_mutation(self):

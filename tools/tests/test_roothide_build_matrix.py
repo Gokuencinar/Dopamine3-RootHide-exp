@@ -44,6 +44,7 @@ class RootHideBuildMatrixTests(unittest.TestCase):
                         [make, "--no-print-directory", "-n", "-C", "Application",
                          "Dopamine.ipa",
                          f"ROOTHIDE_EXPERIMENTAL_BUILD={experimental}",
+                         "ROOTHIDE_HARDWARE_TEST=NO",
                          f"NIGHTLY={nightly}", "COMMIT_HASH=matrix-test-sha"],
                         cwd=ROOT, encoding="utf-8", errors="replace",
                         stdout=subprocess.PIPE, stderr=subprocess.PIPE,

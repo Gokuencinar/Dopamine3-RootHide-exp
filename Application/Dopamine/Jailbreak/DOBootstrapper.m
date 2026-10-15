@@ -331,6 +331,32 @@ static NSError *RH3Error(BootstrapErrorCode code, NSString *message)
     return nil;
 }
 
+- (NSError *)rootHidePreflightError
+{
+    // Read-only: perform this before exploitation as well as validating again
+    // during installation. Never adopt another bootstrap or erase its state.
+    struct stat visibleRoot;
+    if (lstat("/var/jb", &visibleRoot) == 0)
+        return RH3Error(BootstrapErrorCodeFailedReplacing,
+                        @"An existing /var/jb bootstrap must be removed using its own jailbreak before testing RootHide 3.");
+    if (errno != ENOENT)
+        return RH3Error(BootstrapErrorCodeFailedReplacing,
+                        @"Unable to inspect /var/jb before RootHide activation.");
+    NSError *error = nil;
+    NSString *root = [DOBootstrapper rootHideExistingRootWithError:&error];
+    if (error) return error;
+    if (root) {
+        error = RH3CheckInterruptedOperations(root);
+        if (error) return error;
+        NSString *stage = RH3PendingState(root);
+        if ([stage isEqualToString:@"creating"] || [stage isEqualToString:@"running-script"])
+            return RH3Error(BootstrapErrorCodeFailedReplacing,
+                            @"Interrupted RootHide extraction or setup script needs manual recovery before another activation.");
+    }
+    NSInteger version = NSProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 16 ? 1900 : 1800;
+    return [self rh3VerifyAssetsForVersion:version];
+}
+
 - (NSError *)rh3BuildPackageSourcesInRoot:(NSString *)root version:(NSInteger)version
 {
     NSFileManager *fm = NSFileManager.defaultManager;
@@ -923,11 +949,16 @@ cleanup_root:
         NSError *stateError = RH3WritePendingState(root, @"running-script");
         if (stateError) return stateError;
         [[DOUIManager sharedInstance] sendLog:@"Finalizing isolated RootHide bootstrap" debug:NO];
-        int result = exec_cmd_trusted(JBROOT_PATH("/bin/sh"), script.fileSystemRepresentation, NULL);
+        // The pinned donor script has no set -e: without this option a failed
+        // firmware/dpkg/password command can be hidden by its final rm exit 0.
+        int result = exec_cmd_trusted(JBROOT_PATH("/bin/sh"), "-e", script.fileSystemRepresentation, NULL);
         if (result) {
             return RH3Error(BootstrapErrorCodeFailedFinalising,
                             [NSString stringWithFormat:@"RootHide prep_bootstrap.sh failed (%d); manual recovery required", result]);
         }
+        if ([self fileOrSymlinkExistsAtPath:script])
+            return RH3Error(BootstrapErrorCodeFailedFinalising,
+                            @"RootHide setup returned without removing its script; manual recovery required");
         stateError = RH3WritePendingState(root, @"script-complete");
         if (stateError) return stateError;
         pending = @"script-complete";

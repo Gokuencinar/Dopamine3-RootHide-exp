@@ -7,6 +7,10 @@ Este proyecto genera **dos IPA de prueba distintas** en GitHub Actions:
 | `RootHide3-Device-Test-APP-ONLY` | App UIKit mínima, dos archivos | Ninguna |
 | `RootHide3-FULL-EXPERIMENTAL-JAILBREAK-DISABLED` | Dopamine 3 completo, dependencias BaseBin, hooks y recursos RootHide | Compiladas, **no ejecutables** hasta validar el port |
 
+Existe además una [Hardware Beta](HARDWARE-BETA.md) con el jailbreak habilitado,
+generada exclusivamente por ejecución manual con `hardware_beta=true`. No cuenta
+con validación en un iPhone y conserva una identidad y artefacto separados.
+
 La variante completa utiliza `com.gokuencinar.roothide3.fulltest`, muestra
 `RootHide 3 Experimental` y no debería sustituir el bundle del Dopamine
 estable (`com.opa334.Dopamine`). Se genera del código completo usando

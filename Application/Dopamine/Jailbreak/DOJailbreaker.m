@@ -782,6 +782,24 @@ static void *rh3_boomerang_server(void *opaque)
     return nil;
 }
 
+- (NSError *)rootHidePreflightError
+{
+    if (![DOBootstrapper rootHidePortEnabled]) return nil;
+    NSString *reason = nil;
+    NSOperatingSystemVersion os = NSProcessInfo.processInfo.operatingSystemVersion;
+    DOEnvironmentManager *environment = [DOEnvironmentManager sharedManager];
+    if (!environment.isArm64e || os.majorVersion < 15 || os.majorVersion > 16)
+        reason = @"RootHide 3 hardware beta currently accepts only arm64e devices on iOS 15 or 16.";
+    else if (![environment isSupported])
+        reason = @"No compatible Dopamine exploit combination is available for this device and iOS build.";
+    else if ([environment isJailbrokenWithOtherJailbreak])
+        reason = @"Existing jailbreak detected: reboot to an unjailbroken state before testing RootHide 3.";
+    if (reason)
+        return [NSError errorWithDomain:JBErrorDomain code:JBErrorCodeFailedExploitation
+                              userInfo:@{NSLocalizedDescriptionKey: reason}];
+    return [[DOBootstrapper new] rootHidePreflightError];
+}
+
 - (void)runWithError:(NSError **)errOut didRemoveJailbreak:(BOOL*)didRemove showLogs:(BOOL *)showLogs
 {
 #if RH3_INSTALLABLE_DIAGNOSTIC
@@ -808,27 +826,12 @@ static void *rh3_boomerang_server(void *opaque)
                                             @"RootHide 3 runtime is not validated. Jailbreak and removal are disabled in this experimental build."}];
         return;
     }
-    // The hidden bootstrap has only been adapted for the arm64e iOS 15/16
-    // family. Do not patch a newer kernel or an incompatible device merely
-    // because stock Dopamine happens to support it.
-    NSOperatingSystemVersion os = NSProcessInfo.processInfo.operatingSystemVersion;
-    if (![DOEnvironmentManager sharedManager].isArm64e ||
-        os.majorVersion < 15 || os.majorVersion > 16) {
+    // Recheck for non-UI callers and changes since the UI preflight.
+    NSError *preflightError = [self rootHidePreflightError];
+    if (preflightError) {
         if (didRemove) *didRemove = NO;
-        if (showLogs) *showLogs = NO;
-        if (errOut) *errOut = [NSError errorWithDomain:JBErrorDomain
-                                                code:JBErrorCodeFailedExploitation
-                                            userInfo:@{NSLocalizedDescriptionKey:
-                                            @"RootHide 3 hardware beta currently accepts only arm64e devices on iOS 15 or 16."}];
-        return;
-    }
-    if ([[DOEnvironmentManager sharedManager] isJailbrokenWithOtherJailbreak]) {
-        if (didRemove) *didRemove = NO;
-        if (showLogs) *showLogs = NO;
-        if (errOut) *errOut = [NSError errorWithDomain:JBErrorDomain
-                                                code:JBErrorCodeFailedExploitation
-                                            userInfo:@{NSLocalizedDescriptionKey:
-                                            @"Existing jailbreak detected: reboot to an unjailbroken state before testing RootHide 3."}];
+        if (showLogs) *showLogs = YES;
+        if (errOut) *errOut = preflightError;
         return;
     }
 #endif
