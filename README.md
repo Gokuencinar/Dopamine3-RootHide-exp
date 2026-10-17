@@ -16,7 +16,7 @@ La nueva candidata permite intentar el port en los dispositivos que acepte la co
 
 La app consulta los exploits disponibles en el propio dispositivo. Un perfil de bootstrap no basta para declarar compatible una combinación de modelo y versión. Esto no añade iOS 18 a A14 o posteriores.
 
-La release `roothide3-test-1` conserva los límites anteriores: estos cambios necesitan una nueva compilación.
+Esta ampliación está en la [segunda beta](https://github.com/Gokuencinar/Dopamine3-RootHide-exp/releases/tag/roothide3-test-2). La primera release conserva los límites anteriores.
 
 ## Qué incluye
 
