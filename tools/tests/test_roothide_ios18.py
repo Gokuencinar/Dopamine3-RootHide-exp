@@ -95,7 +95,7 @@ int main(int argc, char **argv) {
             source.write_text('#include "' + header.as_posix() + '"\n'
                 'int main(void) {\n'
                 'for (int i = -1; i <= 100; i++) {\n'
-                ' int expected = i == 15 ? 1800 : (i == 16 || i == 18) ? 1900 : 0;\n'
+                ' int expected = i == 15 ? 1800 : (i == 16 || i == 17 || i == 18 || i == 26) ? 1900 : 0;\n'
                 ' if (rh3_bootstrap_version_for_os(i) != expected) return 1;\n'
                 '} return 0; }\n', encoding="utf-8")
             subprocess.run([compiler, "-std=c11", "-Wall", "-Werror", str(source), "-o", str(executable)], check=True, capture_output=True)
@@ -114,7 +114,7 @@ int main(int argc, char **argv) {
         self.assertIn('@"OSMajor": @(NSProcessInfo.processInfo.operatingSystemVersion.majorVersion)', source)
         self.assertIn('@"ArchiveABI": @(version)', source)
         self.assertIn("st.st_uid != 0", source)
-        self.assertIn("majorVersion < 18) return nil", source)
+        self.assertIn("majorVersion < 17) return nil", source)
         prepare = source.split("- (void)prepareRootHideBootstrapWithCompletion:(void (^)(NSError *))completion\n{", 1)[1]
         self.assertLess(prepare.index("RH3CheckBootstrapProfile(root, version)"), prepare.index("rh3RerandomizeRoot:&root"))
         create = source.split("- (NSError *)rh3CreateRoot:", 1)[1].split("- (NSError *)rh3RerandomizeRoot:", 1)[0]

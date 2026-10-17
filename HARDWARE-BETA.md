@@ -2,7 +2,7 @@
 
 Esta variante tiene habilitado el intento de jailbreak. Aún no hay pruebas en un iPhone, así que se publica como pre-release.
 
-En iOS 18 admite A12/A13 hasta 18.7.1. También permite arm64e con iOS 15/16 si hay exploits compatibles. Consulta [los límites de iOS 18](IOS18-SIDELOADING.md) antes de instalarla.
+La nueva candidata elimina el filtro de CPU arm64e y contempla iOS 15, 16, 17, 18 y 26. La combinación de exploits de Dopamine decide qué dispositivo y versión pueden continuar. Consulta la [tabla de compatibilidad](README.md#compatibilidad). La primera release mantiene los límites anteriores.
 
 ## Instalación
 

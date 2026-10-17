@@ -177,7 +177,7 @@ jobs:
 
       - name: Install libarchive
         run: |
-          brew install libarchive
+          brew install libarchive zstd
 
       - name: Download Bootstraps
         run: |
@@ -202,6 +202,7 @@ jobs:
         if: steps.roothide_port.outputs.is_port == 'true'
         run: |
           set -euo pipefail
+          python3 tools/verify_roothide_cpu_slices.py
           python3 -m unittest discover -s tools/tests -p 'test_*.py' -v
 
       - name: Build
@@ -282,7 +283,7 @@ jobs:
           cp Application/Dopamine.ipa Application/RootHide3-Hardware-Beta.ipa
           python3 tools/verify_roothide_full_experimental.py --hardware-beta --ipa Application/RootHide3-Hardware-Beta.ipa --json | tee roothide-hardware-beta-inspection.json
           shasum -a 256 Application/RootHide3-Hardware-Beta.ipa > RootHide3-Hardware-Beta.ipa.sha256
-          printf 'RootHide 3: beta con el intento de jailbreak habilitado.\nRevisión: %s\nEn iOS 18 admite A12/A13 hasta 18.7.1. También arm64e con iOS 15/16 y exploits compatibles.\nEmpieza sin tweaks. No se ha probado en un iPhone.\nHaz una copia de tus datos y consulta HARDWARE-BETA.md.\n' "$GITHUB_SHA" > ROOT_HIDE_HARDWARE_BETA_README.txt
+          printf 'RootHide 3: beta con el intento de jailbreak habilitado.\nRevisión: %s\nPerfiles experimentales para arm64/arm64e e iOS 15, 16, 17, 18 y 26. Los exploits de Dopamine deciden la combinación admitida.\nEmpieza sin tweaks. No se ha probado en un iPhone.\nHaz una copia de tus datos y consulta HARDWARE-BETA.md.\n' "$GITHUB_SHA" > ROOT_HIDE_HARDWARE_BETA_README.txt
 
       - name: Upload jailbreak-enabled RootHide hardware beta
         if: steps.roothide_port.outputs.is_port == 'true' && env.ROOTHIDE_HARDWARE_TEST == 'YES'

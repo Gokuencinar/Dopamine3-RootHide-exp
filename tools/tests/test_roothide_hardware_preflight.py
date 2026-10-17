@@ -15,7 +15,9 @@ class RootHideHardwarePreflightTests(unittest.TestCase):
         preflight = source.split("- (NSError *)rootHidePreflightError", 1)[1].split("- (void)runWithError:", 1)[0]
         self.assertIn("NSProcessInfo.processInfo.operatingSystemVersion", preflight)
         self.assertIn("!rh3_bootstrap_version_for_os((int)os.majorVersion)", preflight)
-        self.assertIn("isArm64e", preflight)
+        self.assertNotIn("isArm64e", preflight)
+        prepare = (ROOT / "Application/Dopamine/Jailbreak/DOBootstrapper.m").read_text(encoding="utf-8").split("- (void)prepareRootHideBootstrapWithCompletion:(void (^)(NSError *))completion\n{", 1)[1].split("- (NSError *)finalizeRootHideBootstrap", 1)[0]
+        self.assertNotIn("isArm64e", prepare)
         self.assertIn("isSupported", preflight)
         self.assertIn("isJailbrokenWithOtherJailbreak", preflight)
         self.assertIn("[[DOBootstrapper new] rootHidePreflightError]", preflight)

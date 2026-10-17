@@ -44,9 +44,9 @@ static NSError *RH3CheckBootstrapProfile(NSString *root, NSInteger version)
     NSString *path = [root stringByAppendingPathComponent:@".roothide3-bootstrap-profile.plist"];
     struct stat st;
     if (lstat(path.fileSystemRepresentation, &st) != 0) {
-        // Preserve recovery for old iOS 15/16 test roots. An iOS 18 attempt
+        // Preserve recovery for old iOS 15/16 test roots. A newer OS attempt
         // may never infer that an unrecorded old root has the right userspace.
-        if (errno == ENOENT && NSProcessInfo.processInfo.operatingSystemVersion.majorVersion < 18) return nil;
+        if (errno == ENOENT && NSProcessInfo.processInfo.operatingSystemVersion.majorVersion < 17) return nil;
         return RH3Error(BootstrapErrorCodeFailedReplacing,
                         @"Existing RootHide bootstrap has no readable OS/ABI profile; remove it using its original version before installing this candidate");
     }
@@ -852,17 +852,9 @@ cleanup_root:
 
 - (void)prepareRootHideBootstrapWithCompletion:(void (^)(NSError *))completion
 {
-    // The donor bootstrap, Sileo, Zebra and RootHide Manager packages all
-    // require iphoneos-arm64e. An A9/arm64 device must fail before we create
-    // any hidden container or modify its existing jailbreak.
-    if (![[DOEnvironmentManager sharedManager] isArm64e]) {
-        completion(RH3Error(BootstrapErrorCodeFailedExtracting,
-                            @"RootHide donor packages require an arm64e device; arm64 is unsupported"));
-        return;
-    }
-    // iOS 18 reuses the pinned arm64e 1900 userspace as an experimental
-    // candidate. Never substitute a stock arm64 Procursus archive or infer
-    // support for future OS versions from a >= comparison.
+    // The RootHide package ABI name is not a CPU restriction: every bundled
+    // bootstrap executable and manager includes ARM64. Keep Dopamine's
+    // device/build exploit checks, plus the explicit experimental OS profiles.
     NSInteger version = rh3_bootstrap_version_for_os((int)NSProcessInfo.processInfo.operatingSystemVersion.majorVersion);
     if (!version || ![[DOEnvironmentManager sharedManager] isSupported]) {
         completion(RH3Error(BootstrapErrorCodeFailedExtracting,

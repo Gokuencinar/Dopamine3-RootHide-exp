@@ -16,7 +16,7 @@ La rama 3.x de RootHide usada como referencia aún no contenía una integración
 
 El port usa contenedores `.jbroot` y App Group, recursos fijados por SHA-256 y el dominio IPC 6 de RootHide. Se han revisado las firmas, la trustcache, el intercambio XPC y la preparación del bootstrap. Hay más detalles en [las notas de firmas](SIGNATURE-FIXES-2026-10-15.md) y [la revisión de incidencias](RESEARCH-ROOTHIDE3-2026-10-14.md).
 
-El perfil del bootstrap es 1800 en iOS 15 y 1900 en iOS 16/18. Para iOS 18 se reutiliza el userspace de RootHide de forma experimental. Los contenedores guardan su versión mayor de sistema y ABI; se rechazan los perfiles incompatibles antes de modificarlos.
+El perfil del bootstrap es 1800 en iOS 15 y 1900 en iOS 16/17/18/26. Para los sistemas nuevos se reutiliza el userspace de RootHide de forma experimental. Los contenedores guardan su versión mayor de sistema y ABI; se rechazan los perfiles incompatibles antes de modificarlos.
 
 La adaptación de dyld y de la información del task se explica en [IOS18-SIDELOADING.md](IOS18-SIDELOADING.md). No se han inventado offsets ni ampliado los rangos de los exploits.
 
@@ -27,3 +27,13 @@ La compilación nativa de la candidata `403be34` terminó en macOS y pasó 147 p
 Las comprobaciones del paquete y las pruebas con memoria simulada no prueban el arranque en un iPhone. Faltan pruebas de instalación, launchd/dyld, gestores, ocultación, blacklist, tweaks, reinicios y eliminación.
 
 Los builds normales tienen el jailbreak desactivado. La [Hardware Beta](HARDWARE-BETA.md) lo habilita expresamente para pruebas. La auditoría estricta seguirá sin aprobar el port mientras falten los resultados reales que exige [validation](validation/README.md); publicar esta pre-release no cambia eso.
+
+## Ampliación de dispositivos — 17 de octubre de 2026
+
+Se retira el filtro `isArm64e` de los dos puntos de entrada. `iphoneos-arm64e` es el nombre de ABI del repositorio de RootHide, no una prueba del subtipo de CPU requerido. Se han comprobado 362 Mach-O con slice arm64 en cada bootstrap, además de todos los ejecutables de RootHide Manager, Sileo y Zebra incluidos.
+
+`tools/verify_roothide_cpu_slices.py` repite esa revisión con los recursos fijados por hash. Necesita `zstd` o el módulo Python `zstandard`; CI la ejecuta antes de compilar. La presencia de una slice no prueba dependencias, firma ni funcionamiento.
+
+Se añaden los perfiles 17 y 26 sin cambiar los rangos de exploits de la base. Dopamine ya compila hooks de dyld para arm64/arm64e en las familias 15, 16–17 y 18+. Los hooks de RootHide se resuelven en el dyld real; un símbolo ausente debe detener el proceso. No se añaden offsets de kernel ni se da por probado el bootstrap en estas combinaciones.
+
+Referencias: [Dopamine](https://github.com/opa334/Dopamine), [compatibilidad del desarrollador](https://ellekit.space/dopamine/), [fuente de Loader](https://github.com/apple-oss-distributions/dyld/blob/main/dyld/Loader.cpp). La tabla describe el alcance de la candidata, no soporte de RootHide ya validado.

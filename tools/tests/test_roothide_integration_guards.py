@@ -71,10 +71,11 @@ class RootHideGuardTests(unittest.TestCase):
         self.assertIn('@"etc/apt/sources.list"', bootstrap)
         self.assertIn("https://roothide.github.io/procursus", bootstrap)
 
-    def test_arm64_only_devices_are_refused_before_root_creation(self) -> None:
+    def test_cpu_package_label_does_not_override_dopamine_exploit_checks(self) -> None:
         bootstrap = self.source("Application/Dopamine/Jailbreak/DOBootstrapper.m")
-        self.assertIn("if (![[DOEnvironmentManager sharedManager] isArm64e])", bootstrap)
-        self.assertIn("arm64 is unsupported", bootstrap)
+        prepare = bootstrap.split("- (void)prepareRootHideBootstrapWithCompletion:(void (^)(NSError *))completion\n{", 1)[1].split("- (NSError *)finalizeRootHideBootstrap", 1)[0]
+        self.assertNotIn("isArm64e", prepare)
+        self.assertLess(prepare.index("isSupported"), prepare.index("rh3CreateRoot:root"))
 
     def test_krw_can_resolve_libjailbreak_inside_hidden_root(self) -> None:
         makefile = self.source("Packages/libkrw-provider/Makefile")

@@ -1,12 +1,12 @@
 # iOS 18 y sideloading
 
-La beta permite intentar el jailbreak en **A12/A13 con iOS 18.0–18.7.1**: XS, XS Max, XR, familia 11 y SE de segunda generación. A14 y posteriores quedan fuera porque esta base no tiene la combinación de exploits necesaria.
+En iOS 18, Dopamine admite A12/A13 hasta 18.7.1 y los dispositivos arm64 que puedan ejecutar ese sistema. A14 y posteriores quedan fuera porque esta base no tiene la combinación de exploits necesaria. La nueva candidata del port permite ambas arquitecturas.
 
-La referencia es [Dopamine 3.0](https://github.com/opa334/Dopamine/releases/tag/3.0) y la [página de su desarrollador](https://ellekit.space/dopamine/). El port no amplía los rangos de esos exploits. iOS 17 y 26 se rechazan en esta variante.
+La referencia es [Dopamine 3.0](https://github.com/opa334/Dopamine/releases/tag/3.0) y la [página de su desarrollador](https://ellekit.space/dopamine/). El port no amplía los rangos de esos exploits. La nueva candidata también contempla perfiles experimentales para iOS 17 y 26; el rango concreto sigue dependiendo de los exploits de Dopamine.
 
 ## Qué se ha adaptado
 
-- Preflight e instalador comparten el perfil del bootstrap. iOS 18 usa el archivo 1900 de RootHide de forma experimental, sin dar por probados sus paquetes.
+- Preflight e instalador comparten el perfil del bootstrap. iOS 16/17/18/26 usan el archivo 1900 de RootHide; su uso en los sistemas nuevos es experimental, sin dar por probados sus paquetes.
 - Se comprueba la compatibilidad antes de crear el contenedor. En iOS 18 se rechaza reutilizar un contenedor sin perfil conocido o con otra versión mayor o ABI.
 - Se incluye el hook `Loader::expandAtLoaderPath`. Su firma se contrastó con [el código de Apple](https://github.com/apple-oss-distributions/dyld/blob/dyld-1285.19/dyld/Loader.cpp); MachOMerger debe encontrarlo en el dyld del dispositivo o devolver error.
 - `loadDyldCache` queda limitado a la corrección de iOS 15 arm64e. Los archivos `unsandbox*.m` del donante, que no forman parte de la ruta activa, se excluyen del enlace.

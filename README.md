@@ -6,8 +6,17 @@ Puedes descargar la IPA en [Releases](https://github.com/Gokuencinar/Dopamine3-R
 
 ## Compatibilidad
 
-En iOS 18, el intento de jailbreak está limitado a **A12 y A13, de iOS 18.0 a 18.7.1**: XS, XS Max, XR, familia 11 y SE de segunda generación. Los modelos con A14 o posterior no son compatibles.
+La nueva candidata permite intentar el port en los dispositivos que acepte la combinación de exploits de Dopamine 3, tanto arm64 como arm64e. Sigue siendo experimental; no hay pruebas en un dispositivo físico.
 
+| Grupo | Sistemas contemplados por la base |
+| --- | --- |
+| arm64 (A8–A11) | iOS 15.0–18.7.1, según el dispositivo |
+| A12/A13 | iOS 15.0–18.7.1 y 26.0–26.0.1 |
+| A14–A17 y M1/M2 | Hasta iOS 17.3.1, según el dispositivo y los exploits disponibles |
+
+La app consulta los exploits disponibles en el propio dispositivo. Un perfil de bootstrap no basta para declarar compatible una combinación de modelo y versión. Esto no añade iOS 18 a A14 o posteriores.
+
+La release `roothide3-test-1` conserva los límites anteriores: estos cambios necesitan una nueva compilación.
 
 ## Qué incluye
 
