@@ -103,7 +103,8 @@ int main(int argc, char **argv) {
 
     def test_all_installer_entrypoints_share_profile_and_exploit_checks(self):
         bootstrap = (ROOT / "Application/Dopamine/Jailbreak/DOBootstrapper.m").read_text()
-        self.assertEqual(bootstrap.count("rh3_bootstrap_version_for_os("), 2)
+        # Installer policy and the read-only recovery baseline use the same map.
+        self.assertEqual(bootstrap.count("rh3_bootstrap_version_for_os("), 3)
         prepare = bootstrap.split("- (void)prepareRootHideBootstrapWithCompletion:(void (^)(NSError *))completion\n{", 1)[1]
         self.assertLess(prepare.index("!version || ![[DOEnvironmentManager sharedManager] isSupported]"),
                         prepare.index("rh3CreateRoot:root"))

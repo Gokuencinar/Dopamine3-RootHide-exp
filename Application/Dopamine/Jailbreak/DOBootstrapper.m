@@ -21,6 +21,8 @@
 #import <errno.h>
 #import <string.h>
 #import <stdlib.h>
+#import <fcntl.h>
+#import <unistd.h>
 #import <dispatch/dispatch.h>
 #import <CommonCrypto/CommonDigest.h>
 extern char **environ;
@@ -126,15 +128,120 @@ static BOOL RH3IsRealDirectory(NSString *path)
 }
 
 // An interrupted donor bootstrap cannot be replayed safely. Collect only
-// filesystem metadata, without opening password databases, following links,
+// filesystem metadata and selected package state, without opening password databases, following links,
 // running any child process, or changing a transaction marker. The owner
 // checks in rootHideExistingRootWithError: must succeed before this is called.
+static NSDictionary *RH3RecoveryPackageSummary(NSData *data)
+{
+    NSString *text = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+    if (!text) return nil;
+    text = [text stringByReplacingOccurrencesOfString:@"\r\n" withString:@"\n"];
+    NSSet *allowed = [NSSet setWithArray:@[@"firmware", @"apt", @"dpkg", @"debianutils",
+                                          @"dash", @"bash", @"zsh", @"vi"]];
+    NSMutableDictionary *result = [NSMutableDictionary dictionary];
+    for (NSString *paragraph in [text componentsSeparatedByString:@"\n\n"]) {
+        NSMutableDictionary *fields = [NSMutableDictionary dictionary];
+        for (NSString *line in [paragraph componentsSeparatedByString:@"\n"]) {
+            for (NSString *key in @[@"Package", @"Version", @"Status"]) {
+                NSString *prefix = [key stringByAppendingString:@": "];
+                if ([line hasPrefix:prefix]) {
+                    NSString *value = [line substringFromIndex:prefix.length];
+                    if (value.length > 128 || [value rangeOfCharacterFromSet:
+                        NSCharacterSet.controlCharacterSet].location != NSNotFound)
+                        return nil;
+                    // Duplicate fields/stanzas cannot establish package state.
+                    if (fields[key]) return nil;
+                    fields[key] = value;
+                }
+            }
+        }
+        NSString *package = fields[@"Package"];
+        if (!package || ![allowed containsObject:package]) continue;
+        if (result[package]) return nil;
+        result[package] = [NSString stringWithFormat:@"version=%@; status=%@",
+                           fields[@"Version"] ?: @"missing", fields[@"Status"] ?: @"missing"];
+    }
+    return result;
+}
+
+static void RH3LogRecoveryPackageState(NSString *root, DOUIManager *ui)
+{
+    // Read just the canonical package database, never account/password files.
+    // Walk each directory without following symlinks. No bootstrap commands run.
+    int directory = open(root.fileSystemRepresentation, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (directory < 0) {
+        [ui rh3RecordDiagnosticStage:@"RECOVERY package audit: root unavailable"];
+        return;
+    }
+    const char *components[] = {"Library", "dpkg"};
+    for (size_t i = 0; i < sizeof(components) / sizeof(components[0]); i++) {
+        const char *component = components[i];
+        int next = openat(directory, component, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        close(directory);
+        directory = next;
+        struct stat st = {0};
+        if (directory < 0 || fstat(directory, &st) != 0 || st.st_uid != 0) {
+            if (directory >= 0) close(directory);
+            [ui rh3RecordDiagnosticStage:@"RECOVERY package audit: canonical database directory unavailable"];
+            return;
+        }
+    }
+    int fd = openat(directory, "status", O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    close(directory);
+    struct stat before = {0}, after = {0};
+    if (fd < 0 || fstat(fd, &before) != 0 || !S_ISREG(before.st_mode) ||
+        before.st_uid != 0 || before.st_nlink != 1 || before.st_size <= 0 || before.st_size > 1024 * 1024) {
+        if (fd >= 0) close(fd);
+        [ui rh3RecordDiagnosticStage:@"RECOVERY package audit: status is unavailable or outside read limits"];
+        return;
+    }
+    NSMutableData *data = [NSMutableData dataWithLength:(NSUInteger)before.st_size];
+    size_t used = 0;
+    while (used < data.length) {
+        ssize_t count = read(fd, (uint8_t *)data.mutableBytes + used, data.length - used);
+        if (count < 0 && errno == EINTR) continue;
+        if (count <= 0) break;
+        used += (size_t)count;
+    }
+    BOOL stable = fstat(fd, &after) == 0 && used == data.length &&
+        before.st_size == after.st_size && before.st_ino == after.st_ino &&
+        before.st_mtimespec.tv_sec == after.st_mtimespec.tv_sec &&
+        before.st_mtimespec.tv_nsec == after.st_mtimespec.tv_nsec &&
+        before.st_ctimespec.tv_sec == after.st_ctimespec.tv_sec &&
+        before.st_ctimespec.tv_nsec == after.st_ctimespec.tv_nsec;
+    close(fd);
+    if (!stable) {
+        [ui rh3RecordDiagnosticStage:@"RECOVERY package audit: read incomplete or database changed; indeterminate"];
+        return;
+    }
+    unsigned char digest[CC_SHA256_DIGEST_LENGTH];
+    CC_SHA256(data.bytes, (CC_LONG)data.length, digest);
+    NSMutableString *hash = [NSMutableString string];
+    for (unsigned i = 0; i < sizeof(digest); i++) [hash appendFormat:@"%02x", digest[i]];
+    NSInteger version = rh3_bootstrap_version_for_os((int)NSProcessInfo.processInfo.operatingSystemVersion.majorVersion);
+    NSString *baseline = version == 1800 ? @"c24b53f710b989977f4cd81d5da26baad74b3e77459687acb16e85c3432379c7" :
+                         version == 1900 ? @"558c08def3e1c8481f0c7a3a0fa9dd1299af5c91f510067f098787d693bdf13c" : nil;
+    [ui rh3RecordDiagnosticStage:[NSString stringWithFormat:
+        @"RECOVERY Library/dpkg/status: bytes=%lu; sha256=%@; pinned-baseline=%@",
+        (unsigned long)data.length, hash, baseline ? ([hash isEqualToString:baseline] ? @"same" : @"different") : @"unknown"]];
+    NSDictionary *packages = RH3RecoveryPackageSummary(data);
+    if (!packages) {
+        [ui rh3RecordDiagnosticStage:@"RECOVERY package audit: malformed or ambiguous fields; indeterminate"];
+        return;
+    }
+    for (NSString *name in @[@"firmware", @"apt", @"dpkg", @"debianutils", @"dash", @"bash", @"zsh", @"vi"])
+        [ui rh3RecordDiagnosticStage:[NSString stringWithFormat:@"RECOVERY package %@: %@",
+                                     name, packages[name] ?: @"absent"]];
+}
+
 static NSString *RH3RecoveryPathKind(NSString *path)
 {
     struct stat st = {0};
     if (lstat(path.fileSystemRepresentation, &st) != 0)
         return errno == ENOENT ? @"absent" : [NSString stringWithFormat:@"inaccessible (%d)", errno];
-    if (S_ISREG(st.st_mode)) return @"regular file";
+    if (S_ISREG(st.st_mode)) return [NSString stringWithFormat:
+        @"regular file (size=%lld; mtime=%lld; uid=%u; mode=%04o)",
+        (long long)st.st_size, (long long)st.st_mtime, (unsigned)st.st_uid, (unsigned)(st.st_mode & 07777)];
     if (S_ISDIR(st.st_mode)) return @"directory";
     if (S_ISLNK(st.st_mode)) return @"symlink (not followed)";
     return @"other file type";
@@ -172,6 +279,7 @@ static void RH3LogInterruptedBootstrapSnapshot(NSString *root)
         }
         if (!foundBackup) [ui rh3RecordDiagnosticStage:@"RECOVERY no staged dependency backup name observed"];
     }
+    RH3LogRecoveryPackageState(root, ui);
     [ui rh3RecordDiagnosticStage:@"RECOVERY result: indeterminate; manual forensic inspection required before any retry"];
 }
 
