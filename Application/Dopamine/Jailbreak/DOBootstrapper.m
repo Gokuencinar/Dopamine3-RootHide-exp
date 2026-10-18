@@ -1385,9 +1385,11 @@ cleanup_root:
         BOOL daemonResponded = RH3AwaitReadinessCheck(^int(void) {
             return jbdTestCall(23);
         }, &daemonReply);
-        [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
-            daemonResponded ? [NSString stringWithFormat:@"bootstrap: jailbreakd probe returned %d", daemonReply]
-                            : @"bootstrap: jailbreakd probe timed out (script NOT started)"];
+        NSString *daemonDiagnostic = daemonResponded
+            ? [NSString stringWithFormat:@"bootstrap: jailbreakd probe returned %d", daemonReply]
+            : @"bootstrap: jailbreakd probe timed out (script NOT started)";
+        [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:daemonDiagnostic];
+        [[DOUIManager sharedInstance] sendLog:daemonDiagnostic debug:NO];
         if (!daemonResponded || daemonReply != 46)
             return RH3Error(BootstrapErrorCodeFailedFinalising,
                 @"RootHide jailbreakd has not confirmed readiness; script not started and prepared state retained. Restart the app after collecting logs; do not manually re-run the script.");
@@ -1401,9 +1403,11 @@ cleanup_root:
         BOOL trustResponded = RH3AwaitReadinessCheck(^int(void) {
             return jbclient_trust_file_by_path(shell.fileSystemRepresentation);
         }, &shellTrustResult);
-        [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
-            trustResponded ? [NSString stringWithFormat:@"bootstrap: shell trust returned %d", shellTrustResult]
-                           : @"bootstrap: shell trust timed out (script NOT started)"];
+        NSString *trustDiagnostic = trustResponded
+            ? [NSString stringWithFormat:@"bootstrap: shell trust returned %d", shellTrustResult]
+            : @"bootstrap: shell trust timed out (script NOT started)";
+        [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:trustDiagnostic];
+        [[DOUIManager sharedInstance] sendLog:trustDiagnostic debug:NO];
         if (!trustResponded || shellTrustResult != 0)
             return RH3Error(BootstrapErrorCodeFailedFinalising,
                 @"RootHide shell trust failed or timed out; script not started and prepared state retained.");

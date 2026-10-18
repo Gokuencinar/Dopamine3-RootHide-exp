@@ -67,6 +67,7 @@ typedef NS_ENUM(NSInteger, JBErrorCode) {
     JBErrorCodeFailedInitProtection          = -12,
     JBErrorCodeFailedInitFakeLib             = -13,
     JBErrorCodeFailedDuplicateApps           = -14,
+    JBErrorCodeFailedDiagnosticRecording     = -15,
 };
 
 // Hold the boomerang response context independently of the calling stack;
@@ -876,7 +877,11 @@ static void *rh3_boomerang_server(void *opaque)
     uname(&systemInfo);
     NSString *startLog = [NSString stringWithFormat:@"Starting Jailbreak (Model: %s, %@, Configuration: {removeJailbreak=%d, tweakInjection=%d, idownload=%d, appJIT=%d})", systemInfo.machine, NSProcessInfo.processInfo.operatingSystemVersionString, removeJailbreakEnabled, tweaksEnabled, idownloadEnabled, appJITEnabled];
     if ([DOBootstrapper rootHidePortEnabled]) {
-        [[DOUIManager sharedInstance] rh3BeginDiagnosticAttempt];
+        if (![[DOUIManager sharedInstance] rh3BeginDiagnosticAttempt]) {
+            *errOut = [NSError errorWithDomain:JBErrorDomain code:JBErrorCodeFailedDiagnosticRecording
+                userInfo:@{NSLocalizedDescriptionKey:@"Cannot create a durable RootHide diagnostic log. No exploit was started."}];
+            return;
+        }
         [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:@"phase: exploit starting"];
     }
     [[DOUIManager sharedInstance] sendLog:startLog debug:YES];

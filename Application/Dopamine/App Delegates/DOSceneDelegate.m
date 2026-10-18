@@ -7,6 +7,7 @@
 
 #import "DOSceneDelegate.h"
 #import "DONavigationController.h"
+#import "../UI/RH3DiagnosticFile.h"
 
 @interface DOSceneDelegate ()
 
@@ -16,7 +17,61 @@
 
 - (void)scene:(UIScene *)scene willConnectToSession:(UISceneSession *)session options:(UISceneConnectionOptions *)connectionOptions {
     UIWindow *window = [[UIWindow alloc] initWithWindowScene:(UIWindowScene *)scene];
+#if RH3_FULL_APP_EXPERIMENTAL
+    // Export must be available before DONavigationController/DOEnvironmentManager
+    // performs synchronous IPC against a possibly broken launchd/jailbreakd.
+    UIViewController *landing = [UIViewController new];
+    landing.view.backgroundColor = UIColor.systemBackgroundColor;
+    NSString *directory = [NSHomeDirectory() stringByAppendingPathComponent:@"Documents"];
+    NSURL *latest = RH3LatestDiagnosticURL(directory);
+    UILabel *title = [UILabel new];
+    title.text = @"RootHide 3";
+    title.font = [UIFont boldSystemFontOfSize:28];
+    UILabel *detail = [UILabel new];
+    detail.numberOfLines = 0;
+    detail.textAlignment = NSTextAlignmentCenter;
+    NSDictionary *attributes = latest ? [NSFileManager.defaultManager attributesOfItemAtPath:latest.path error:nil] : nil;
+    NSString *date = attributes[NSFileModificationDate] ? [NSDateFormatter localizedStringFromDate:attributes[NSFileModificationDate]
+        dateStyle:NSDateFormatterMediumStyle timeStyle:NSDateFormatterMediumStyle] : @"Fecha no disponible";
+    NSString *label = [latest.lastPathComponent isEqual:@"RootHide3-last-attempt.log"] ? @"Registro de una versión anterior:" : @"Último diagnóstico guardado:";
+    detail.text = latest ? [NSString stringWithFormat:@"%@\n%@\n\nPuedes compartirlo antes de abrir RootHide.", label, date]
+                         : @"No hay un diagnóstico legible guardado. Puedes entrar en RootHide para continuar.";
+    UIButton *share = [UIButton buttonWithType:UIButtonTypeSystem];
+    [share setTitle:@"Compartir último diagnóstico" forState:UIControlStateNormal];
+    share.enabled = latest != nil;
+    __weak UIViewController *weakLanding = landing;
+    __weak UIButton *weakShare = share;
+    [share addAction:[UIAction actionWithHandler:^(__kindof UIAction *action) {
+        UIViewController *presenter = weakLanding;
+        UIButton *source = weakShare;
+        if (!presenter || !source || !latest) return;
+        UIActivityViewController *sheet = [[UIActivityViewController alloc] initWithActivityItems:@[latest] applicationActivities:nil];
+        sheet.popoverPresentationController.sourceView = source;
+        sheet.popoverPresentationController.sourceRect = source.bounds;
+        [presenter presentViewController:sheet animated:YES completion:nil];
+    }] forControlEvents:UIControlEventTouchUpInside];
+    UIButton *enter = [UIButton buttonWithType:UIButtonTypeSystem];
+    [enter setTitle:@"Entrar en RootHide" forState:UIControlStateNormal];
+    __weak UIWindow *weakWindow = window;
+    [enter addAction:[UIAction actionWithHandler:^(__kindof UIAction *action) {
+        weakWindow.rootViewController = [[DONavigationController alloc] init];
+    }] forControlEvents:UIControlEventTouchUpInside];
+    UIStackView *stack = [[UIStackView alloc] initWithArrangedSubviews:@[title, detail, share, enter]];
+    stack.axis = UILayoutConstraintAxisVertical;
+    stack.alignment = UIStackViewAlignmentCenter;
+    stack.spacing = 24;
+    stack.translatesAutoresizingMaskIntoConstraints = NO;
+    [landing.view addSubview:stack];
+    [NSLayoutConstraint activateConstraints:@[
+        [stack.centerYAnchor constraintEqualToAnchor:landing.view.safeAreaLayoutGuide.centerYAnchor],
+        [stack.leadingAnchor constraintEqualToAnchor:landing.view.safeAreaLayoutGuide.leadingAnchor constant:24],
+        [stack.trailingAnchor constraintEqualToAnchor:landing.view.safeAreaLayoutGuide.trailingAnchor constant:-24],
+        [detail.widthAnchor constraintEqualToAnchor:stack.widthAnchor]
+    ]];
+    window.rootViewController = landing;
+#else
     window.rootViewController = [[DONavigationController alloc] init];
+#endif
     [window makeKeyAndVisible];
     self.window = window;
 }

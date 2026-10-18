@@ -11,23 +11,43 @@ MAIN = (ROOT / "Application/Dopamine/UI/DOMainViewController.m").read_text(encod
 JAILBREAKER = (ROOT / "Application/Dopamine/Jailbreak/DOJailbreaker.m").read_text(encoding="utf-8")
 STUB_H = (ROOT / "BaseBin/dopamine/src/ui-stub/DOUIManager.h").read_text(encoding="utf-8")
 STUB_M = (ROOT / "BaseBin/dopamine/src/ui-stub/DOUIManager.m").read_text(encoding="utf-8")
+FILE = (ROOT / "Application/Dopamine/UI/RH3DiagnosticFile.h").read_text(encoding="utf-8")
+SCENE = (ROOT / "Application/Dopamine/App Delegates/DOSceneDelegate.m").read_text(encoding="utf-8")
 
 
 class RootHidePersistentDiagnostics(unittest.TestCase):
     def test_diagnostics_live_in_original_sandbox_and_sync_each_checkpoint(self):
-        self.assertIn('@"Documents/RootHide3-last-attempt.log"', UI)
+        self.assertIn('@"RootHide3-last-attempt.log"', FILE)
         self.assertIn('NSHomeDirectory()', UI)
         self.assertIn('#if RH3_FULL_APP_EXPERIMENTAL', UI)
-        self.assertIn('O_NOFOLLOW', UI)
-        self.assertIn('O_CLOEXEC', UI)
-        self.assertIn('O_TRUNC', UI)
-        self.assertIn('O_APPEND', UI)
-        self.assertIn('S_ISREG(st.st_mode)', UI)
-        self.assertIn('st.st_size <= 65536', UI)
-        self.assertIn('(void)fsync(fd);', UI)
+        self.assertIn('O_NOFOLLOW', FILE)
+        self.assertIn('O_CLOEXEC', FILE)
+        self.assertIn('O_EXCL', FILE)
+        self.assertNotIn('O_TRUNC', FILE)
+        self.assertIn('O_APPEND', FILE)
+        self.assertIn('S_ISREG(st.st_mode)', FILE)
+        self.assertIn('RH3DiagnosticLimit = 128 * 1024', FILE)
+        self.assertIn('return fsync(fd) == 0 ? 0 : errno;', FILE)
+        self.assertIn('RH3AppendDiagnostic(_rh3DiagnosticFD', UI)
+        writer = UI.split('- (void)rh3WriteDiagnosticLine:', 1)[1].split('- (BOOL)rh3BeginDiagnosticAttempt', 1)[0]
+        self.assertNotIn('open(', writer)
+        self.assertNotIn('close(', writer)
         self.assertIn('rh3BeginDiagnosticAttempt', UI)
         self.assertIn('rh3PreviousDiagnosticURL', UI)
         self.assertIn('return nil;', UI)
+
+    def test_failed_log_start_prevents_exploitation_and_export_has_no_ipc(self):
+        self.assertIn('if (![[DOUIManager sharedInstance] rh3BeginDiagnosticAttempt])', JAILBREAKER)
+        self.assertIn('No exploit was started.', JAILBREAKER)
+        self.assertLess(JAILBREAKER.index('if (![[DOUIManager sharedInstance] rh3BeginDiagnosticAttempt])'),
+                        JAILBREAKER.index('*errOut = [self doExploitation]'))
+        landing = SCENE.split('#if RH3_FULL_APP_EXPERIMENTAL', 1)[1].split('#else', 1)[0]
+        self.assertIn('window.rootViewController = landing;', landing)
+        self.assertIn('RH3LatestDiagnosticURL(directory)', landing)
+        self.assertIn('Compartir último diagnóstico', landing)
+        self.assertNotIn('[DOEnvironmentManager', landing)
+        self.assertNotIn('jbclient_', landing)
+        self.assertIn('@"END FAILED: %@"', MAIN)
 
     def test_injection_hardware_crash_is_distinguishable_from_successful_reboot(self):
         self.assertIn('@"phase: about to inject hook into PID 1 (crash-sensitive)"', JAILBREAKER)

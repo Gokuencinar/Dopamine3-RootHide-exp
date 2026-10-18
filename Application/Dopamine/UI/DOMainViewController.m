@@ -387,6 +387,10 @@
         BOOL didRemove = NO;
         BOOL showLogs = YES;
         [jailbreaker runWithError:&error didRemoveJailbreak:&didRemove showLogs:&showLogs];
+#if RH3_FULL_APP_EXPERIMENTAL
+        if (error) [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
+            [NSString stringWithFormat:@"END FAILED: %@", error.localizedDescription]];
+#endif
         dispatch_async(dispatch_get_main_queue(), ^{
             if (error && showLogs) {
                 [[DOUIManager sharedInstance] sendLog:[NSString stringWithFormat:@"Jailbreak failed with error: %@", error] debug:NO];

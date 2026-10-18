@@ -15,6 +15,7 @@
 #import <unistd.h>
 #import <sys/stat.h>
 #import <errno.h>
+#import "RH3DiagnosticFile.h"
 
 #ifndef RH3_FULL_APP_EXPERIMENTAL
 #define RH3_FULL_APP_EXPERIMENTAL 0
@@ -39,10 +40,14 @@
         _preferenceManager = [DOPreferenceManager sharedManager];
         _logRecord = [NSMutableArray new];
         _logLock = [NSLock new];
+        _rh3DiagnosticLock = [NSLock new];
+        _rh3DiagnosticFD = -1;
 #if RH3_FULL_APP_EXPERIMENTAL
         // Cache the ORIGINAL app container, before elevatePrivileges changes
         // HOME to /var/root. The file must survive a SpringBoard/launchd crash.
-        _rh3DiagnosticPath = [NSHomeDirectory() stringByAppendingPathComponent:@"Documents/RootHide3-last-attempt.log"];
+        _rh3DiagnosticDirectory = [NSHomeDirectory() stringByAppendingPathComponent:@"Documents"];
+        [NSFileManager.defaultManager createDirectoryAtPath:_rh3DiagnosticDirectory
+            withIntermediateDirectories:NO attributes:@{NSFilePosixPermissions:@0700} error:nil];
 #endif
     }
     return self;
@@ -253,55 +258,64 @@
 // Do not rely on the in-memory log view for experimental launchd injection:
 // a kernel panic/reboot destroys it. Write a short, bounded record to the
 // app's own Documents directory, which can be shared after the next launch.
-- (void)rh3WriteDiagnosticLine:(NSString *)line truncate:(BOOL)truncate
+- (void)rh3WriteDiagnosticLine:(NSString *)line
 {
 #if RH3_FULL_APP_EXPERIMENTAL
-    if (!_rh3DiagnosticPath || !line) return;
-    [_logLock lock];
-    int flags = O_WRONLY | O_CREAT | O_CLOEXEC | O_NOFOLLOW | (truncate ? O_TRUNC : O_APPEND);
-    int fd = open(_rh3DiagnosticPath.fileSystemRepresentation, flags, 0600);
-    if (fd >= 0) {
-        struct stat st = {0};
-        if (fstat(fd, &st) == 0 && S_ISREG(st.st_mode) && st.st_size <= 65536) {
-            NSString *entry = [NSString stringWithFormat:@"%@ %@\n", [NSDate date], line];
-            NSData *bytes = [entry dataUsingEncoding:NSUTF8StringEncoding];
-            const uint8_t *cursor = bytes.bytes;
-            size_t remaining = bytes.length;
-            while (remaining) {
-                ssize_t written = write(fd, cursor, remaining);
-                if (written < 0 && errno == EINTR) continue;
-                if (written <= 0) break;
-                cursor += written;
-                remaining -= (size_t)written;
-            }
-            (void)fsync(fd);
-        }
-        close(fd);
-    }
-    [_logLock unlock];
+    if (!line) return;
+    [_rh3DiagnosticLock lock];
+    if (_rh3DiagnosticFD < 0) { [_rh3DiagnosticLock unlock]; return; }
+    NSString *entry = [NSString stringWithFormat:@"%@ %@\n", NSDate.date, line];
+    int result = _rh3DiagnosticFD >= 0 ? RH3AppendDiagnostic(_rh3DiagnosticFD, [entry dataUsingEncoding:NSUTF8StringEncoding]) : EBADF;
+    BOOL report = result != 0 && !_rh3DiagnosticWriteFailed;
+    if (result) _rh3DiagnosticWriteFailed = YES;
+    [_rh3DiagnosticLock unlock];
+    if (report) [self sendLog:[NSString stringWithFormat:@"RootHide: diagnostic write failed (%d). The saved file may be incomplete.", result] debug:NO];
 #else
     (void)line;
-    (void)truncate;
 #endif
 }
 
-- (void)rh3BeginDiagnosticAttempt
+- (BOOL)rh3BeginDiagnosticAttempt
 {
-    [self rh3WriteDiagnosticLine:@"BEGIN RootHide 3 experimental jailbreak attempt (no success implied)" truncate:YES];
+#if RH3_FULL_APP_EXPERIMENTAL
+    [_rh3DiagnosticLock lock];
+    if (_rh3DiagnosticFD >= 0) close(_rh3DiagnosticFD);
+    _rh3DiagnosticFD = -1;
+    NSString *revision = @"unknown";
+#ifdef COMMIT_HASH
+    revision = [NSString stringWithUTF8String:COMMIT_HASH];
+#endif
+    NSString *header = [NSString stringWithFormat:@"%@ BEGIN RootHide 3 attempt; revision=%@; pid=%d; no success implied\n", NSDate.date, revision, getpid()];
+    NSString *newPath = nil;
+    _rh3DiagnosticFD = RH3StartDiagnostic(_rh3DiagnosticDirectory, [header dataUsingEncoding:NSUTF8StringEncoding], &newPath);
+    int failure = errno;
+    _rh3DiagnosticPath = newPath;
+    _rh3DiagnosticWriteFailed = NO;
+    BOOL ready = _rh3DiagnosticFD >= 0;
+    [_rh3DiagnosticLock unlock];
+    if (!ready) [self sendLog:[NSString stringWithFormat:@"RootHide: cannot start diagnostic recording (errno %d); exploit cancelled.", failure] debug:NO];
+    return ready;
+#else
+    return YES;
+#endif
 }
 
 - (void)rh3RecordDiagnosticStage:(NSString *)stage
 {
-    [self rh3WriteDiagnosticLine:stage truncate:NO];
+    [self rh3WriteDiagnosticLine:stage];
 }
 
 - (NSURL *)rh3PreviousDiagnosticURL
 {
 #if RH3_FULL_APP_EXPERIMENTAL
-    if (_rh3DiagnosticPath && [[NSFileManager defaultManager] fileExistsAtPath:_rh3DiagnosticPath])
-        return [NSURL fileURLWithPath:_rh3DiagnosticPath];
+    return RH3LatestDiagnosticURL(_rh3DiagnosticDirectory);
 #endif
     return nil;
+}
+
+- (void)dealloc
+{
+    if (_rh3DiagnosticFD >= 0) close(_rh3DiagnosticFD);
 }
 
 - (void)shareLogRecordFromView:(UIView *)sourceView

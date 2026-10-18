@@ -29,8 +29,9 @@
 
 // These are intentionally inert in the command-line helper. The full iOS
 // application's DOUIManager owns the persisted diagnostic log and export UI.
-- (void)rh3BeginDiagnosticAttempt
+- (BOOL)rh3BeginDiagnosticAttempt
 {
+    return YES;
 }
 
 - (void)rh3RecordDiagnosticStage:(NSString *)stage
