@@ -8,6 +8,7 @@
 #include <libjailbreak/kcall_Fugu14.h>
 #include <libjailbreak/kcall_arm64.h>
 #include <libjailbreak/stock_fixes.h>
+#include "spawn_hook.h"
 #include <unistd.h>
 
 int posix_spawnattr_set_registered_ports_np(posix_spawnattr_t *__restrict attr, mach_port_t portarray[], uint32_t count);
@@ -84,7 +85,13 @@ int boomerang_recoverPrimitives(bool firstRetrieval, bool shouldEndBoomerang)
 	// Handing off full physrw from the app is really slow and causes watchdog timeouts
 	// But from launchd it's generally fine, no clue why
 	bool physrwPTE = firstRetrieval && !is_kcall_available();
-	jbclient_initialize_primitives_internal(physrwPTE);
+	int primitiveStatus = jbclient_initialize_primitives_internal(physrwPTE);
+	// RootHide must not claim a completed boomerang handshake if the
+	// sysinfo/physrw handoff failed: PID 1 would then install hooks with
+	// unavailable kernel primitives. No DONE message on failure; the app
+	// has a finite handshake timeout and can report the failed attempt.
+	// Preserve stock Dopamine's existing boomerang contract unchanged.
+	if (primitiveStatus != 0 && roothide_launchdhook_origin_verified()) return -3;
 
 	if (shouldEndBoomerang) {
 		// Send done message to boomerang

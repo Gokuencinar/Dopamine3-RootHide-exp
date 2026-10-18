@@ -11,6 +11,7 @@ MAIN = (ROOT / "BaseBin/launchdhook/src/main.m").read_text(encoding="utf-8")
 JBD = (ROOT / "BaseBin/libjailbreak/src/roothider/jailbreakd.c").read_text(encoding="utf-8")
 SPAWN_H = (ROOT / "BaseBin/launchdhook/src/spawn_hook.h").read_text(encoding="utf-8")
 SPAWN_C = (ROOT / "BaseBin/launchdhook/src/spawn_hook.c").read_text(encoding="utf-8")
+BOOMERANG = (ROOT / "BaseBin/launchdhook/src/boomerang.c").read_text(encoding="utf-8")
 
 
 class LaunchdAbortGuards(unittest.TestCase):
@@ -25,6 +26,13 @@ class LaunchdAbortGuards(unittest.TestCase):
         self.assertIn('bool roothide_launchdhook_origin_verified(void)', SPAWN_C)
         self.assertIn('systemhook_is_roothide_root_path(root)', SPAWN_C)
         self.assertIn('dladdr((const void *)&roothide_launchdhook_origin_verified', SPAWN_C)
+
+    def test_failed_roothide_primitive_handoff_does_not_signal_success(self):
+        self.assertIn('#include "spawn_hook.h"', BOOMERANG)
+        self.assertIn('int primitiveStatus = jbclient_initialize_primitives_internal(physrwPTE);', BOOMERANG)
+        guard = 'if (primitiveStatus != 0 && roothide_launchdhook_origin_verified()) return -3;'
+        self.assertIn(guard, BOOMERANG)
+        self.assertLess(BOOMERANG.index(guard), BOOMERANG.index('jbclient_boomerang_done();'))
 
     def test_dead_jailbreakd_port_never_aborts_pid1(self):
         block = JBD.split('mach_port_t reactiveJailbreakdPort()', 1)[1].split('mach_port_t jailbreakdServerPort()', 1)[0]
