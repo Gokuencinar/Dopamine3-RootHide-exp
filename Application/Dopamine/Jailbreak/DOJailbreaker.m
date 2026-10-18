@@ -329,6 +329,24 @@ typedef NS_ENUM(NSInteger, JBErrorCode) {
     uint32_t csflags;
     csops(getpid(), CS_OPS_STATUS, &csflags, sizeof(csflags));
     if (!(csflags & CS_PLATFORM_BINARY)) return [NSError errorWithDomain:JBErrorDomain code:JBErrorCodeFailedPlatformize userInfo:@{NSLocalizedDescriptionKey:@"Failed to get CS_PLATFORM_BINARY"}];
+
+    if ([DOBootstrapper rootHidePortEnabled]) {
+        // RootHide2's elevatePrivileges also sets CS_INSTALLER. UID 0 and
+        // removing the Seatbelt label do not grant installer access to the
+        // protected app-container directory when using a sideloaded app.
+        // Use Dopamine's existing csflags primitive, with its dynamic offsets.
+        proc_csflags_set(proc, CS_INSTALLER);
+        csflags = 0;
+        int status = csops(getpid(), CS_OPS_STATUS, &csflags, sizeof(csflags));
+        if (status != 0 || !(csflags & CS_INSTALLER)) {
+            return [NSError errorWithDomain:JBErrorDomain code:JBErrorCodeFailedPlatformize
+                                  userInfo:@{NSLocalizedDescriptionKey:
+                [NSString stringWithFormat:@"RootHide installer access could not be enabled (csops=%d, flags=0x%08x)", status, csflags]}];
+        }
+        [[DOUIManager sharedInstance] sendLog:
+            [NSString stringWithFormat:@"RootHide installer access enabled (uid=%u, euid=%u, flags=0x%08x)",
+             (unsigned)getuid(), (unsigned)geteuid(), csflags] debug:YES];
+    }
     
     return nil;
 }

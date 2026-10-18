@@ -36,6 +36,39 @@ def fixture(*, identifier=EXPERIMENTAL_BUNDLE_ID, display=EXPERIMENTAL_DISPLAY_N
 
 
 class FullExperimentalTests(unittest.TestCase):
+    def test_duplicate_identifiers_in_built_frameworks_are_rejected(self):
+        memory = fixture()
+        with zipfile.ZipFile(memory, "a") as archive:
+            for framework in ("Titan", "kfd"):
+                archive.writestr(f"Payload/Dopamine.app/Frameworks/{framework}.framework/Info.plist",
+                                 plistlib.dumps({"CFBundleIdentifier": EXPERIMENTAL_BUNDLE_ID}))
+        with zipfile.ZipFile(memory) as archive:
+            errors, details = check_full_identity(archive)
+        self.assertTrue(any("DuplicateIdentifier" in error for error in errors))
+        self.assertEqual(len(details["bundle_identifiers"]), 3)
+
+    def test_unique_identifiers_and_nested_framework_duplicates(self):
+        for duplicate in (False, True):
+            with self.subTest(duplicate=duplicate):
+                memory = fixture()
+                with zipfile.ZipFile(memory, "a") as archive:
+                    for i, path in enumerate(("Titan.framework", "Titan.framework/Frameworks/Nested.framework")):
+                        archive.writestr("Payload/Dopamine.app/Frameworks/" + path + "/Info.plist",
+                                         plistlib.dumps({"CFBundleIdentifier": f"com.test.framework{0 if duplicate else i}"}))
+                with zipfile.ZipFile(memory) as archive:
+                    errors, _ = check_full_identity(archive)
+                self.assertEqual(bool(errors), duplicate)
+
+    def test_missing_and_unresolved_framework_identifiers_are_rejected(self):
+        for value in (None, "", "$(PRODUCT_BUNDLE_IDENTIFIER)", 42):
+            with self.subTest(value=value):
+                memory = fixture()
+                with zipfile.ZipFile(memory, "a") as archive:
+                    archive.writestr("Payload/Dopamine.app/Frameworks/Titan.framework/Info.plist",
+                                     plistlib.dumps({} if value is None else {"CFBundleIdentifier": value}))
+                with zipfile.ZipFile(memory) as archive:
+                    self.assertTrue(check_full_identity(archive)[0])
+
     def test_distinct_identity_and_guards_in_build_configuration(self):
         make = source("Application/Makefile")
         self.assertIn("ROOTHIDE_EXPERIMENT_ID := " + EXPERIMENTAL_BUNDLE_ID, make)

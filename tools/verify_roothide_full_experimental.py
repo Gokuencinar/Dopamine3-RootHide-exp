@@ -28,6 +28,30 @@ DISABLED_MARKER = b"RH3_JAILBREAK_DISABLED_V1"
 ACTIVE_MARKER = b"RH3_HARDWARE_BETA_ACTIVATED_V1"
 
 
+def check_bundle_identifiers(archive):
+    """Inspect the built plists, including nested frameworks and extensions."""
+    errors, bundles, identifiers = [], {}, {}
+    for name in archive.namelist():
+        if not name.startswith("Payload/") or not name.endswith("/Info.plist"):
+            continue
+        bundle = name.rsplit("/", 1)[0]
+        if not bundle.endswith((".app", ".framework", ".appex", ".xpc")):
+            continue
+        try:
+            info = plistlib.loads(archive.read(name))
+            identifier = info.get("CFBundleIdentifier")
+            if not isinstance(identifier, str) or not identifier.strip() or "$" in identifier:
+                raise ValueError("missing or unresolved CFBundleIdentifier")
+            bundles[bundle] = identifier
+            identifiers.setdefault(identifier, []).append(bundle)
+        except (ValueError, AttributeError, plistlib.InvalidFileException) as exc:
+            errors.append(f"Invalid bundle metadata {name}: {exc}")
+    for identifier, paths in identifiers.items():
+        if len(paths) > 1:
+            errors.append(f"DuplicateIdentifier {identifier}: {', '.join(paths)}")
+    return errors, bundles
+
+
 def check_full_identity(archive, *, hardware_beta=False):
     """Identity, separation and defensive ZIP validation (portable fixture)."""
     errors = []
@@ -45,6 +69,8 @@ def check_full_identity(archive, *, hardware_beta=False):
         errors.append("Unexpected content outside full experimental app")
     if archive.testzip() is not None:
         errors.append("ZIP CRC check failed")
+    bundle_errors, bundles = check_bundle_identifiers(archive)
+    errors.extend(bundle_errors)
     info_path = prefix + "Info.plist"
     binary_path = prefix + "Dopamine"
     if info_path not in names or binary_path not in names:
@@ -54,6 +80,7 @@ def check_full_identity(archive, *, hardware_beta=False):
         "bundle_id": info.get("CFBundleIdentifier"),
         "display_name": info.get("CFBundleDisplayName"),
         "executable_sha256": hashlib.sha256(archive.read(binary_path)).hexdigest(),
+        "bundle_identifiers": bundles,
     }
     expected_id = HARDWARE_BETA_BUNDLE_ID if hardware_beta else EXPERIMENTAL_BUNDLE_ID
     expected_display = HARDWARE_BETA_DISPLAY_NAME if hardware_beta else EXPERIMENTAL_DISPLAY_NAME

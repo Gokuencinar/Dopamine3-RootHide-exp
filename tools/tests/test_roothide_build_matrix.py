@@ -25,7 +25,13 @@ class RootHideBuildMatrixTests(unittest.TestCase):
         self.assertLess(nightly_metadata, full_selector)
         self.assertLess(full_selector, stock_nightly)
         experimental = makefile[full_selector:stock_nightly]
-        self.assertIn("PRODUCT_BUNDLE_IDENTIFIER=$(ROOTHIDE_EXPERIMENT_ID)", experimental)
+        self.assertIn("RH3_APP_BUNDLE_IDENTIFIER=$(ROOTHIDE_EXPERIMENT_ID)", experimental)
+        self.assertNotRegex(experimental, r"(?<![A-Z_])PRODUCT_BUNDLE_IDENTIFIER=")
+        self.assertNotIn("INFOPLIST_KEY_CFBundleDisplayName=", experimental)
+        project = (ROOT / "Application/Dopamine.xcodeproj/project.pbxproj").read_text(encoding="utf-8")
+        self.assertEqual(project.count('PRODUCT_BUNDLE_IDENTIFIER = "$(RH3_APP_BUNDLE_IDENTIFIER)";'), 2)
+        self.assertEqual(project.count('INFOPLIST_KEY_CFBundleDisplayName = "$(RH3_APP_DISPLAY_NAME)";'), 2)
+        self.assertEqual(project.count('RH3_APP_BUNDLE_IDENTIFIER = com.opa334.Dopamine;'), 2)
         self.assertIn("ROOTHIDE_EXPERIMENT_ID := " + BUNDLE_ID, makefile)
         self.assertIn("RH3_FULL_APP_EXPERIMENTAL=1", experimental)
         self.assertIn("ROOTHIDE3_BOOTSTRAP_READY=$(ROOTHIDE_BOOTSTRAP_GATE)", experimental)
@@ -58,10 +64,10 @@ class RootHideBuildMatrixTests(unittest.TestCase):
                     self.assertEqual(len(xcode_lines), 1, result.stdout)
                     command = xcode_lines[0]
                     if experimental == "1":
-                        self.assertIn("PRODUCT_BUNDLE_IDENTIFIER=" + BUNDLE_ID, command)
+                        self.assertIn("RH3_APP_BUNDLE_IDENTIFIER=" + BUNDLE_ID, command)
                         self.assertIn("RH3_FULL_APP_EXPERIMENTAL=1", command)
                         self.assertIn("ROOTHIDE3_BOOTSTRAP_READY=0", command)
-                        self.assertIn("INFOPLIST_KEY_CFBundleDisplayName=", command)
+                        self.assertIn("RH3_APP_DISPLAY_NAME=", command)
                     else:
                         self.assertNotIn(BUNDLE_ID, command)
                         self.assertNotIn("RH3_FULL_APP_EXPERIMENTAL=1", command)
@@ -85,7 +91,7 @@ class RootHideBuildMatrixTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 command = next(line for line in result.stdout.splitlines()
                                if line.lstrip().startswith("xcodebuild "))
-                self.assertIn("PRODUCT_BUNDLE_IDENTIFIER=" + BETA_BUNDLE_ID, command)
+                self.assertIn("RH3_APP_BUNDLE_IDENTIFIER=" + BETA_BUNDLE_ID, command)
                 self.assertIn("ROOTHIDE3_BOOTSTRAP_READY=1", command)
                 self.assertIn("RH3_FULL_APP_EXPERIMENTAL=1", command)
                 self.assertNotIn(BUNDLE_ID, command)
