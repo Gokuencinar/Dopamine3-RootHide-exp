@@ -40,9 +40,11 @@ class LaunchdAbortGuards(unittest.TestCase):
         self.assertIn('return MACH_PORT_NULL;', block)
         self.assertIn('#ifndef ENABLE_LOGS', block)
 
-    def test_unexpected_jailbreakd_bootstrap_message_is_dropped(self):
-        block = JBD.split('int spawnJailbreakd()', 1)[1].split('int initJailbreakd(bool firstLoad)', 1)[0]
+    def test_jailbreakd_bootstrap_dispatch_preserves_nonfatal_rejection(self):
+        block = JBD.split('int spawnJailbreakd()', 1)[1].split('int initJailbreakd(', 1)[0]
         self.assertNotRegex(block, r'\babort\s*\(')
+        self.assertIn('RH3DispatchBootstrapMessage(gJailbreakdBootstrapServer, xdict)', block)
+        self.assertIn('initJailbreakd(firstLoad, &gGlobalServer)', MAIN)
         self.assertIn('xpc_release(xdict);', block)
 
 

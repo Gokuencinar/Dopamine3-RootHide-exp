@@ -1,5 +1,6 @@
 #import <Foundation/Foundation.h>
 #import <libjailbreak/libjailbreak.h>
+#import <libjailbreak/jbserver.h>
 #import <libjailbreak/util.h>
 #import <libjailbreak/kernel.h>
 #import <libjailbreak/display.h>
@@ -186,7 +187,7 @@ __attribute__((constructor)) static void initializer(void)
 	// initialize it for a normal /private/preboot Dopamine environment.
 	if (roothide_is_active() &&
 	    access(JBROOT_PATH("/basebin/jailbreakd"), X_OK) == 0) {
-		int rootHideInitStatus = initJailbreakd(firstLoad);
+		int rootHideInitStatus = initJailbreakd(firstLoad, &gGlobalServer);
 		if (rootHideInitStatus != 0) {
 			JBLogError("RootHide jailbreakd initialization failed: %d", rootHideInitStatus);
 		}

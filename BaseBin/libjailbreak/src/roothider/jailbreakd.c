@@ -9,6 +9,7 @@
 
 #include "../libjailbreak.h"
 #include "jailbreakd.h"
+#include "jailbreakd_bootstrap.h"
 #include "common.h"
 #include "log.h"
 
@@ -31,6 +32,7 @@ int posix_spawnattr_set_registered_ports_np(posix_spawnattr_t * __restrict attr,
 
 static bool __firstLoad = false;
 static bool __jailbreakd_initialized = false;
+static struct jbserver_impl *gJailbreakdBootstrapServer = NULL;
 mach_port_t gJailbreakdPort = MACH_PORT_NULL;
 
 bool jailbreakd_is_ready(void)
@@ -127,10 +129,11 @@ int spawnJailbreakd()
 			xpc_object_t xdict = NULL;
 			int err = xpc_pipe_receive(bootstraport, &xdict);
 			if(err == 0) {
-				// Unexpected bootstrap messages used to abort launchd (PID 1),
-				// turning an IPC routing failure into a device-wide panic.
-				// XPC hooks own routing; drop this unexpected message safely.
-				JBLogError("jailbreakd bootstrap message reached fallback receiver");
+				// This private port is consumed by xpc_pipe_receive, whereas the
+				// launchd hook intercepts xpc_receive_mach_msg. Dispatch requests
+				// here just as jbserver_local_loop does, including authentication.
+				int status = RH3DispatchBootstrapMessage(gJailbreakdBootstrapServer, xdict);
+				if (status != 0) JBLogError("jailbreakd bootstrap request rejected: %d", status);
 				xpc_release(xdict);
 			}
 		});
@@ -160,11 +163,13 @@ int spawnJailbreakd()
 	return 0;
 }
 
-int initJailbreakd(bool firstLoad)
+int initJailbreakd(bool firstLoad, struct jbserver_impl *bootstrapServer)
 {
 	assert(getpid() == 1);
 
 	assert(__jailbreakd_initialized == false);
+	if (!bootstrapServer) return -1;
+	gJailbreakdBootstrapServer = bootstrapServer;
 
 	__firstLoad = firstLoad;
 

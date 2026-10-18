@@ -18,7 +18,8 @@ typedef enum {
 
 void enableJBDLog(void* debugLog, void* errorLog);
 
-int initJailbreakd(bool firstLoad);
+struct jbserver_impl;
+int initJailbreakd(bool firstLoad, struct jbserver_impl *bootstrapServer);
 bool jailbreakd_is_ready(void);
 
 void setJailbreakdProcess(pid_t pid);
