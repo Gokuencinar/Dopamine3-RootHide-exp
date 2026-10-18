@@ -1008,9 +1008,11 @@ static void *rh3_boomerang_server(void *opaque)
         }
         exec_set_patch(true);
         [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:@"phase: dyld generation complete"];
+        [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:@"phase: configuring RootHide helper environment"];
         setenv("DYLD_IN_CACHE", "0", 1);
         setenv("DISABLE_TWEAKS", "1", 1);
         setenv("DYLD_INSERT_LIBRARIES", JBROOT_PATH("/basebin/systemhook.dylib"), 1);
+        [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:@"phase: RootHide helper environment configured"];
     }
     else {
         // Preserve Dopamine 3's conventional protection and fakelib behavior.
@@ -1029,8 +1031,18 @@ static void *rh3_boomerang_server(void *opaque)
         }
     }
     
-    // Unsandbox iconservicesagent so that app icons can work
-    exec_cmd_trusted(JBROOT_PATH("/usr/bin/killall"), "-9", "iconservicesagent", NULL);
+    // Stock Dopamine refreshes iconservicesagent here. In the experimental
+    // RootHide first activation this is the FIRST spawned child after
+    // enabling dyld/systemhook patching. A stalled patch-daemon/child
+    // handshake causes exec_cmd_trusted to wait forever for a nonessential
+    // icon refresh, preventing bootstrap finalization altogether. Defer
+    // that refresh in RootHide; retain stock Dopamine's exact behavior.
+    if ([DOBootstrapper rootHidePortEnabled]) {
+        [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:@"phase: deferring optional iconservicesagent refresh"];
+    }
+    else {
+        exec_cmd_trusted(JBROOT_PATH("/usr/bin/killall"), "-9", "iconservicesagent", NULL);
+    }
     
     if ([DOBootstrapper rootHidePortEnabled])
         [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:@"phase: starting RootHide bootstrap finalization / packages"];
