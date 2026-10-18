@@ -13,13 +13,17 @@
 #import <libjailbreak/info.h>
 #import <libjailbreak/util.h>
 #import <libjailbreak/jbclient_xpc.h>
+#import <libjailbreak/roothider/jailbreakd.h>
 #import <sys/mount.h>
 #import <dlfcn.h>
 #import <sys/stat.h>
 #import "NSString+Version.h"
 #import <errno.h>
 #import <string.h>
+#import <stdlib.h>
+#import <dispatch/dispatch.h>
 #import <CommonCrypto/CommonDigest.h>
+extern char **environ;
 
 // Enable only after the RootHide 3 launchd/dyld/systemhook stack and packages
 // are integrated and validated. Stock Dopamine keeps its original code path.
@@ -32,6 +36,33 @@ static NSString *const RH3AppGroupDirectory = @"/var/mobile/Containers/Shared/Ap
 static NSString *const RH3InstalledMarker = @".installed_roothide3";
 static NSString *const RH3PendingMarker = @".installing_roothide3";
 static NSError *RH3Error(BootstrapErrorCode code, NSString *message);
+
+// Only run side-effect-free readiness checks in this bounded asynchronous
+// preflight. A dead IPC service can otherwise block the main installation
+// thread forever. A timed-out call may remain in-flight until the app exits:
+// never run an installation script after a timeout or pretend it was cancelled.
+static BOOL RH3AwaitReadinessCheck(int (^operation)(void), int *valueOut)
+{
+    if (!operation || !valueOut) return NO;
+    __block int value = -1;
+    dispatch_group_t group = dispatch_group_create();
+    dispatch_group_async(group, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        @autoreleasepool {
+            value = operation();
+        }
+    });
+    if (dispatch_group_wait(group, dispatch_time(DISPATCH_TIME_NOW, 8 * NSEC_PER_SEC)) != 0)
+        return NO;
+    *valueOut = value;
+    return YES;
+}
+
+static void RH3FreeShellEnvironment(char **environment)
+{
+    if (!environment) return;
+    for (char **entry = environment; *entry; entry++) free(*entry);
+    free(environment);
+}
 
 static NSDictionary *RH3BootstrapProfile(NSInteger version)
 {
@@ -1083,15 +1114,91 @@ cleanup_root:
         return RH3Error(BootstrapErrorCodeFailedFinalising,
                         @"RootHide setup was interrupted while executing its script; manual recovery is required");
     if ([pending isEqualToString:@"prepared"] && [fm fileExistsAtPath:script]) {
-        // Do this BEFORE launching the non-idempotent donor script. If the
-        // process crashes during execution, never run the script a second time.
+        // Verify the daemon with a real, bounded request (not the optimistic
+        // launchd port-allocated flag) BEFORE mutating the transaction state.
+        // Never replay the donor script if an earlier attempt was interrupted.
+        [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:@"bootstrap: probing jailbreakd before script (8s limit)"];
+        int daemonReply = -1;
+        BOOL daemonResponded = RH3AwaitReadinessCheck(^int(void) {
+            return jbdTestCall(23);
+        }, &daemonReply);
+        [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
+            daemonResponded ? [NSString stringWithFormat:@"bootstrap: jailbreakd probe returned %d", daemonReply]
+                            : @"bootstrap: jailbreakd probe timed out (script NOT started)"];
+        if (!daemonResponded || daemonReply != 46)
+            return RH3Error(BootstrapErrorCodeFailedFinalising,
+                @"RootHide jailbreakd has not confirmed readiness; script not started and prepared state retained. Restart the app after collecting logs; do not manually re-run the script.");
+
+        // Previously exec_cmd_trusted hid this trust RPC inside a macro and
+        // ignored its result. Split the steps so a trust failure cannot be
+        // mistaken for a script hang or begin a non-idempotent transaction.
+        NSString *shell = JBROOT_PATH(@"/bin/sh");
+        [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:@"bootstrap: trusting shell before script (8s limit)"];
+        int shellTrustResult = -1;
+        BOOL trustResponded = RH3AwaitReadinessCheck(^int(void) {
+            return jbclient_trust_file_by_path(shell.fileSystemRepresentation);
+        }, &shellTrustResult);
+        [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
+            trustResponded ? [NSString stringWithFormat:@"bootstrap: shell trust returned %d", shellTrustResult]
+                           : @"bootstrap: shell trust timed out (script NOT started)"];
+        if (!trustResponded || shellTrustResult != 0)
+            return RH3Error(BootstrapErrorCodeFailedFinalising,
+                @"RootHide shell trust failed or timed out; script not started and prepared state retained.");
+
+        // Donor prep_bootstrap.sh loops prompting for a password when this
+        // variable is absent. Stock Dopamine's CLI already sets it to 1.
+        // Prepare a private environment snapshot before entering the
+        // non-idempotent state, without modifying the application's environ.
+        size_t environmentCount = 0;
+        for (char **entry = environ; entry && *entry; entry++) environmentCount++;
+        char **scriptEnvironment = calloc(environmentCount + 2, sizeof(char *));
+        if (!scriptEnvironment)
+            return RH3Error(BootstrapErrorCodeFailedFinalising,
+                @"Cannot allocate RootHide shell environment; script not started and prepared state retained");
+        size_t kept = 0;
+        for (char **entry = environ; entry && *entry; entry++) {
+            if (strncmp(*entry, "NO_PASSWORD_PROMPT=", sizeof("NO_PASSWORD_PROMPT=") - 1) == 0) continue;
+            if (kept >= environmentCount || !(scriptEnvironment[kept] = strdup(*entry))) {
+                RH3FreeShellEnvironment(scriptEnvironment);
+                return RH3Error(BootstrapErrorCodeFailedFinalising,
+                    @"Unable to copy RootHide shell environment; script not started and prepared state retained");
+            }
+            kept++;
+        }
+        scriptEnvironment[kept++] = strdup("NO_PASSWORD_PROMPT=1");
+        if (!scriptEnvironment[kept - 1]) {
+            RH3FreeShellEnvironment(scriptEnvironment);
+            return RH3Error(BootstrapErrorCodeFailedFinalising,
+                @"Unable to prepare RootHide password-prompt bypass; script not started and prepared state retained");
+        }
+        scriptEnvironment[kept] = NULL;
+
+        // Write this marker ONLY after both preflights succeed. Once the
+        // shell spawn begins it may have side effects even if no reply comes
+        // back, so never reset or automatically replay this state.
         NSError *stateError = RH3WritePendingState(root, @"running-script");
-        if (stateError) return stateError;
+        if (stateError) {
+            RH3FreeShellEnvironment(scriptEnvironment);
+            return stateError;
+        }
         [[DOUIManager sharedInstance] sendLog:@"Finalizing isolated RootHide bootstrap" debug:NO];
         [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:@"bootstrap: running-script marker saved; spawning prep_bootstrap.sh"];
         // The pinned donor script has no set -e: without this option a failed
         // firmware/dpkg/password command can be hidden by its final rm exit 0.
-        int result = exec_cmd_trusted(JBROOT_PATH("/bin/sh"), "-e", script.fileSystemRepresentation, NULL);
+        // Scope the prompt bypass to this one shell; the donor is unchanged.
+        [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:@"bootstrap: launching shell with NO_PASSWORD_PROMPT=1 (scoped child env)"];
+        pid_t scriptPid = 0;
+        int result = exec_cmd_env_nowait(&scriptPid, scriptEnvironment, shell.fileSystemRepresentation,
+                                          "-e", script.fileSystemRepresentation, NULL);
+        RH3FreeShellEnvironment(scriptEnvironment);
+        [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:[NSString stringWithFormat:
+            @"bootstrap: shell spawn returned %d (pid %d)", result, scriptPid]];
+        if (result == 0 && scriptPid > 1) {
+            [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:@"bootstrap: waiting for setup script process exit"];
+            result = cmd_wait_for_exit(scriptPid);
+        } else if (result == 0) {
+            result = -1; // Invalid PID: never declare bootstrap success.
+        }
         [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:[NSString stringWithFormat:@"bootstrap: prep_bootstrap.sh returned %d", result]];
         if (result) {
             return RH3Error(BootstrapErrorCodeFailedFinalising,

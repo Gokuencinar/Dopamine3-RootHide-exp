@@ -53,14 +53,15 @@ class RootHideBootstrapRecoveryContracts(unittest.TestCase):
     def test_non_idempotent_script_is_marked_before_execution(self):
         finalize = section("- (NSError *)finalizeRootHideBootstrap\n{", "- (NSError *)deleteRootHideBootstrap\n{")
         intent = finalize.index('RH3WritePendingState(root, @"running-script")')
-        execute = finalize.index('exec_cmd_trusted(JBROOT_PATH("/bin/sh")')
+        execute = finalize.index('exec_cmd_env_nowait(&scriptPid, scriptEnvironment')
         completed = finalize.index('RH3WritePendingState(root, @"script-complete")')
         self.assertLess(intent, execute)
         self.assertLess(execute, completed)
         self.assertIn('if ([pending isEqualToString:@"running-script"])', finalize)
         self.assertIn('RootHide setup script still exists after completion', finalize)
         self.assertIn("manual recovery required", finalize)
-        self.assertIn('exec_cmd_trusted(JBROOT_PATH("/bin/sh"), "-e", script.fileSystemRepresentation, NULL)', finalize)
+        self.assertIn('exec_cmd_env_nowait(&scriptPid, scriptEnvironment, shell.fileSystemRepresentation,', finalize)
+        self.assertIn('"-e", script.fileSystemRepresentation, NULL)', finalize)
         self.assertLess(finalize.index("RootHide setup returned without removing its script"), completed)
         self.assertNotIn('RH3WritePendingState(root, @"prepared")', finalize)
 

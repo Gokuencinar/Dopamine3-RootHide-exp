@@ -42,7 +42,7 @@ class RootHidePostDyldProgress(unittest.TestCase):
             with self.subTest(stage=name):
                 self.assertIn(name, scope)
         self.assertLess(scope.index('RH3WritePendingState(root, @"running-script")'),
-                        scope.index('exec_cmd_trusted(JBROOT_PATH("/bin/sh")'))
+                        scope.index('exec_cmd_env_nowait(&scriptPid, scriptEnvironment'))
         self.assertIn('RootHide setup script execution was interrupted; manual recovery required', scope)
 
 

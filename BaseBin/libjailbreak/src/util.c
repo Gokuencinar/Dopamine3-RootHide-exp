@@ -902,6 +902,20 @@ int exec_cmd_nowait(pid_t *pidOut, const char *binary, ...)
 	return r;
 }
 
+int exec_cmd_env_nowait(pid_t *pidOut, char **envp, const char *binary, ...)
+{
+	int argc = 1;
+	va_list args;
+	va_start(args, binary);
+	while (va_arg(args, const char *)) argc++;
+	va_end(args);
+
+	va_start(args, binary);
+	int r = __exec_cmd_internal_va(false, false, false, pidOut, binary, argc, args, envp);
+	va_end(args);
+	return r;
+}
+
 int exec_cmd_suspended(pid_t *pidOut, const char *binary, ...)
 {
 	int argc = 1;

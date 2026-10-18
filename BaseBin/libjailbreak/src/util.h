@@ -70,6 +70,8 @@ int convert_hex_string_to_data(const char *string, void *outBuf);
 int cmd_wait_for_exit(pid_t pid);
 int exec_cmd(const char *binary, ...);
 int exec_cmd_nowait(pid_t *pidOut, const char *binary, ...);
+// Spawn without waiting, using a caller-owned environment snapshot.
+int exec_cmd_env_nowait(pid_t *pidOut, char **envp, const char *binary, ...);
 int exec_cmd_suspended(pid_t *pidOut, const char *binary, ...);
 int exec_cmd_root(const char *binary, ...);
 int exec_cmd_env(char **envp, const char *binary, ...);
