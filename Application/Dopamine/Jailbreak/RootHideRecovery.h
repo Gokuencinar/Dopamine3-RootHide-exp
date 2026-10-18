@@ -74,11 +74,16 @@ static NSDictionary *RH3RecoveryInspect(NSString *primary, NSString *secondary, 
     }
     NSString *name = record[@"Name"], *backup = RH3RecoveryBackupName(name);
     NSMutableArray *locations = [NSMutableArray array];
+    NSMutableArray *recordedDevices = [NSMutableArray array], *observedDevices = [NSMutableArray array], *parentDevices = [NSMutableArray array];
+    BOOL deviceChanged = NO;
     BOOL complete = YES;
     NSArray *bases = @[primary, secondary];
     for (NSUInteger i = 0; i < bases.count; i++) {
         int parent = open([bases[i] fileSystemRepresentation], O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
         int parentError = parent < 0 ? errno : 0;
+        struct stat parentStat = {0};
+        int parentStatus = parent < 0 ? -1 : fstat(parent, &parentStat);
+        int parentStatError = parentStatus == 0 ? 0 : errno;
         struct stat original = {0}, saved = {0};
         int os = parent < 0 ? -1 : fstatat(parent, name.UTF8String, &original, AT_SYMLINK_NOFOLLOW);
         int oe = os == 0 ? 0 : errno;
@@ -91,6 +96,7 @@ static NSDictionary *RH3RecoveryInspect(NSString *primary, NSString *secondary, 
             [identity[0] isKindOfClass:NSNumber.class] && [identity[1] isKindOfClass:NSNumber.class];
         NSString *reason = nil;
         if (parent < 0) reason = @"parent-open-failed";
+        else if (parentStatus != 0) { reason = @"parent-stat-failed"; parentError = parentStatError; }
         else if (!validIdentity) reason = @"invalid-recorded-identity";
         else if (os != 0 && oe != ENOENT) reason = @"original-stat-failed";
         else if (ss != 0 && se != ENOENT) reason = @"backup-stat-failed";
@@ -98,7 +104,6 @@ static NSDictionary *RH3RecoveryInspect(NSString *primary, NSString *secondary, 
         else if (os != 0 && ss != 0) reason = @"original-and-backup-both-absent";
         else if (!S_ISDIR(st.st_mode)) reason = @"container-not-directory";
         else if (st.st_uid != owner) reason = @"container-owner-changed";
-        else if ((uint64_t)st.st_dev != [identity[0] unsignedLongLongValue]) reason = @"container-device-changed";
         else if ((uint64_t)st.st_ino != [identity[1] unsignedLongLongValue]) reason = @"container-inode-changed";
         if (reason) {
             // Metadata only. Keep the same refusal policy; never repair the
@@ -114,9 +119,30 @@ static NSDictionary *RH3RecoveryInspect(NSString *primary, NSString *secondary, 
             return nil;
         }
         if (os == 0) complete = NO;
+        deviceChanged |= (uint64_t)st.st_dev != [identity[0] unsignedLongLongValue];
+        [recordedDevices addObject:identity[0]];
+        [observedDevices addObject:@((uint64_t)st.st_dev)];
+        [parentDevices addObject:@((uint64_t)parentStat.st_dev)];
         [locations addObject:[bases[i] stringByAppendingPathComponent:os == 0 ? name : backup]];
     }
-    return @{@"Name":name, @"Locations":locations, @"Complete":@(complete)};
+    if (deviceChanged) {
+        // st_dev identifies the current mount, not a persistent volume. Only
+        // recognize an ALREADY completed preservation across a remount. Both
+        // saved inodes were checked above; the on-volume journal anchors their
+        // current filesystem. This exception must never authorize a rename.
+        NSNumber *journalDevice = @((uint64_t)journalStat.st_dev);
+        BOOL sameVolume = [recordedDevices[0] isEqual:recordedDevices[1]];
+        for (NSUInteger i = 0; i < bases.count; i++) {
+            sameVolume &= [observedDevices[i] isEqual:journalDevice] && [parentDevices[i] isEqual:journalDevice];
+        }
+        if (!complete || !sameVolume) {
+            if (error) *error = RH3RecoveryFailure([NSString stringWithFormat:
+                @"RootHide recovery device change cannot be accepted; reason=container-device-changed; complete=%d; recorded_devs=%@; observed_devs=%@; parent_devs=%@; journal_dev=%@; refusing to move data",
+                complete, recordedDevices, observedDevices, parentDevices, journalDevice]);
+            return nil;
+        }
+    }
+    return @{@"Name":name, @"Locations":locations, @"Complete":@(complete), @"CompletedDeviceChange":@(deviceChanged)};
 }
 
 #ifndef RH3_RECOVERY_RENAME

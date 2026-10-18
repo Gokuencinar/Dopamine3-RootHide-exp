@@ -479,7 +479,11 @@ static NSError *RH3LegacyRecoveryEligibility(NSString *root)
     NSError *error = nil;
     NSDictionary *journal = RH3RecoveryInspect(RH3RootDirectory, RH3AppGroupDirectory, 0, &error);
     if (error) return error;
-    if ([journal[@"Complete"] boolValue]) return nil;
+    if ([journal[@"Complete"] boolValue]) {
+        if ([journal[@"CompletedDeviceChange"] boolValue])
+            [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:@"RECOVERY completed backups verified on journal volume; stored device numbers differ; no container move attempted"];
+        return nil;
+    }
     NSString *root = journal ? journal[@"Locations"][0] : [self rootHideExistingRootWithError:&error];
     if (error) return error;
     if (!root || ![RH3PendingState(root) isEqual:@"running-script"]) return nil;
