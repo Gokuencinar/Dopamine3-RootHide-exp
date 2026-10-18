@@ -125,6 +125,56 @@ static BOOL RH3IsRealDirectory(NSString *path)
     return lstat(path.fileSystemRepresentation, &st) == 0 && S_ISDIR(st.st_mode);
 }
 
+// An interrupted donor bootstrap cannot be replayed safely. Collect only
+// filesystem metadata, without opening password databases, following links,
+// running any child process, or changing a transaction marker. The owner
+// checks in rootHideExistingRootWithError: must succeed before this is called.
+static NSString *RH3RecoveryPathKind(NSString *path)
+{
+    struct stat st = {0};
+    if (lstat(path.fileSystemRepresentation, &st) != 0)
+        return errno == ENOENT ? @"absent" : [NSString stringWithFormat:@"inaccessible (%d)", errno];
+    if (S_ISREG(st.st_mode)) return @"regular file";
+    if (S_ISDIR(st.st_mode)) return @"directory";
+    if (S_ISLNK(st.st_mode)) return @"symlink (not followed)";
+    return @"other file type";
+}
+
+static void RH3LogInterruptedBootstrapSnapshot(NSString *root)
+{
+    if (![DOBootstrapper rootHideBrandForPath:root]) return;
+    DOUIManager *ui = [DOUIManager sharedInstance];
+    [ui rh3RecordDiagnosticStage:@"RECOVERY read-only snapshot: running-script; no script replay or mutation attempted"];
+    // Presence of the final script is NOT proof that no commands ran: its
+    // removal is the donor script's last command. Do not inspect passwd
+    // contents, expose identities, or infer transaction success from files.
+    for (NSString *relative in @[@".installing_roothide3", @".installed_roothide3",
+                                @"prep_bootstrap.sh", @".roothide3-bootstrap-profile.plist",
+                                @"basebin.roothide3-backup", @"private/var",
+                                @"etc/master.passwd", @"etc/pwd.db", @"etc/spwd.db",
+                                @"var/lib/dpkg/status", @"usr/libexec/firmware",
+                                @"Library/dpkg/info/apt.postinst", @"usr/bin/uialert"]) {
+        NSString *kind = RH3RecoveryPathKind([root stringByAppendingPathComponent:relative]);
+        [ui rh3RecordDiagnosticStage:[NSString stringWithFormat:@"RECOVERY %@: %@", relative, kind]];
+    }
+    NSError *listError = nil;
+    NSArray<NSString *> *entries = [NSFileManager.defaultManager contentsOfDirectoryAtPath:root error:&listError];
+    if (!entries) {
+        [ui rh3RecordDiagnosticStage:@"RECOVERY could not list root backup entries"];
+    } else {
+        BOOL foundBackup = NO;
+        for (NSString *entry in entries) {
+            if ([entry hasPrefix:@".roothide3-deps-"]) {
+                foundBackup = YES;
+                [ui rh3RecordDiagnosticStage:@"RECOVERY interrupted dependency backup exists (preserved)"];
+                break;
+            }
+        }
+        if (!foundBackup) [ui rh3RecordDiagnosticStage:@"RECOVERY no staged dependency backup name observed"];
+    }
+    [ui rh3RecordDiagnosticStage:@"RECOVERY result: indeterminate; manual forensic inspection required before any retry"];
+}
+
 // The pinned RootHide donor archive contains var/tmp -> ../tmp. After var/
 // moves to the separate AppGroup, this is briefly a DANGLING symlink.
 // fileExistsAtPath: follows that link, incorrectly reports NO and leaves the
@@ -466,9 +516,12 @@ static NSError *RH3Error(BootstrapErrorCode code, NSString *message)
             RH3IsKnownTmpCollision(root, [RH3AppGroupDirectory stringByAppendingPathComponent:root.lastPathComponent]) &&
             NSProcessInfo.processInfo.operatingSystemVersion.majorVersion == 16 && version == 1900;
         if (([stage isEqualToString:@"creating"] && !recoverableTmpCollision) ||
-            [stage isEqualToString:@"running-script"])
+            [stage isEqualToString:@"running-script"]) {
+            if ([stage isEqualToString:@"running-script"])
+                RH3LogInterruptedBootstrapSnapshot(root);
             return RH3Error(BootstrapErrorCodeFailedReplacing,
                             @"Interrupted RootHide extraction or setup script needs manual recovery before another activation.");
+        }
         error = RH3CheckBootstrapProfile(root, version);
         if (error) return error;
     }
@@ -1024,8 +1077,10 @@ cleanup_root:
             stage = RH3PendingState(root);
         }
         if ([stage isEqualToString:@"creating"] || [stage isEqualToString:@"running-script"]) {
+            if ([stage isEqualToString:@"running-script"])
+                RH3LogInterruptedBootstrapSnapshot(root);
             completion(RH3Error(BootstrapErrorCodeFailedReplacing,
-                @"Interrupted RootHide extraction or setup script needs manual recovery"));
+                @"Interrupted RootHide extraction or setup script needs manual recovery. Export the RootHide diagnostic log; the existing bootstrap and marker were preserved."));
             return;
         }
         // Re-randomizing a half-installed root would make an interrupted
@@ -1104,9 +1159,11 @@ cleanup_root:
         [self fileOrSymlinkExistsAtPath:script])
         return RH3Error(BootstrapErrorCodeFailedFinalising,
                         @"RootHide setup script still exists after completion; manual recovery required");
-    if ([pending isEqualToString:@"running-script"])
+    if ([pending isEqualToString:@"running-script"]) {
+        RH3LogInterruptedBootstrapSnapshot(root);
         return RH3Error(BootstrapErrorCodeFailedFinalising,
                         @"RootHide setup script execution was interrupted; manual recovery required");
+    }
     if (!installed && ![@[@"prepared", @"script-complete"] containsObject:pending])
         return RH3Error(BootstrapErrorCodeFailedFinalising, @"RootHide bootstrap is not fully prepared");
     if (!installed && [pending isEqualToString:@"prepared"] &&
