@@ -9,6 +9,8 @@ ROOT = Path(__file__).resolve().parents[2]
 UI = (ROOT / "Application/Dopamine/UI/DOUIManager.m").read_text(encoding="utf-8")
 MAIN = (ROOT / "Application/Dopamine/UI/DOMainViewController.m").read_text(encoding="utf-8")
 JAILBREAKER = (ROOT / "Application/Dopamine/Jailbreak/DOJailbreaker.m").read_text(encoding="utf-8")
+STUB_H = (ROOT / "BaseBin/dopamine/src/ui-stub/DOUIManager.h").read_text(encoding="utf-8")
+STUB_M = (ROOT / "BaseBin/dopamine/src/ui-stub/DOUIManager.m").read_text(encoding="utf-8")
 
 
 class RootHidePersistentDiagnostics(unittest.TestCase):
@@ -51,6 +53,17 @@ class RootHidePersistentDiagnostics(unittest.TestCase):
         self.assertIn('initWithActivityItems:@[logURL]', MAIN)
         self.assertIn('#if RH3_FULL_APP_EXPERIMENTAL', MAIN)
         self.assertIn('No log has been recorded by this build', MAIN)
+
+    def test_standalone_cli_ui_stub_exposes_inert_diagnostic_methods(self):
+        # The BaseBin/dopamine build compiles DOJailbreaker.m against this
+        # independent stub, not the application's DOUIManager.h/.m.
+        for selector in ('rh3BeginDiagnosticAttempt', 'rh3RecordDiagnosticStage:', 'rh3PreviousDiagnosticURL'):
+            self.assertIn(selector, STUB_H)
+            self.assertIn(selector, STUB_M)
+        self.assertIn('(void)stage;', STUB_M)
+        self.assertIn('return nil;', STUB_M)
+        self.assertNotIn('RootHide3-last-attempt.log', STUB_M)
+        self.assertNotIn('fsync(', STUB_M)
 
 
 if __name__ == "__main__":

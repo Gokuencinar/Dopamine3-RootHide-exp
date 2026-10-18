@@ -27,6 +27,22 @@
 	[self sendLog:log debug:debug update:NO];
 }
 
+// These are intentionally inert in the command-line helper. The full iOS
+// application's DOUIManager owns the persisted diagnostic log and export UI.
+- (void)rh3BeginDiagnosticAttempt
+{
+}
+
+- (void)rh3RecordDiagnosticStage:(NSString *)stage
+{
+    (void)stage;
+}
+
+- (NSURL *)rh3PreviousDiagnosticURL
+{
+    return nil;
+}
+
 - (NSArray *)enabledPackageManagers
 {
 	return nil;

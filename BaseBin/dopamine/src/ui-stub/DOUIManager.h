@@ -19,6 +19,12 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)sendLog:(NSString*)log debug:(BOOL)debug update:(BOOL)update;
 - (void)sendLog:(NSString*)log debug:(BOOL)debug;
 
+// The standalone dopamine CLI shares DOJailbreaker.m with the app, but must
+// not write UI-sandbox diagnostic checkpoints or depend on the app container.
+- (void)rh3BeginDiagnosticAttempt;
+- (void)rh3RecordDiagnosticStage:(NSString *)stage;
+- (nullable NSURL *)rh3PreviousDiagnosticURL;
+
 - (NSArray *)enabledPackageManagers;
 - (id)renderBootLogo;
 
