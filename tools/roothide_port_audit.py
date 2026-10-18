@@ -153,7 +153,8 @@ def inspect() -> list[dict]:
                 "BaseBin/jailbreakd/src/server.m",
             ),
             (
-                ("BaseBin/launchdhook/src/main.m", "initJailbreakd(firstLoad)"),
+                ("BaseBin/launchdhook/src/main.m", "initJailbreakd(firstLoad, &gGlobalServer)"),
+                ("BaseBin/libjailbreak/src/roothider/jailbreakd.c", "RH3DispatchBootstrapMessage(gJailbreakdBootstrapServer, xdict)"),
                 ("BaseBin/launchdhook/src/spawn_hook.c", "commitBlacklistProcessId"),
                 ("BaseBin/libjailbreak/src/roothider/common.m", "roothide_is_active"),
             ),
