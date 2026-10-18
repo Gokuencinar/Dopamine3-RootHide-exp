@@ -7,6 +7,8 @@
 #import <mach-o/dyld.h>
 #import <os/alloc_once_private.h>
 #import <dlfcn.h>
+#include <string.h>
+#include <unistd.h>
 #import <spawn.h>
 #import <pthread.h>
 #import <sys/sysctl.h>
@@ -137,6 +139,17 @@ __attribute__((constructor)) static void initializer(void)
 	if (err != 0) {
 		char msg[1000];
 		snprintf(msg, 1000, "Dopamine: Failed to recover primitives (error %d), cannot continue.", err);
+		// Hardware beta: a missing or invalid boomerang port must not
+		// deliberately terminate PID 1. At this point no spawn/XPC hooks
+		// have been installed, so leave launchd running without RootHide.
+		// The app-side handshake will time out and report a failed attempt.
+		// Keep stock Dopamine's original behavior entirely unchanged.
+		if (roothide_launchdhook_origin_verified()) {
+			(void)write(STDERR_FILENO, msg, strlen(msg));
+			(void)write(STDERR_FILENO, "\n", 1);
+			unsetenv("DYLD_INSERT_LIBRARIES");
+			return;
+		}
 		abort_with_reason(7, 1, msg, 0);
 		return;
 	}

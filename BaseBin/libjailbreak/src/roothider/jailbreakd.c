@@ -127,8 +127,10 @@ int spawnJailbreakd()
 			xpc_object_t xdict = NULL;
 			int err = xpc_pipe_receive(bootstraport, &xdict);
 			if(err == 0) {
-				abort(); /* xpchook should handle the jbclient messages, should never go here */
-				//jbserver_received_xpc_message(&gGlobalServer, xdict);
+				// Unexpected bootstrap messages used to abort launchd (PID 1),
+				// turning an IPC routing failure into a device-wide panic.
+				// XPC hooks own routing; drop this unexpected message safely.
+				JBLogError("jailbreakd bootstrap message reached fallback receiver");
 				xpc_release(xdict);
 			}
 		});
@@ -184,8 +186,10 @@ mach_port_t reactiveJailbreakdPort()
 /* restarting jailbreakd may cause it to lose its previous internal state,
 	so we only use it during development. */
 #ifndef ENABLE_LOGS
-	//launchd_panic("jailbreakd crashed");
-	abort();
+	// A dead jailbreakd port is recoverable by reporting an unavailable
+	// service. Aborting here kills launchd and triggers an initproc panic.
+	JBLogError("jailbreakd port lost; returning unavailable instead of aborting launchd");
+	return MACH_PORT_NULL;
 #endif
 
 	assert(getpid() == 1);

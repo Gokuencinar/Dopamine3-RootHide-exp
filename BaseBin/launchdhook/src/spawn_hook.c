@@ -63,7 +63,7 @@ void early_boot_done(void)
 	gInEarlyBoot = false;
 }
 
-static bool roothide_launchdhook_origin_verified(void)
+bool roothide_launchdhook_origin_verified(void)
 {
 	// During userspace reboot the brand may not be restored yet. The root
 	// string alone is not proof of RootHide: require that the *loaded*
