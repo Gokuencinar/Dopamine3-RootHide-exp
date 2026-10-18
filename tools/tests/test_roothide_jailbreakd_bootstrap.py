@@ -22,6 +22,7 @@ class JailbreakdBootstrap(unittest.TestCase):
 #include <mach/mach.h>
 #include <bsm/libbsm.h>
 #include <xpc/xpc.h>
+extern uid_t audit_token_to_euid(audit_token_t);
 // Unused kernel-signature/hook interfaces are not linked into this host test.
 #define SIGNATURES_H
 struct siginfo { int unused; };
