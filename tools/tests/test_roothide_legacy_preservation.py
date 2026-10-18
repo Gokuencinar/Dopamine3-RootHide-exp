@@ -1,0 +1,155 @@
+"""Exercise the actual preservation journal, crash resumption and child wait."""
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import unittest
+
+ROOT = Path(__file__).resolve().parents[2]
+DIRECTORY = ROOT / 'Application/Dopamine/Jailbreak'
+SOURCE = (DIRECTORY / 'DOBootstrapper.m').read_text(encoding='utf-8')
+
+
+class LegacyPreservation(unittest.TestCase):
+    def test_recovery_requires_pinned_unfinished_bootstrap_and_later_cold_boot(self):
+        policy = SOURCE.split('static NSError *RH3LegacyRecoveryEligibility(', 1)[1].split('@interface', 1)[0]
+        for required in ('geteuid() != 0', 'majorVersion != 16', 'RH3CheckBootstrapProfile(root, 1900)',
+                         'boot.tv_sec <= marker.st_mtime', 'boot.tv_sec <= marker.st_ctime',
+                         'KERN_BOOTTIME', '@"etc/pwd.db"', '@"etc/spwd.db"', '@".installed_roothide3"',
+                         '558c08def3e1c8481f0c7a3a0fa9dd1299af5c91f510067f098787d693bdf13c',
+                         'c48a3d0c49d5d71f06d0d041330aa53b144591f72bda2208a305be09ca730489'):
+            self.assertIn(required, policy)
+        self.assertNotIn('master.passwd', policy)
+        preserve = SOURCE.split('+ (NSError *)preserveInterruptedRootHideBootstrap', 1)[1].split('+ (BOOL)rootHidePortEnabled', 1)[0]
+        self.assertLess(preserve.index('RH3LegacyRecoveryEligibility(root)'), preserve.index('RH3RecoveryPreserve('))
+        for forbidden in ('unlink(', 'removeItemAtPath:', 'RH3WritePendingState(', 'exec_cmd(', 'posix_spawn('):
+            self.assertNotIn(forbidden, preserve)
+        env = (DIRECTORY / 'DOEnvironmentManager.m').read_text(encoding='utf-8')
+        ensure = env.split('- (NSError *)ensureJailbreakRootExists', 1)[1]
+        self.assertLess(ensure.index('preserveInterruptedRootHideBootstrap'), ensure.index('rootHideExistingRootWithError:'))
+
+    def test_new_launch_is_bounded_without_releasing_worker_environment_on_timeout(self):
+        launch = SOURCE.split('dispatch_group_t launch = dispatch_group_create();', 1)[1].split(
+            'bootstrap: prep_bootstrap.sh returned', 1)[0]
+        self.assertIn('20 * NSEC_PER_SEC', launch)
+        self.assertIn('RH3WaitForBootstrapChild(scriptPid, 180)', launch)
+        worker, remainder = launch.split('});', 1)
+        self.assertIn('RH3FreeShellEnvironment(scriptEnvironment)', worker)
+        self.assertNotIn('RH3FreeShellEnvironment(scriptEnvironment)', remainder)
+        self.assertNotIn('RH3WritePendingState(', launch)
+
+    @unittest.skipUnless(sys.platform == 'darwin', 'actual Foundation filesystem tests require macOS')
+    def test_actual_preservation_and_crash_resumption(self):
+        harness = r'''
+#import <Foundation/Foundation.h>
+#include <stdio.h>
+#include <errno.h>
+static int calls = 0, failAt = 0;
+static int faultRename(int a, const char *b, int c, const char *d) {
+    if (++calls == failAt) { errno = EIO; return -1; }
+    return renameatx_np(a,b,c,d,RENAME_EXCL);
+}
+#define RH3_RECOVERY_RENAME(a,b,c,d) faultRename(a,b,c,d)
+#include "RootHideRecovery.h"
+int main(int argc, char **argv) { @autoreleasepool {
+    int scenario = atoi(argv[1]);
+    char template[] = "/tmp/rh3-preservation-XXXXXX";
+    char *base = mkdtemp(template); if (!base) return 10;
+    NSString *top = @(base), *p = [top stringByAppendingPathComponent:@"p"], *s = [top stringByAppendingPathComponent:@"s"];
+    NSString *name = @".jbroot-0100000000000001", *backup = RH3RecoveryBackupName(name);
+    NSFileManager *fm = NSFileManager.defaultManager;
+    for (NSString *parent in @[p,s]) {
+        [fm createDirectoryAtPath:[parent stringByAppendingPathComponent:name] withIntermediateDirectories:YES attributes:nil error:nil];
+        [@"sentinel" writeToFile:[[parent stringByAppendingPathComponent:name] stringByAppendingPathComponent:@"data"] atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    }
+    NSString *original = [p stringByAppendingPathComponent:name], *second = [s stringByAppendingPathComponent:name];
+    symlink(original.fileSystemRepresentation,[second stringByAppendingPathComponent:@".jbroot"].fileSystemRepresentation);
+    NSString *marker = [original stringByAppendingPathComponent:@".installing_roothide3"];
+    [@"running-script" writeToFile:marker atomically:YES encoding:NSUTF8StringEncoding error:nil];
+    NSError *error = nil;
+    if (scenario == 2) [fm createDirectoryAtPath:[p stringByAppendingPathComponent:backup] withIntermediateDirectories:NO attributes:nil error:nil];
+    if (scenario == 3) {
+        NSString *journal = [p stringByAppendingPathComponent:RH3RecoveryJournalName];
+        [@"corrupt" writeToFile:journal atomically:YES encoding:NSUTF8StringEncoding error:nil]; chmod(journal.fileSystemRepresentation,0600);
+    }
+    if (scenario == 4) { [fm moveItemAtPath:original toPath:[p stringByAppendingPathComponent:@"real"] error:nil]; symlink("real",original.fileSystemRepresentation); }
+    if (scenario == 9) { symlink("missing",[p stringByAppendingPathComponent:RH3RecoveryJournalName].fileSystemRepresentation); }
+    if (scenario == 1 || scenario == 5) failAt = 2;
+    if (scenario == 8) failAt = 1;
+    BOOL result = RH3RecoveryPreserve(p,s,scenario == 7 ? @"../escape" : name, scenario == 6 ? getuid()+1 : getuid(),&error);
+    if (scenario == 2 || scenario == 3 || scenario == 4 || scenario == 6 || scenario == 7 || scenario == 9) {
+        if (result || !error || ![fm fileExistsAtPath:second]) return 20;
+    } else {
+        if (scenario == 1 || scenario == 5 || scenario == 8) {
+            if (result || !error) return 21;
+            error = nil;
+            NSDictionary *state = RH3RecoveryInspect(p,s,getuid(),&error);
+            if (!state || error || [state[@"Complete"] boolValue]) return 22;
+            if (scenario == 5) {
+                [fm moveItemAtPath:second toPath:[s stringByAppendingPathComponent:@"other"] error:nil];
+                [fm createDirectoryAtPath:second withIntermediateDirectories:NO attributes:nil error:nil];
+                failAt = 0;
+                if (RH3RecoveryPreserve(p,s,name,getuid(),&error) || !error) return 23;
+                [fm removeItemAtPath:top error:nil]; return 0;
+            }
+            failAt = 0;
+            if (!RH3RecoveryPreserve(p,s,name,getuid(),&error)) return 24;
+        } else if (!result) { NSLog(@"%@",error); return 25; }
+        error = nil;
+        NSDictionary *state = RH3RecoveryInspect(p,s,getuid(),&error);
+        if (!state || error || ![state[@"Complete"] boolValue]) return 26;
+        if ([fm fileExistsAtPath:original] || [fm fileExistsAtPath:second]) return 27;
+        for (NSString *location in state[@"Locations"]) {
+            if (![[NSString stringWithContentsOfFile:[location stringByAppendingPathComponent:@"data"] encoding:NSUTF8StringEncoding error:nil] isEqual:@"sentinel"]) return 28;
+        }
+        NSString *savedMarker = [[p stringByAppendingPathComponent:backup] stringByAppendingPathComponent:@".installing_roothide3"];
+        if (![[NSString stringWithContentsOfFile:savedMarker encoding:NSUTF8StringEncoding error:nil] isEqual:@"running-script"]) return 29;
+        NSString *savedLink = [[s stringByAppendingPathComponent:backup] stringByAppendingPathComponent:@".jbroot"];
+        if (![[fm destinationOfSymbolicLinkAtPath:savedLink error:nil] isEqual:original]) return 31;
+        if (!RH3RecoveryPreserve(p,s,name,getuid(),&error)) return 30;
+    }
+    [fm removeItemAtPath:top error:nil]; return 0;
+} }
+'''
+        self._compile_and_run(harness, range(10), foundation=True)
+
+    @unittest.skipUnless(sys.platform == 'darwin', 'POSIX child process tests require macOS')
+    def test_actual_child_exit_signal_and_timeout(self):
+        harness = r'''
+#include <signal.h>
+#include "RootHideScriptWait.h"
+int main(void) {
+    if (RH3WaitForBootstrapChild(0,0) != -EINVAL) return 1;
+    pid_t pid = fork(); if (pid < 0) return 2;
+    if (!pid) _exit(7);
+    if (RH3WaitForBootstrapChild(pid,2) != 7) return 3;
+    if (RH3WaitForBootstrapChild(pid,0) != -ECHILD) return 4;
+    pid = fork(); if (pid < 0) return 5;
+    if (!pid) { raise(SIGTERM); _exit(8); }
+    if (RH3WaitForBootstrapChild(pid,2) != 128+SIGTERM) return 6;
+    pid = fork(); if (pid < 0) return 7;
+    if (!pid) { sleep(10); _exit(0); }
+    int result = RH3WaitForBootstrapChild(pid,0);
+    int alive = kill(pid,0);
+    kill(pid,SIGKILL); waitpid(pid,0,0);
+    return result == -ETIMEDOUT && alive == 0 ? 0 : 8;
+}
+'''
+        self._compile_and_run(harness, [None], foundation=False)
+
+    def _compile_and_run(self, harness, cases, foundation):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / ('test.m' if foundation else 'test.c')
+            binary = Path(directory) / 'test'
+            source.write_text(harness, encoding='utf-8')
+            command = ['xcrun', 'clang', '-I', str(DIRECTORY), str(source), '-o', str(binary)]
+            if foundation: command += ['-fobjc-arc', '-framework', 'Foundation']
+            compiled = subprocess.run(command, capture_output=True, text=True)
+            self.assertEqual(compiled.returncode, 0, compiled.stderr)
+            for case in cases:
+                result = subprocess.run([str(binary)] + ([] if case is None else [str(case)]), capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, f'scenario {case}: {result.stderr}')
+
+
+if __name__ == '__main__':
+    unittest.main()

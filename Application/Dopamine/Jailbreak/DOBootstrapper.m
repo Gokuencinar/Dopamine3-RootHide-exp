@@ -25,6 +25,9 @@
 #import <unistd.h>
 #import <dispatch/dispatch.h>
 #import <CommonCrypto/CommonDigest.h>
+#import <sys/sysctl.h>
+#import "RootHideRecovery.h"
+#import "RootHideScriptWait.h"
 extern char **environ;
 
 // Enable only after the RootHide 3 launchd/dyld/systemhook stack and packages
@@ -399,6 +402,62 @@ static NSError *RH3Error(BootstrapErrorCode code, NSString *message)
                           userInfo:@{NSLocalizedDescriptionKey: message}];
 }
 
+static NSString *RH3RecoverySHA256(NSData *data)
+{
+    if (!data) return nil;
+    unsigned char digest[CC_SHA256_DIGEST_LENGTH];
+    CC_SHA256(data.bytes, (CC_LONG)data.length, digest);
+    NSMutableString *hash = [NSMutableString string];
+    for (unsigned i = 0; i < sizeof(digest); i++) [hash appendFormat:@"%02x", digest[i]];
+    return hash;
+}
+
+// This permits preserving a legacy root, NEVER replaying its script. The old
+// account files and marker remain in the backup, untouched and unread.
+static NSError *RH3LegacyRecoveryEligibility(NSString *root)
+{
+    if (geteuid() != 0 || NSProcessInfo.processInfo.operatingSystemVersion.majorVersion != 16)
+        return RH3RecoveryFailure(@"Legacy bootstrap recovery is restricted to privileged iOS 16 attempts");
+    NSError *interrupted = RH3CheckInterruptedOperations(root);
+    if (interrupted) return interrupted;
+    NSError *profile = RH3CheckBootstrapProfile(root, 1900);
+    if (profile) return profile;
+    struct stat profileStat;
+    if (lstat([root stringByAppendingPathComponent:@".roothide3-bootstrap-profile.plist"].fileSystemRepresentation, &profileStat) ||
+        !S_ISREG(profileStat.st_mode) || profileStat.st_uid != 0)
+        return RH3RecoveryFailure(@"Legacy recovery requires an explicit matching bootstrap profile");
+    if (![RH3PendingState(root) isEqual:@"running-script"])
+        return RH3RecoveryFailure(@"Only a legacy running-script installation can be preserved");
+    struct stat marker;
+    NSString *markerPath = [root stringByAppendingPathComponent:RH3PendingMarker];
+    struct timeval boot = {0};
+    size_t size = sizeof(boot);
+    int mib[] = {CTL_KERN, KERN_BOOTTIME};
+    if (lstat(markerPath.fileSystemRepresentation, &marker) || marker.st_uid != 0 ||
+        sysctl(mib, 2, &boot, &size, NULL, 0) || size != sizeof(boot) || boot.tv_sec <= marker.st_mtime ||
+        boot.tv_sec <= marker.st_ctime)
+        return RH3RecoveryFailure(@"A full reboot after the interrupted attempt is required before preserving its bootstrap");
+    for (NSString *relative in @[@".installed_roothide3", @"etc/pwd.db", @"etc/spwd.db",
+                                 @"basebin.roothide3-backup"]) {
+        struct stat st;
+        if (lstat([root stringByAppendingPathComponent:relative].fileSystemRepresentation, &st) == 0 || errno != ENOENT)
+            return RH3RecoveryFailure(@"Bootstrap has additional installation state; automatic preservation refused");
+    }
+    // Refuse symlinked parents before reading only these two non-secret files.
+    for (NSString *relative in @[@"Library", @"Library/dpkg", @"etc"]) {
+        struct stat st;
+        if (lstat([root stringByAppendingPathComponent:relative].fileSystemRepresentation, &st) ||
+            !S_ISDIR(st.st_mode) || st.st_uid != 0)
+            return RH3RecoveryFailure(@"Bootstrap database directories are not verified owned directories");
+    }
+    NSString *status = RH3RecoverySHA256(RH3RecoveryReadFile([root stringByAppendingPathComponent:@"Library/dpkg/status"], 1024 * 1024, 0));
+    NSString *script = RH3RecoverySHA256(RH3RecoveryReadFile([root stringByAppendingPathComponent:@"prep_bootstrap.sh"], 4096, 0));
+    if (![status isEqual:@"558c08def3e1c8481f0c7a3a0fa9dd1299af5c91f510067f098787d693bdf13c"] ||
+        ![script isEqual:@"c48a3d0c49d5d71f06d0d041330aa53b144591f72bda2208a305be09ca730489"])
+        return RH3RecoveryFailure(@"Legacy bootstrap differs from the pinned donor; no automatic recovery attempted");
+    return nil;
+}
+
 @interface DOBootstrapper ()
 - (NSError *)extractTar:(NSString *)tarPath toPath:(NSString *)destinationPath;
 - (void)patchBasebinDaemonPlists;
@@ -412,6 +471,30 @@ static NSError *RH3Error(BootstrapErrorCode code, NSString *message)
 // The hidden bootstrap intentionally does not share the stock Dopamine preboot
 // container or /var/jb symlink. It is selected only by an explicit build flag.
 @implementation DOBootstrapper (RootHidePort)
+
++ (NSError *)preserveInterruptedRootHideBootstrap
+{
+    if (![self rootHidePortEnabled] || geteuid() != 0)
+        return RH3RecoveryFailure(@"RootHide preservation requires its enabled privileged installer");
+    NSError *error = nil;
+    NSDictionary *journal = RH3RecoveryInspect(RH3RootDirectory, RH3AppGroupDirectory, 0, &error);
+    if (error) return error;
+    if ([journal[@"Complete"] boolValue]) return nil;
+    NSString *root = journal ? journal[@"Locations"][0] : [self rootHideExistingRootWithError:&error];
+    if (error) return error;
+    if (!root || ![RH3PendingState(root) isEqual:@"running-script"]) return nil;
+    RH3LogInterruptedBootstrapSnapshot(root);
+    error = RH3LegacyRecoveryEligibility(root);
+    if (error) return error;
+    NSString *name = journal ? journal[@"Name"] : root.lastPathComponent;
+    [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:@"RECOVERY preserving legacy containers; their script and markers will NOT be replayed or deleted"];
+    if (!RH3RecoveryPreserve(RH3RootDirectory, RH3AppGroupDirectory, name, 0, &error)) return error;
+    [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:@"RECOVERY legacy containers preserved; a different fresh bootstrap may now be prepared"];
+    // ensureJailbreakRootExists must discover a new path after preservation.
+    gSystemInfo.jailbreakInfo.rootPath = NULL;
+    gSystemInfo.jailbreakInfo.jbrand = 0;
+    return nil;
+}
 
 + (BOOL)rootHidePortEnabled
 {
@@ -430,6 +513,12 @@ static NSError *RH3Error(BootstrapErrorCode code, NSString *message)
 
 + (NSString *)rootHideExistingRootWithError:(NSError **)error
 {
+    NSError *recoveryError = nil;
+    NSDictionary *recovery = RH3RecoveryInspect(RH3RootDirectory, RH3AppGroupDirectory, 0, &recoveryError);
+    if (recoveryError || (recovery && ![recovery[@"Complete"] boolValue])) {
+        if (error) *error = recoveryError ?: RH3RecoveryFailure(@"RootHide preservation is incomplete; the privileged installer must finish it before selecting a root");
+        return nil;
+    }
     NSFileManager *fm = NSFileManager.defaultManager;
     NSError *directoryError = nil;
     NSArray<NSString *> *entries = [fm contentsOfDirectoryAtPath:RH3RootDirectory error:&directoryError];
@@ -614,6 +703,10 @@ static NSError *RH3Error(BootstrapErrorCode code, NSString *message)
         return RH3Error(BootstrapErrorCodeFailedReplacing,
                         @"Unable to inspect /var/jb before RootHide activation.");
     NSError *error = nil;
+    NSDictionary *recovery = RH3RecoveryInspect(RH3RootDirectory, RH3AppGroupDirectory, 0, &error);
+    if (error) return error;
+    if (recovery && ![recovery[@"Complete"] boolValue])
+        return RH3LegacyRecoveryEligibility(recovery[@"Locations"][0]);
     NSString *root = [DOBootstrapper rootHideExistingRootWithError:&error];
     if (error) return error;
     if (root) {
@@ -625,8 +718,10 @@ static NSError *RH3Error(BootstrapErrorCode code, NSString *message)
             NSProcessInfo.processInfo.operatingSystemVersion.majorVersion == 16 && version == 1900;
         if (([stage isEqualToString:@"creating"] && !recoverableTmpCollision) ||
             [stage isEqualToString:@"running-script"]) {
-            if ([stage isEqualToString:@"running-script"])
+            if ([stage isEqualToString:@"running-script"]) {
                 RH3LogInterruptedBootstrapSnapshot(root);
+                if (!recovery) return RH3LegacyRecoveryEligibility(root);
+            }
             return RH3Error(BootstrapErrorCodeFailedReplacing,
                             @"Interrupted RootHide extraction or setup script needs manual recovery before another activation.");
         }
@@ -1207,6 +1302,9 @@ cleanup_root:
             uint64_t brand = RH3NewBrand();
             if (!brand) continue;
             NSString *name = [NSString stringWithFormat:@".jbroot-%016llX", brand];
+            NSDictionary *preserved = RH3RecoveryInspect(RH3RootDirectory, RH3AppGroupDirectory, 0, &error);
+            if (error) { completion(error); return; }
+            if ([name isEqual:preserved[@"Name"]]) continue;
             NSString *candidate = [RH3RootDirectory stringByAppendingPathComponent:name];
             NSString *secondary = [RH3AppGroupDirectory stringByAppendingPathComponent:name];
             if ([fm fileExistsAtPath:candidate] || [fm fileExistsAtPath:secondary]) continue;
@@ -1352,15 +1450,28 @@ cleanup_root:
         // firmware/dpkg/password command can be hidden by its final rm exit 0.
         // Scope the prompt bypass to this one shell; the donor is unchanged.
         [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:@"bootstrap: launching shell with NO_PASSWORD_PROMPT=1 (scoped child env)"];
-        pid_t scriptPid = 0;
-        int result = exec_cmd_env_nowait(&scriptPid, scriptEnvironment, shell.fileSystemRepresentation,
-                                          "-e", script.fileSystemRepresentation, NULL);
-        RH3FreeShellEnvironment(scriptEnvironment);
+        __block pid_t scriptPid = 0;
+        __block int result = -1;
+        dispatch_group_t launch = dispatch_group_create();
+        // The spawn includes child-patching IPC and may itself stall. Ownership
+        // of the private environment stays with the worker even after timeout.
+        dispatch_group_async(launch, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            result = exec_cmd_env_nowait(&scriptPid, scriptEnvironment, shell.fileSystemRepresentation,
+                                         "-e", script.fileSystemRepresentation, NULL);
+            RH3FreeShellEnvironment(scriptEnvironment);
+        });
+        if (dispatch_group_wait(launch, dispatch_time(DISPATCH_TIME_NOW, 20 * NSEC_PER_SEC)) != 0) {
+            [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:@"bootstrap: shell spawn/child-patch timed out; outcome unknown; running-script preserved"];
+            return RH3Error(BootstrapErrorCodeFailedFinalising,
+                @"RootHide shell launch or child patch did not return within 20 seconds. Export the log and fully reboot; do not replay this bootstrap script.");
+        }
         [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:[NSString stringWithFormat:
             @"bootstrap: shell spawn returned %d (pid %d)", result, scriptPid]];
         if (result == 0 && scriptPid > 1) {
             [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:@"bootstrap: waiting for setup script process exit"];
-            result = cmd_wait_for_exit(scriptPid);
+            result = RH3WaitForBootstrapChild(scriptPid, 180);
+            if (result == -ETIMEDOUT)
+                [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:@"bootstrap: setup script exceeded 180 seconds; child not killed; running-script preserved"];
         } else if (result == 0) {
             result = -1; // Invalid PID: never declare bootstrap success.
         }

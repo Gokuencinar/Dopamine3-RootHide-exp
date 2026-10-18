@@ -45,21 +45,26 @@ class RecoveryPackageEvidence(unittest.TestCase):
                 with archive.open('rb') as source:
                     with zstandard.ZstdDecompressor().stream_reader(source) as stream:
                         with tarfile.open(fileobj=stream, mode='r|') as tar:
-                            data = self._status(tar)
+                            files = self._files(tar)
             else:
                 raw = subprocess.check_output(['zstd', '-dc', str(archive)])
                 with tarfile.open(fileobj=io.BytesIO(raw)) as tar:
-                    data = self._status(tar)
-            self.assertIn(hashlib.sha256(data).hexdigest(), READER, version)
+                    files = self._files(tar)
+            self.assertIn(hashlib.sha256(files['Library/dpkg/status']).hexdigest(), READER, version)
+            self.assertIn(hashlib.sha256(files['prep_bootstrap.sh']).hexdigest(), SOURCE, version)
 
     @staticmethod
-    def _status(tar):
+    def _files(tar):
+        files = {}
         for member in tar:
-            if member.name.lstrip('./') == 'Library/dpkg/status':
+            name = member.name.lstrip('./')
+            if name in ('Library/dpkg/status', 'prep_bootstrap.sh'):
                 if not member.isfile():
-                    raise AssertionError('canonical status must be a regular file')
-                return tar.extractfile(member).read()
-        raise AssertionError('missing canonical status')
+                    raise AssertionError('pinned recovery inputs must be regular files')
+                files[name] = tar.extractfile(member).read()
+                if len(files) == 2:
+                    return files
+        raise AssertionError('missing pinned recovery inputs')
 
     @unittest.skipUnless(sys.platform == 'darwin', 'Foundation runtime requires macOS')
     def test_actual_objective_c_parser_handles_package_state_and_rejects_ambiguity(self):

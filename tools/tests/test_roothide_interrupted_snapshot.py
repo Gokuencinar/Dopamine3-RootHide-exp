@@ -32,7 +32,8 @@ class InterruptedSnapshotContract(unittest.TestCase):
         finalize = SOURCE.split('- (NSError *)finalizeRootHideBootstrap\n{', 1)[1].split(
             '- (NSError *)deleteRootHideBootstrap\n{', 1)[0]
         self.assertIn('rootHideExistingRootWithError:&error', lookup)
-        self.assertIn('if ([stage isEqualToString:@"running-script"])\n                RH3LogInterruptedBootstrapSnapshot(root);', lookup)
+        self.assertIn('if ([stage isEqualToString:@"running-script"]) {\n                RH3LogInterruptedBootstrapSnapshot(root);', lookup)
+        self.assertIn('if (!recovery) return RH3LegacyRecoveryEligibility(root);', lookup)
         self.assertIn('if ([stage isEqualToString:@"running-script"])\n                RH3LogInterruptedBootstrapSnapshot(root);', prepare)
         self.assertIn('if ([pending isEqualToString:@"running-script"]) {\n        RH3LogInterruptedBootstrapSnapshot(root);', finalize)
         self.assertIn('Export the RootHide diagnostic log; the existing bootstrap and marker were preserved.', prepare)
