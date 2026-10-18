@@ -24,9 +24,10 @@ class LegacyPreservation(unittest.TestCase):
         self.assertLess(preserve.index('RH3LegacyRecoveryEligibility(root)'), preserve.index('RH3RecoveryPreserve('))
         for forbidden in ('unlink(', 'removeItemAtPath:', 'RH3WritePendingState(', 'exec_cmd(', 'posix_spawn('):
             self.assertNotIn(forbidden, preserve)
-        env = (DIRECTORY / 'DOEnvironmentManager.m').read_text(encoding='utf-8')
-        ensure = env.split('- (NSError *)ensureJailbreakRootExists', 1)[1]
-        self.assertLess(ensure.index('preserveInterruptedRootHideBootstrap'), ensure.index('rootHideExistingRootWithError:'))
+        installer = (DIRECTORY / 'DOJailbreaker.m').read_text(encoding='utf-8')
+        self.assertIn('if ([DOBootstrapper rootHidePortEnabled] && !removeJailbreakEnabled)', installer)
+        self.assertLess(installer.index('preserveInterruptedRootHideBootstrap'), installer.index('ensureJailbreakRootExists'))
+        self.assertLess(installer.index('preserveInterruptedRootHideBootstrap'), installer.index('*errOut = [self injectLaunchdHook]'))
 
     def test_new_launch_is_bounded_without_releasing_worker_environment_on_timeout(self):
         launch = SOURCE.split('dispatch_group_t launch = dispatch_group_create();', 1)[1].split(

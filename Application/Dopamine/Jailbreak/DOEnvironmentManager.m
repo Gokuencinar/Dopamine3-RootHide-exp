@@ -166,10 +166,7 @@ extern char **environ;
 - (NSError *)ensureJailbreakRootExists
 {
     if ([DOBootstrapper rootHidePortEnabled]) {
-        // Privilege escalation has completed. Preserve only a verified legacy
-        // interruption before selecting any root or injecting launchd.
-        NSError *error = [DOBootstrapper preserveInterruptedRootHideBootstrap];
-        if (error) return error;
+        NSError *error = nil;
         NSString *root = [DOBootstrapper rootHideExistingRootWithError:&error];
         if (error) return error;
         if (root) {

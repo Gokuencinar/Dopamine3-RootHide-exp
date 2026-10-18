@@ -921,6 +921,16 @@ static void *rh3_boomerang_server(void *opaque)
         return;
     }
 
+    // Preserve a legacy interruption only during installation, after privilege
+    // escalation and before selecting a root or injecting launchd. Removal must
+    // never replace the requested target with a fresh bootstrap.
+    if ([DOBootstrapper rootHidePortEnabled] && !removeJailbreakEnabled) {
+        *errOut = [DOBootstrapper preserveInterruptedRootHideBootstrap];
+        if (*errOut) {
+            [self cleanUpPostExploitation];
+            return;
+        }
+    }
     // Now that we are unsandboxed, populate the jailbreak root path
     *errOut = [[DOEnvironmentManager sharedManager] ensureJailbreakRootExists];
     if (*errOut) {
