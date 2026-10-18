@@ -80,6 +80,7 @@ int main(int argc, char **argv) { @autoreleasepool {
     BOOL result = RH3RecoveryPreserve(p,s,scenario == 7 ? @"../escape" : name, scenario == 6 ? getuid()+1 : getuid(),&error);
     if (scenario == 2 || scenario == 3 || scenario == 4 || scenario == 6 || scenario == 7 || scenario == 9) {
         if (result || !error || ![fm fileExistsAtPath:second]) return 20;
+        if (scenario == 2 && ![error.localizedDescription containsString:@"reason=original-and-backup-both-present"]) return 32;
     } else {
         if (scenario == 1 || scenario == 5 || scenario == 8) {
             if (result || !error) return 21;
@@ -91,6 +92,8 @@ int main(int argc, char **argv) { @autoreleasepool {
                 [fm createDirectoryAtPath:second withIntermediateDirectories:NO attributes:nil error:nil];
                 failAt = 0;
                 if (RH3RecoveryPreserve(p,s,name,getuid(),&error) || !error) return 23;
+                if (![error.localizedDescription containsString:@"reason=container-inode-changed"] ||
+                    ![error.localizedDescription containsString:@"container=secondary"]) return 33;
                 [fm removeItemAtPath:top error:nil]; return 0;
             }
             failAt = 0;
@@ -99,6 +102,26 @@ int main(int argc, char **argv) { @autoreleasepool {
         error = nil;
         NSDictionary *state = RH3RecoveryInspect(p,s,getuid(),&error);
         if (!state || error || ![state[@"Complete"] boolValue]) return 26;
+        if (scenario == 10 || scenario == 11) {
+            NSString *journal = [p stringByAppendingPathComponent:RH3RecoveryJournalName];
+            NSData *bytes = [NSData dataWithContentsOfFile:journal];
+            NSMutableDictionary *record = [[NSPropertyListSerialization propertyListWithData:bytes options:NSPropertyListImmutable format:NULL error:nil] mutableCopy];
+            NSMutableArray *identity = [record[@"PrimaryIdentity"] mutableCopy];
+            NSUInteger slot = scenario == 10 ? 0 : 1;
+            identity[slot] = @([identity[slot] unsignedLongLongValue] + 1);
+            record[@"PrimaryIdentity"] = identity;
+            bytes = [NSPropertyListSerialization dataWithPropertyList:record format:NSPropertyListBinaryFormat_v1_0 options:0 error:nil];
+            [bytes writeToFile:journal atomically:NO];
+            error = nil;
+            if (RH3RecoveryInspect(p,s,getuid(),&error) || !error) return 34;
+            NSString *reason = scenario == 10 ? @"reason=container-device-changed" : @"reason=container-inode-changed";
+            if (![error.localizedDescription containsString:reason] ||
+                ![error.localizedDescription containsString:@"container=primary"] ||
+                ![error.localizedDescription containsString:@"expected_dev="] ||
+                ![error.localizedDescription containsString:@"backup={mode="]) return 35;
+            if (![fm fileExistsAtPath:[[p stringByAppendingPathComponent:backup] stringByAppendingPathComponent:@"data"]]) return 36;
+            [fm removeItemAtPath:top error:nil]; return 0;
+        }
         if ([fm fileExistsAtPath:original] || [fm fileExistsAtPath:second]) return 27;
         for (NSString *location in state[@"Locations"]) {
             if (![[NSString stringWithContentsOfFile:[location stringByAppendingPathComponent:@"data"] encoding:NSUTF8StringEncoding error:nil] isEqual:@"sentinel"]) return 28;
@@ -112,7 +135,7 @@ int main(int argc, char **argv) { @autoreleasepool {
     [fm removeItemAtPath:top error:nil]; return 0;
 } }
 '''
-        self._compile_and_run(harness, range(10), foundation=True)
+        self._compile_and_run(harness, range(12), foundation=True)
 
     @unittest.skipUnless(sys.platform == 'darwin', 'POSIX child process tests require macOS')
     def test_actual_child_exit_signal_and_timeout(self):

@@ -78,21 +78,39 @@ static NSDictionary *RH3RecoveryInspect(NSString *primary, NSString *secondary, 
     NSArray *bases = @[primary, secondary];
     for (NSUInteger i = 0; i < bases.count; i++) {
         int parent = open([bases[i] fileSystemRepresentation], O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        int parentError = parent < 0 ? errno : 0;
         struct stat original = {0}, saved = {0};
         int os = parent < 0 ? -1 : fstatat(parent, name.UTF8String, &original, AT_SYMLINK_NOFOLLOW);
-        int oe = errno;
+        int oe = os == 0 ? 0 : errno;
         int ss = parent < 0 ? -1 : fstatat(parent, backup.UTF8String, &saved, AT_SYMLINK_NOFOLLOW);
-        int se = errno;
+        int se = ss == 0 ? 0 : errno;
         if (parent >= 0) close(parent);
         NSArray *identity = record[i == 0 ? @"PrimaryIdentity" : @"SecondaryIdentity"];
         struct stat st = os == 0 ? original : saved;
-        if (parent < 0 || ![identity isKindOfClass:NSArray.class] || identity.count != 2 ||
-            ![identity[0] isKindOfClass:NSNumber.class] || ![identity[1] isKindOfClass:NSNumber.class] ||
-            (os == 0) == (ss == 0) || (os != 0 && oe != ENOENT) || (ss != 0 && se != ENOENT) ||
-            !S_ISDIR(st.st_mode) || st.st_uid != owner ||
-            (uint64_t)st.st_dev != [identity[0] unsignedLongLongValue] ||
-            (uint64_t)st.st_ino != [identity[1] unsignedLongLongValue]) {
-            if (error) *error = RH3RecoveryFailure(@"RootHide recovery paths or identities changed; refusing to move data");
+        BOOL validIdentity = [identity isKindOfClass:NSArray.class] && identity.count == 2 &&
+            [identity[0] isKindOfClass:NSNumber.class] && [identity[1] isKindOfClass:NSNumber.class];
+        NSString *reason = nil;
+        if (parent < 0) reason = @"parent-open-failed";
+        else if (!validIdentity) reason = @"invalid-recorded-identity";
+        else if (os != 0 && oe != ENOENT) reason = @"original-stat-failed";
+        else if (ss != 0 && se != ENOENT) reason = @"backup-stat-failed";
+        else if (os == 0 && ss == 0) reason = @"original-and-backup-both-present";
+        else if (os != 0 && ss != 0) reason = @"original-and-backup-both-absent";
+        else if (!S_ISDIR(st.st_mode)) reason = @"container-not-directory";
+        else if (st.st_uid != owner) reason = @"container-owner-changed";
+        else if ((uint64_t)st.st_dev != [identity[0] unsignedLongLongValue]) reason = @"container-device-changed";
+        else if ((uint64_t)st.st_ino != [identity[1] unsignedLongLongValue]) reason = @"container-inode-changed";
+        if (reason) {
+            // Metadata only. Keep the same refusal policy; never repair the
+            // journal, follow a link or move data to obtain this diagnostic.
+            if (error) *error = RH3RecoveryFailure([NSString stringWithFormat:
+                @"RootHide recovery paths or identities changed; refusing to move data; container=%@; reason=%@; parent_errno=%d; original_errno=%d; backup_errno=%d; expected_uid=%u; expected_dev=%@; expected_ino=%@; original={mode=%o,uid=%u,dev=%llu,ino=%llu}; backup={mode=%o,uid=%u,dev=%llu,ino=%llu}",
+                i == 0 ? @"primary" : @"secondary", reason, parentError, oe, se, (unsigned)owner,
+                validIdentity ? identity[0] : @"invalid", validIdentity ? identity[1] : @"invalid",
+                (unsigned)original.st_mode, (unsigned)original.st_uid,
+                (unsigned long long)(uint64_t)original.st_dev, (unsigned long long)original.st_ino,
+                (unsigned)saved.st_mode, (unsigned)saved.st_uid,
+                (unsigned long long)(uint64_t)saved.st_dev, (unsigned long long)saved.st_ino]);
             return nil;
         }
         if (os == 0) complete = NO;
