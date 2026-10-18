@@ -11,6 +11,14 @@
 #import "DOTheme.h"
 #import "NSString+Version.h"
 #import <pthread.h>
+#import <fcntl.h>
+#import <unistd.h>
+#import <sys/stat.h>
+#import <errno.h>
+
+#ifndef RH3_FULL_APP_EXPERIMENTAL
+#define RH3_FULL_APP_EXPERIMENTAL 0
+#endif
 
 @implementation DOUIManager
 
@@ -31,6 +39,11 @@
         _preferenceManager = [DOPreferenceManager sharedManager];
         _logRecord = [NSMutableArray new];
         _logLock = [NSLock new];
+#if RH3_FULL_APP_EXPERIMENTAL
+        // Cache the ORIGINAL app container, before elevatePrivileges changes
+        // HOME to /var/root. The file must survive a SpringBoard/launchd crash.
+        _rh3DiagnosticPath = [NSHomeDirectory() stringByAppendingPathComponent:@"Documents/RootHide3-last-attempt.log"];
+#endif
     }
     return self;
 }
@@ -235,6 +248,60 @@
 - (void)sendLog:(NSString*)log debug:(BOOL)debug
 {
     [self sendLog:log debug:debug update:NO];
+}
+
+// Do not rely on the in-memory log view for experimental launchd injection:
+// a kernel panic/reboot destroys it. Write a short, bounded record to the
+// app's own Documents directory, which can be shared after the next launch.
+- (void)rh3WriteDiagnosticLine:(NSString *)line truncate:(BOOL)truncate
+{
+#if RH3_FULL_APP_EXPERIMENTAL
+    if (!_rh3DiagnosticPath || !line) return;
+    [_logLock lock];
+    int flags = O_WRONLY | O_CREAT | O_CLOEXEC | O_NOFOLLOW | (truncate ? O_TRUNC : O_APPEND);
+    int fd = open(_rh3DiagnosticPath.fileSystemRepresentation, flags, 0600);
+    if (fd >= 0) {
+        struct stat st = {0};
+        if (fstat(fd, &st) == 0 && S_ISREG(st.st_mode) && st.st_size <= 65536) {
+            NSString *entry = [NSString stringWithFormat:@"%@ %@\n", [NSDate date], line];
+            NSData *bytes = [entry dataUsingEncoding:NSUTF8StringEncoding];
+            const uint8_t *cursor = bytes.bytes;
+            size_t remaining = bytes.length;
+            while (remaining) {
+                ssize_t written = write(fd, cursor, remaining);
+                if (written < 0 && errno == EINTR) continue;
+                if (written <= 0) break;
+                cursor += written;
+                remaining -= (size_t)written;
+            }
+            (void)fsync(fd);
+        }
+        close(fd);
+    }
+    [_logLock unlock];
+#else
+    (void)line;
+    (void)truncate;
+#endif
+}
+
+- (void)rh3BeginDiagnosticAttempt
+{
+    [self rh3WriteDiagnosticLine:@"BEGIN RootHide 3 experimental jailbreak attempt (no success implied)" truncate:YES];
+}
+
+- (void)rh3RecordDiagnosticStage:(NSString *)stage
+{
+    [self rh3WriteDiagnosticLine:stage truncate:NO];
+}
+
+- (NSURL *)rh3PreviousDiagnosticURL
+{
+#if RH3_FULL_APP_EXPERIMENTAL
+    if (_rh3DiagnosticPath && [[NSFileManager defaultManager] fileExistsAtPath:_rh3DiagnosticPath])
+        return [NSURL fileURLWithPath:_rh3DiagnosticPath];
+#endif
+    return nil;
 }
 
 - (void)shareLogRecordFromView:(UIView *)sourceView

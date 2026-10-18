@@ -17,6 +17,7 @@ NS_ASSUME_NONNULL_BEGIN
     DOPreferenceManager *_preferenceManager;
     NSDictionary *_fallbackLocalizations;
     NSLock *_logLock;
+    NSString *_rh3DiagnosticPath;
 }
 
 @property (nonatomic, readonly) NSString *bootlogoPath;
@@ -31,6 +32,9 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)completeJailbreak;
 - (void)startLogCapture;
 - (void)shareLogRecordFromView:(UIView *)sourceView;
+- (void)rh3BeginDiagnosticAttempt;
+- (void)rh3RecordDiagnosticStage:(NSString *)stage;
+- (nullable NSURL *)rh3PreviousDiagnosticURL;
 - (BOOL)isUpdateAvailable;
 - (BOOL)environmentUpdateAvailable;
 - (NSArray *)getLatestReleases;

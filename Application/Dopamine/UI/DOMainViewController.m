@@ -158,7 +158,7 @@
 #endif
     
     //Action Menu
-    DOActionMenuView *actionView = [[DOActionMenuView alloc] initWithActions:@[
+    NSMutableArray<UIAction *> *mainMenuActions = [@[
         [UIAction actionWithTitle:DOLocalizedString(@"Menu_Settings_Title") image:[UIImage systemImageNamed:@"gearshape" withConfiguration:[DOGlobalAppearance smallIconImageConfiguration]] identifier:@"settings" handler:^(__kindof UIAction * _Nonnull action) {
 #if RH3_FULL_APP_EXPERIMENTAL
             if (![DOBootstrapper rootHidePortEnabled]) return;
@@ -184,7 +184,32 @@
         [UIAction actionWithTitle:DOLocalizedString(@"Menu_Credits_Title") image:[UIImage systemImageNamed:@"info.circle" withConfiguration:[DOGlobalAppearance smallIconImageConfiguration]] identifier:@"credits" handler:^(__kindof UIAction * _Nonnull action) {
             [self.navigationController pushViewController:[[DOCreditsViewController alloc] init] animated:YES];
         }]
-    ] delegate:self];
+    ] mutableCopy];
+#if RH3_FULL_APP_EXPERIMENTAL
+    // Keep the previous attempt accessible AFTER a reboot/panic. Do not
+    // require jailbreak privileges, SSH or Sileo to export this sandbox file.
+    [mainMenuActions addObject:[UIAction actionWithTitle:@"Share RootHide diagnostic log"
+        image:[UIImage systemImageNamed:@"square.and.arrow.up"]
+        identifier:@"rh3-share-previous-log"
+        handler:^(__kindof UIAction * _Nonnull action) {
+            NSURL *logURL = [[DOUIManager sharedInstance] rh3PreviousDiagnosticURL];
+            if (!logURL) {
+                UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"RootHide diagnostics"
+                    message:@"No log has been recorded by this build. A previous IPA cannot recover its in-memory logs after a reboot."
+                    preferredStyle:UIAlertControllerStyleAlert];
+                [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleCancel handler:nil]];
+                [self presentViewController:alert animated:YES completion:nil];
+                return;
+            }
+            UIActivityViewController *share = [[UIActivityViewController alloc]
+                initWithActivityItems:@[logURL] applicationActivities:nil];
+            share.popoverPresentationController.sourceView = self.view;
+            share.popoverPresentationController.sourceRect = CGRectMake(
+                CGRectGetMidX(self.view.bounds), CGRectGetMidY(self.view.bounds), 1, 1);
+            [self presentViewController:share animated:YES completion:nil];
+        }]];
+#endif
+    DOActionMenuView *actionView = [[DOActionMenuView alloc] initWithActions:mainMenuActions delegate:self];
     
     [stackView addArrangedSubview: actionView];
 

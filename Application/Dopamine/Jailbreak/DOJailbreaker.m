@@ -437,6 +437,7 @@ static void *rh3_boomerang_server(void *opaque)
 // launchd path uses this bounded helper; stock Dopamine is unchanged.
 - (NSError *)rh3InjectLaunchdWithTimeout
 {
+    [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:@"launchd: opainject spawn about to start"];
     pid_t child = 0;
     int started = exec_cmd_nowait(&child, JBROOT_PATH("/basebin/opainject"),
                                  "1", JBROOT_PATH("/basebin/launchdhook.dylib"), NULL);
@@ -452,7 +453,10 @@ static void *rh3_boomerang_server(void *opaque)
     while (CFAbsoluteTimeGetCurrent() < deadline) {
         pid_t waited = waitpid(child, &status, WNOHANG);
         if (waited == child) {
-            if (WIFEXITED(status) && WEXITSTATUS(status) == 0) return nil;
+            if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+                [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:@"launchd: opainject exited 0"];
+                return nil;
+            }
             return [self rh3LaunchdInjectionError:
                 [NSString stringWithFormat:@"RootHide opainject exited unsuccessfully (status %d)", status]];
         }
@@ -491,6 +495,7 @@ static void *rh3_boomerang_server(void *opaque)
 
 - (NSError *)injectRootHideLaunchdHookSafely
 {
+    [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:@"launchd: verifying hidden root and safe mode"];
     NSError *rootError = nil;
     NSString *root = [DOBootstrapper rootHideExistingRootWithError:&rootError];
     const char *activeRoot = gSystemInfo.jailbreakInfo.rootPath;
@@ -525,6 +530,7 @@ static void *rh3_boomerang_server(void *opaque)
         return [self rh3LaunchdInjectionError:@"Could not prepare RootHide safe mode before launchd injection"];
     }
 
+    [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:@"launchd: allocating boomerang port"];
     mach_port_t serverPort = MACH_PORT_NULL;
     kern_return_t kr = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &serverPort);
     if (kr != KERN_SUCCESS) return [self rh3LaunchdInjectionError:@"Could not allocate RootHide boomerang port"];
@@ -590,15 +596,18 @@ static void *rh3_boomerang_server(void *opaque)
             [NSString stringWithFormat:@"RootHide jbctl returned an unsuccessful status (%d)", status]];
     }
 
+    [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:@"launchd: jbctl stash-port succeeded"];
     NSError *injectionError = [self rh3InjectLaunchdWithTimeout];
     if (injectionError) {
         mach_port_destroy(mach_task_self(), serverPort);
         return injectionError;
     }
+    [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:@"launchd: waiting for boomerang handshake"];
     if (dispatch_semaphore_wait(context.completed, dispatch_time(DISPATCH_TIME_NOW, 60 * NSEC_PER_SEC)) != 0) {
         mach_port_destroy(mach_task_self(), serverPort);
         return [self rh3LaunchdInjectionError:@"RootHide launchd handshake timed out; no userspace reboot will be requested"];
     }
+    [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:@"launchd: boomerang handshake completed"];
     mach_port_destroy(mach_task_self(), serverPort);
     return nil;
 }
@@ -866,6 +875,10 @@ static void *rh3_boomerang_server(void *opaque)
     struct utsname systemInfo;
     uname(&systemInfo);
     NSString *startLog = [NSString stringWithFormat:@"Starting Jailbreak (Model: %s, %@, Configuration: {removeJailbreak=%d, tweakInjection=%d, idownload=%d, appJIT=%d})", systemInfo.machine, NSProcessInfo.processInfo.operatingSystemVersionString, removeJailbreakEnabled, tweaksEnabled, idownloadEnabled, appJITEnabled];
+    if ([DOBootstrapper rootHidePortEnabled]) {
+        [[DOUIManager sharedInstance] rh3BeginDiagnosticAttempt];
+        [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:@"phase: exploit starting"];
+    }
     [[DOUIManager sharedInstance] sendLog:startLog debug:YES];
     
     *errOut = [self gatherSystemInformation];
@@ -923,6 +936,8 @@ static void *rh3_boomerang_server(void *opaque)
         if ([DOBootstrapper rootHidePortEnabled]) [self cleanUpPostExploitation];
         return;
     }
+    if ([DOBootstrapper rootHidePortEnabled])
+        [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:@"phase: hidden bootstrap prepared"];
     if ([DOBootstrapper rootHidePortEnabled]) {
         setenv("PATH", "/sbin:/bin:/usr/sbin:/usr/bin:/rootfs/sbin:/rootfs/bin:/rootfs/usr/sbin:/rootfs/usr/bin", 1);
     }
@@ -948,6 +963,8 @@ static void *rh3_boomerang_server(void *opaque)
         [self cleanUpPostExploitation];
         return;
     }
+    if ([DOBootstrapper rootHidePortEnabled])
+        [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:@"phase: BaseBin trustcache loaded"];
 
     if (removeJailbreakEnabled) {
         *errOut = [self removeJailbreak];
@@ -957,11 +974,17 @@ static void *rh3_boomerang_server(void *opaque)
     }
 
     [[DOUIManager sharedInstance] sendLog:DOLocalizedString(@"Initializing Environment") debug:NO];
+    if ([DOBootstrapper rootHidePortEnabled])
+        [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:@"phase: about to inject hook into PID 1 (crash-sensitive)"];
     *errOut = [self injectLaunchdHook];
     if (*errOut) {
+        if ([DOBootstrapper rootHidePortEnabled])
+            [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:[NSString stringWithFormat:@"phase: launchd injection FAILED: %@", (*errOut).localizedDescription]];
         [self cleanUpPostExploitation];
         return;
     }
+    if ([DOBootstrapper rootHidePortEnabled])
+        [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:@"phase: launchd injection completed"];
     
     // After the launchd hook is initialized, we need to make the app believe the device is jailbroken
     [[DOEnvironmentManager sharedManager] setJailbroken:YES withVersion:[NSString stringWithContentsOfFile:JBROOT_PATH(@"/basebin/.version") encoding:NSUTF8StringEncoding error:nil]];
@@ -970,6 +993,7 @@ static void *rh3_boomerang_server(void *opaque)
         // RootHide does not use stock Dopamine's /usr/lib fakelib mount or
         // /private/preboot protection. Keep that path intact for Dopamine.
         [[DOUIManager sharedInstance] sendLog:@"Initializing RootHide dyld support" debug:NO];
+        [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:@"phase: dyld generation starting"];
         int result = basebin_generate(false);
         if (result == 0) {
             result = ensure_dyld_trustcache(JBROOT_PATH("/basebin/.fakelib/dyld"));
@@ -983,6 +1007,7 @@ static void *rh3_boomerang_server(void *opaque)
             return;
         }
         exec_set_patch(true);
+        [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:@"phase: dyld generation complete"];
         setenv("DYLD_IN_CACHE", "0", 1);
         setenv("DISABLE_TWEAKS", "1", 1);
         setenv("DYLD_INSERT_LIBRARIES", JBROOT_PATH("/basebin/systemhook.dylib"), 1);
@@ -1007,11 +1032,17 @@ static void *rh3_boomerang_server(void *opaque)
     // Unsandbox iconservicesagent so that app icons can work
     exec_cmd_trusted(JBROOT_PATH("/usr/bin/killall"), "-9", "iconservicesagent", NULL);
     
+    if ([DOBootstrapper rootHidePortEnabled])
+        [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:@"phase: starting RootHide bootstrap finalization / packages"];
     *errOut = [self finalizeBootstrapIfNeeded];
     if (*errOut) {
+        if ([DOBootstrapper rootHidePortEnabled])
+            [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:[NSString stringWithFormat:@"phase: bootstrap FAILED: %@", (*errOut).localizedDescription]];
         [self cleanUpPostExploitation];
         return;
     }
+    if ([DOBootstrapper rootHidePortEnabled])
+        [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:@"phase: bootstrap finalization completed"];
     
     [[DOEnvironmentManager sharedManager] setIDownloadEnabled:idownloadEnabled needsUnsandbox:NO];
     
@@ -1023,6 +1054,8 @@ static void *rh3_boomerang_server(void *opaque)
         return;
     }
     *errOut = [self cleanUpPostExploitation];
+    if ([DOBootstrapper rootHidePortEnabled])
+        [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:*errOut ? @"phase: cleanup failed" : @"phase: app-side jailbreak initialization completed; userspace reboot not yet verified"];
 
 
     //printf("Starting launch daemons...\n");
@@ -1043,6 +1076,8 @@ static void *rh3_boomerang_server(void *opaque)
     return;
 #else
     [[DOUIManager sharedInstance] sendLog:DOLocalizedString(@"Rebooting Userspace") debug:NO];
+    if ([DOBootstrapper rootHidePortEnabled])
+        [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:@"phase: requesting intentional userspace reboot"];
     [[DOEnvironmentManager sharedManager] rebootUserspace];
 #endif
 }
