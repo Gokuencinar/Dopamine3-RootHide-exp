@@ -94,6 +94,53 @@ static BOOL RH3IsRealDirectory(NSString *path)
     return lstat(path.fileSystemRepresentation, &st) == 0 && S_ISDIR(st.st_mode);
 }
 
+// The pinned RootHide donor archive contains var/tmp -> ../tmp. After var/
+// moves to the separate AppGroup, this is briefly a DANGLING symlink.
+// fileExistsAtPath: follows that link, incorrectly reports NO and leaves the
+// destination occupied for the subsequent tmp/ move (Cocoa 516 / EEXIST).
+static BOOL RH3IsExpectedDonorTmpLink(NSString *path)
+{
+    struct stat st;
+    if (lstat(path.fileSystemRepresentation, &st) != 0 || !S_ISLNK(st.st_mode))
+        return NO;
+    return [[NSFileManager.defaultManager destinationOfSymbolicLinkAtPath:path error:nil]
+            isEqualToString:@"../tmp"];
+}
+
+// Allow read-only recognition of ONE precisely identified interrupted
+// layout. It can only be repaired later, with root privileges, and only
+// before the bootstrap script or package installation has started.
+static BOOL RH3IsKnownTmpCollision(NSString *root, NSString *secondary)
+{
+    if (![DOBootstrapper rootHideBrandForPath:root] ||
+        ![root.lastPathComponent isEqualToString:secondary.lastPathComponent] ||
+        ![RH3PendingState(root) isEqualToString:@"creating"])
+        return NO;
+    struct stat rootStat, secondaryStat, st;
+    if (lstat(root.fileSystemRepresentation, &rootStat) != 0 ||
+        lstat(secondary.fileSystemRepresentation, &secondaryStat) != 0 ||
+        !S_ISDIR(rootStat.st_mode) || !S_ISDIR(secondaryStat.st_mode) ||
+        rootStat.st_uid != 0 || secondaryStat.st_uid != 0)
+        return NO;
+    NSString *marker = [root stringByAppendingPathComponent:RH3InstalledMarker];
+    NSString *profile = [root stringByAppendingPathComponent:@".roothide3-bootstrap-profile.plist"];
+    NSString *backlink = [secondary stringByAppendingPathComponent:@".jbroot"];
+    for (NSString *path in @[marker, profile, backlink]) {
+        if (lstat(path.fileSystemRepresentation, &st) == 0 || errno != ENOENT)
+            return NO;
+    }
+    NSString *rootVar = [root stringByAppendingPathComponent:@"var"];
+    NSString *privateVar = [root stringByAppendingPathComponent:@"private/var"];
+    NSString *secondaryVar = [secondary stringByAppendingPathComponent:@"var"];
+    return RH3IsRealDirectory([root stringByAppendingPathComponent:@"tmp"]) &&
+           RH3IsRealDirectory(secondaryVar) &&
+           [[[NSFileManager defaultManager] destinationOfSymbolicLinkAtPath:rootVar error:nil]
+              isEqualToString:@"private/var"] &&
+           [[[NSFileManager defaultManager] destinationOfSymbolicLinkAtPath:privateVar error:nil]
+              isEqualToString:secondaryVar] &&
+           RH3IsExpectedDonorTmpLink([secondaryVar stringByAppendingPathComponent:@"tmp"]);
+}
+
 // Staged dependency files can contain the only copies of overwritten binaries.
 // A crash loses the in-memory rollback journal, so leave every backup intact
 // and require manual inspection instead of repeating a partial transaction.
@@ -255,10 +302,11 @@ static NSError *RH3Error(BootstrapErrorCode code, NSString *message)
             return nil;
         }
         NSString *backlink = [secondary stringByAppendingPathComponent:@".jbroot"];
+        BOOL recoverableTmpCollision = RH3IsKnownTmpCollision(root, secondary);
         NSDictionary *attributes = [fm attributesOfItemAtPath:backlink error:nil];
         NSString *destination = [fm destinationOfSymbolicLinkAtPath:backlink error:nil];
-        if (![attributes[NSFileType] isEqual:NSFileTypeSymbolicLink] ||
-            ![destination isEqualToString:root]) {
+        if ((! [attributes[NSFileType] isEqual:NSFileTypeSymbolicLink] ||
+             ![destination isEqualToString:root]) && !recoverableTmpCollision) {
             if (error) *error = RH3Error(BootstrapErrorCodeFailedReplacing,
                 [NSString stringWithFormat:@"RootHide AppGroup link is missing or invalid for %@", root]);
             return nil;
@@ -383,7 +431,11 @@ static NSError *RH3Error(BootstrapErrorCode code, NSString *message)
         error = RH3CheckInterruptedOperations(root);
         if (error) return error;
         NSString *stage = RH3PendingState(root);
-        if ([stage isEqualToString:@"creating"] || [stage isEqualToString:@"running-script"])
+        BOOL recoverableTmpCollision = [stage isEqualToString:@"creating"] &&
+            RH3IsKnownTmpCollision(root, [RH3AppGroupDirectory stringByAppendingPathComponent:root.lastPathComponent]) &&
+            NSProcessInfo.processInfo.operatingSystemVersion.majorVersion == 16 && version == 1900;
+        if (([stage isEqualToString:@"creating"] && !recoverableTmpCollision) ||
+            [stage isEqualToString:@"running-script"])
             return RH3Error(BootstrapErrorCodeFailedReplacing,
                             @"Interrupted RootHide extraction or setup script needs manual recovery before another activation.");
         error = RH3CheckBootstrapProfile(root, version);
@@ -575,8 +627,17 @@ static NSError *RH3Error(BootstrapErrorCode code, NSString *message)
         if (![fm removeItemAtPath:privateVar error:&error]) goto cleanup_both;
     }
     if (![fm createSymbolicLinkAtPath:privateVar withDestinationPath:secondaryVar error:&error]) goto cleanup_both;
-    if ([fm fileExistsAtPath:secondaryTmp]) {
-        if (![fm removeItemAtPath:secondaryTmp error:&error]) goto cleanup_both;
+    // The RootHide archive explicitly provides var/tmp -> ../tmp.
+    // Never replace an arbitrary existing directory, file or foreign link.
+    if (!RH3IsRealDirectory(rootTmp) || !RH3IsExpectedDonorTmpLink(secondaryTmp)) {
+        error = RH3Error(BootstrapErrorCodeFailedExtracting,
+                         @"Unexpected RootHide tmp layout; preserving both containers for recovery");
+        goto cleanup_both;
+    }
+    if (unlink(secondaryTmp.fileSystemRepresentation) != 0) {
+        error = RH3Error(BootstrapErrorCodeFailedExtracting,
+                         [NSString stringWithFormat:@"Cannot unlink donor var/tmp symlink: %s", strerror(errno)]);
+        goto cleanup_both;
     }
     if (![fm moveItemAtPath:rootTmp toPath:secondaryTmp error:&error] ||
         ![fm createSymbolicLinkAtPath:rootTmp withDestinationPath:@"var/tmp" error:&error] ||
@@ -599,6 +660,42 @@ cleanup_root:
     // the explicit 'creating' marker prevents accidental reuse by this port.
     return error ?: RH3Error(BootstrapErrorCodeFailedExtracting,
                             @"RootHide bootstrap layout incomplete; manual recovery required");
+}
+
+// Recover only the verified interrupted layout from the iOS 16 donor
+// var/tmp -> ../tmp collision. Do not traverse other .jbroot containers,
+// delete directories, or repeat package/setup scripts.
+- (NSError *)rh3RecoverTmpCollisionAtRoot:(NSString *)root version:(NSInteger)version
+{
+    if (version != 1900 || NSProcessInfo.processInfo.operatingSystemVersion.majorVersion != 16)
+        return RH3Error(BootstrapErrorCodeFailedReplacing,
+                        @"The interrupted RootHide tmp layout has an incompatible bootstrap profile");
+    NSString *secondary = [RH3AppGroupDirectory stringByAppendingPathComponent:root.lastPathComponent];
+    if (!RH3IsKnownTmpCollision(root, secondary))
+        return RH3Error(BootstrapErrorCodeFailedReplacing,
+                        @"Unknown interrupted RootHide layout; manual recovery required");
+    NSFileManager *fm = NSFileManager.defaultManager;
+    NSString *rootTmp = [root stringByAppendingPathComponent:@"tmp"];
+    NSString *secondaryTmp = [secondary stringByAppendingPathComponent:@"var/tmp"];
+    NSError *error = nil;
+    // Only the donor symlink is removed, after lstat and exact target check.
+    if (unlink(secondaryTmp.fileSystemRepresentation) != 0)
+        return RH3Error(BootstrapErrorCodeFailedReplacing,
+                        [NSString stringWithFormat:@"Cannot unlink verified RootHide var/tmp (%s)", strerror(errno)]);
+    if (![fm moveItemAtPath:rootTmp toPath:secondaryTmp error:&error] ||
+        ![fm createSymbolicLinkAtPath:rootTmp withDestinationPath:@"var/tmp" error:&error] ||
+        ![fm createSymbolicLinkAtPath:[secondary stringByAppendingPathComponent:@".jbroot"]
+                 withDestinationPath:root error:&error])
+        return error ?: RH3Error(BootstrapErrorCodeFailedReplacing,
+                                 @"RootHide tmp recovery was interrupted; manual recovery required");
+    if (![RH3BootstrapProfile(version) writeToFile:
+          [root stringByAppendingPathComponent:@".roothide3-bootstrap-profile.plist"]
+                                      atomically:YES])
+        return RH3Error(BootstrapErrorCodeFailedReplacing,
+                        @"Cannot persist recovered RootHide bootstrap profile");
+    error = [self rh3BuildPackageSourcesInRoot:root version:version];
+    if (error) return error;
+    return RH3WritePendingState(root, @"layout");
 }
 
 - (NSError *)rh3RerandomizeRoot:(NSString **)rootPtr
@@ -888,6 +985,13 @@ cleanup_root:
         error = RH3CheckInterruptedOperations(root);
         if (error) { completion(error); return; }
         NSString *stage = RH3PendingState(root);
+        if ([stage isEqualToString:@"creating"] &&
+            RH3IsKnownTmpCollision(root, [RH3AppGroupDirectory stringByAppendingPathComponent:root.lastPathComponent])) {
+            [[DOUIManager sharedInstance] sendLog:@"Repairing verified RootHide donor tmp symlink collision" debug:NO];
+            error = [self rh3RecoverTmpCollisionAtRoot:root version:version];
+            if (error) { completion(error); return; }
+            stage = RH3PendingState(root);
+        }
         if ([stage isEqualToString:@"creating"] || [stage isEqualToString:@"running-script"]) {
             completion(RH3Error(BootstrapErrorCodeFailedReplacing,
                 @"Interrupted RootHide extraction or setup script needs manual recovery"));
