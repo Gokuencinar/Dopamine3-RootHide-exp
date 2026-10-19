@@ -29,6 +29,10 @@ class AppControls(unittest.TestCase):
         self.assertNotIn('dash',password)
         self.assertIn('![after isEqualToString:before]',password)
         self.assertIn('input:[[newPassword stringByAppendingString:',password)
+        ctl = (ROOT/'BaseBin/jbctl/src/main.m').read_text()
+        respring = ctl.split('else if (!strcmp(cmd, "respring"))',1)[1].split('else if (!strcmp(cmd, "rebuild_icon_cache"))',1)[0]
+        self.assertIn('jbclient_roothide_jailbroken()',respring)
+        self.assertNotIn('roothide_is_active()',respring)
 
     @unittest.skipUnless(sys.platform == 'darwin', 'native rooted bundle backlink tests')
     def test_links_survive_root_rename_and_refuse_directory_replacement_or_escape(self):
