@@ -389,7 +389,7 @@ static int spawn_exec_hook_common(bool isExec,
 	// Match RootHide's original spawn path: an injected child must use its
 	// private dyld mappings, even if the parent already had the correct inserts.
 	const char *dyldInCache = envbuf_getenv((const char **)envp, "DYLD_IN_CACHE");
-	bool forcePrivateDyld = normalizedInserts[0] && systemhook_is_roothide_root_path(get_jbroot());
+	bool forcePrivateDyld = getpid() != 1 && normalizedInserts[0] && systemhook_is_roothide_root_path(get_jbroot());
 	if (forcePrivateDyld && (!dyldInCache || strcmp(dyldInCache, "0"))) envNeedsUpdate = true;
 	if (!envNeedsUpdate && !hasSafeModeVariable) {
 		// Environment already contains the desired hook and third-party libraries.
@@ -440,7 +440,9 @@ int posix_spawn_hook_shared(pid_t *restrict pid,
 					   				 double jetsamMultiplier)
 {
 	int (*posix_spawn_orig)(pid_t *restrict, const char *restrict, struct _posix_spawn_args_desc *, char *const[restrict], char *const[restrict]) = orig;
-	bool rootHide = path && systemhook_is_roothide_root_path(get_jbroot()) && jbclient_roothide_jailbroken();
+	// common.c is also linked into launchdhook. PID 1 must keep its local
+	// server path; asking it for its own XPC state here would deadlock.
+	bool rootHide = getpid() != 1 && path && systemhook_is_roothide_root_path(get_jbroot()) && jbclient_roothide_jailbroken();
 	if (rootHide && (!desc || !desc->attrp)) {
 		// The public entry builds the correctly sized private descriptor. It
 		// reenters once, with an initialized attrp; keep file actions intact.

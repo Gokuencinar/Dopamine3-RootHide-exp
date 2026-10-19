@@ -14,6 +14,7 @@ class SpawnLifecycleTests(unittest.TestCase):
         client = (ROOT/'BaseBin/libjailbreak/src/jbclient_roothide.c').read_text(encoding='utf-8')
         server = (ROOT/'BaseBin/jailbreakd/src/server.m').read_text(encoding='utf-8')
         self.assertIn('rh3_spawn_patched(pid ?: pidOut', common)
+        self.assertIn('bool rootHide = getpid() != 1 && path', common)
         self.assertIn('&& !rootHide)', common)
         self.assertIn('posix_spawnattr_setflags(&attributes, POSIX_SPAWN_SETEXEC)', main)
         for action in ('JBD_MSG_SPAWN_PATCH_CHILD', 'JBD_MSG_SPAWN_EXEC_START', 'JBD_MSG_SPAWN_EXEC_CANCEL'):
