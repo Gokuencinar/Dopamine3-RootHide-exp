@@ -584,6 +584,13 @@ static BOOL DOUsesLegacyJbctl(NSString *version)
     if (!argv) return ENOMEM;
     argv[0] = strdup(binary.fileSystemRepresentation);
     for (NSUInteger i = 0; i < arguments.count; i++) argv[i + 1] = strdup(arguments[i].UTF8String);
+    BOOL allocated = YES;
+    for (NSUInteger i = 0; i <= arguments.count; i++) if (!argv[i]) allocated = NO;
+    if (!allocated) {
+        for (NSUInteger i = 0; i <= arguments.count; i++) free(argv[i]);
+        free(argv);
+        return ENOMEM;
+    }
     int channel[2] = {-1, -1};
     posix_spawn_file_actions_t actions;
     int result = posix_spawn_file_actions_init(&actions);
