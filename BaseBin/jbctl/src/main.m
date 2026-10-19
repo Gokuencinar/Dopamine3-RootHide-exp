@@ -3,6 +3,7 @@
 #import <libjailbreak/jbclient_mach.h>
 #import <libjailbreak/stock_fixes.h>
 #import "internal.h"
+#include "parent_wait.h"
 
 #import <Foundation/Foundation.h>
 #import <CoreServices/LSApplicationProxy.h>
@@ -56,9 +57,8 @@ int main(int argc, char* argv[])
 			// When the Dopamine app spawns jbctl it needs to clean up it's own ucred before jbctl does the requested action
 			// For this it will attach a pipe fd and write to it once the cleanup is done, so we need to wait until that write happens
 			int fd = atoi(argv[argc-1]);
-			int r = 0;
-			read(fd, &r, sizeof(r));
-			close(fd);
+			int result = jbctl_wait_for_parent(fd);
+			if (result != 0) return result;
 		}
 	}
 

@@ -5,6 +5,7 @@
 #include <sys/stat.h>
 #include <sys/mount.h>
 #include <pthread.h>
+#include <errno.h>
 #include <mach-o/dyld.h>
 #include <dlfcn.h>
 #include <os/alloc_once_private.h>
@@ -505,13 +506,14 @@ bool jbclient_dopamine_is_jailbroken(char **version)
 {
 	xpc_object_t xreply = jbserver_xpc_send(JBS_DOMAIN_DOPAMINE, JBS_DOPAMINE_IS_JAILBROKEN, NULL);
 	if (xreply) {
-		int64_t result = xpc_dictionary_get_int64(xreply, "result");
+		xpc_object_t value = xpc_dictionary_get_value(xreply, "result");
+		bool active = value && xpc_get_type(value) == XPC_TYPE_INT64 && xpc_int64_get_value(value) == 1;
 		const char *receivedVersion = xpc_dictionary_get_string(xreply, "version");
-		if (receivedVersion && version) {
+		if (active && receivedVersion && version) {
 			*version = strdup(receivedVersion);
 		}
 		xpc_release(xreply);
-		return (bool)result;
+		return active;
 	}
 	return false;
 }
@@ -520,9 +522,10 @@ int jbclient_dopamine_get_root(void)
 {
 	xpc_object_t xreply = jbserver_xpc_send(JBS_DOMAIN_DOPAMINE, JBS_DOPAMINE_GET_ROOT, NULL);
 	if (xreply) {
-		int64_t result = xpc_dictionary_get_int64(xreply, "result");
+		xpc_object_t value = xpc_dictionary_get_value(xreply, "result");
+		int result = value && xpc_get_type(value) == XPC_TYPE_INT64 ? (int)xpc_int64_get_value(value) : EPROTO;
 		xpc_release(xreply);
-		return (bool)result;
+		return result;
 	}
 	return -1;
 }
@@ -531,9 +534,10 @@ int jbclient_dopamine_drop_root(void)
 {
 	xpc_object_t xreply = jbserver_xpc_send(JBS_DOMAIN_DOPAMINE, JBS_DOPAMINE_DROP_ROOT, NULL);
 	if (xreply) {
-		int64_t result = xpc_dictionary_get_int64(xreply, "result");
+		xpc_object_t value = xpc_dictionary_get_value(xreply, "result");
+		int result = value && xpc_get_type(value) == XPC_TYPE_INT64 ? (int)xpc_int64_get_value(value) : EPROTO;
 		xpc_release(xreply);
-		return (bool)result;
+		return result;
 	}
 	return -1;
 }

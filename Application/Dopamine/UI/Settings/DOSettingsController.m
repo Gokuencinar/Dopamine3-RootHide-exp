@@ -665,7 +665,14 @@
 
 - (void)refreshJailbreakAppsPressed
 {
-    [[DOEnvironmentManager sharedManager] refreshJailbreakApps];
+    int result = [[DOEnvironmentManager sharedManager] refreshJailbreakApps];
+    if (result != 0 || [DOBootstrapper rootHidePortEnabled]) {
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:result ? @"No se pudieron actualizar las apps" : @"El comando ha terminado"
+            message:result ? [NSString stringWithFormat:@"La acción falló con el código %d. No se ha reinstalado el bootstrap.", result] : @"Comprueba si aparecen Sileo y RootHide. Si siguen sin aparecer, comparte el diagnóstico de RootHide, que ahora incluye el resultado de esta acción."
+            preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:@"Aceptar" style:UIAlertActionStyleCancel handler:nil]];
+        [self presentViewController:alert animated:YES completion:nil];
+    }
 }
 
 - (void)reinstallPackageManagersPressed

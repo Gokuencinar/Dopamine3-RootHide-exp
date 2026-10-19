@@ -169,6 +169,17 @@
 #if RH3_FULL_APP_EXPERIMENTAL
             if (![DOBootstrapper rootHidePortEnabled]) return;
 #endif
+            if ([DOBootstrapper rootHidePortEnabled]) {
+                int result = [[DOEnvironmentManager sharedManager] respring];
+                if (result != 0) {
+                    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"No se pudo reiniciar SpringBoard"
+                        message:[NSString stringWithFormat:@"La acción falló con el código %d.", result]
+                        preferredStyle:UIAlertControllerStyleAlert];
+                    [alert addAction:[UIAlertAction actionWithTitle:@"Aceptar" style:UIAlertActionStyleCancel handler:nil]];
+                    [self presentViewController:alert animated:YES completion:nil];
+                }
+                return;
+            }
             [self fadeToBlack:^{
                 [[DOEnvironmentManager sharedManager] respring];
             }];

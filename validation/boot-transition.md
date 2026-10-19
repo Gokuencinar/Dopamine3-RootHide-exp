@@ -32,3 +32,16 @@ preparación, reanudación y retorno inesperado de la llamada al kernel.
 
 Esto corrige una omisión del código. Todavía no demuestra la causa exacta del
 SIGTRAP ni que el reinicio vaya a completar en el iPhone.
+
+En el intento físico 40c164e del iPhone X / iOS 16.7.15, Boomerang preparó y
+reanudó launchd. El nuevo hook recuperó primitivos, instaló los hooks e inició
+jailbreakd. El usuario confirmó «jailbreak realizado», pero Sileo y RootHide no
+aparecían y las acciones de actualizar apps y respring no producían efecto.
+
+La app recuperaba rootPath sin restaurar jbrand al reabrirse. Ahora restaura
+ambos desde la ruta devuelta por el servidor, validando el nombre de RootHide.
+Las dos acciones comprueban permisos y sandbox, devuelven los errores a la UI y
+los añaden al diagnóstico original. No esperan a un PID que no se haya creado.
+jbctl solo ejecuta la acción tras recibir la confirmación del padre; EOF o un
+token incorrecto se rechazan. Estas correcciones requieren una nueva activación
+con sus binarios y todavía no demuestran que las apps vuelvan a aparecer.

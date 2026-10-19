@@ -13,6 +13,7 @@
 #import <sys/utsname.h>
 #import <sys/stat.h>
 #import <unistd.h>
+#include <errno.h>
 #import <mach-o/dyld.h>
 #import <libgrabkernel2/libgrabkernel2.h>
 #import <libjailbreak/info.h>
@@ -27,6 +28,7 @@
 #import "DOUIManager.h"
 #import "DOExploitManager.h"
 #import "DOPreferenceManager.h"
+#import "RootHideAppRegistration.h"
 #import "NSData+Hex.h"
 #import <LocalAuthentication/LocalAuthentication.h>
 
@@ -53,7 +55,17 @@ extern char **environ;
         _bootstrapNeedsMigration = NO;
         _bootstrapper = [[DOBootstrapper alloc] init];
         if ([self isJailbroken]) {
-            gSystemInfo.jailbreakInfo.rootPath = strdup(jbclient_get_jbroot() ?: "");
+            const char *serverRoot = jbclient_get_jbroot();
+            if ([DOBootstrapper rootHidePortEnabled]) {
+                NSString *root = serverRoot ? RH3CanonicalAppPath([NSString stringWithUTF8String:serverRoot]) : nil;
+                uint64_t brand = root ? [DOBootstrapper rootHideBrandForPath:root] : 0;
+                if (brand) {
+                    gSystemInfo.jailbreakInfo.rootPath = strdup(root.fileSystemRepresentation);
+                    gSystemInfo.jailbreakInfo.jbrand = brand;
+                }
+            } else {
+                gSystemInfo.jailbreakInfo.rootPath = strdup(serverRoot ?: "");
+            }
         }
         else if ([self isInstalledThroughTrollStore]) {
             [self locateJailbreakRoot];
@@ -394,6 +406,48 @@ extern char **environ;
     }
 }
 
+- (int)rh3ActionStage:(NSString *)stage result:(int)result
+{
+    NSString *line = [NSString stringWithFormat:@"RootHide action %@: result=%d euid=%u egid=%u", stage, result, geteuid(), getegid()];
+    [[DOUIManager sharedInstance] sendLog:line debug:NO];
+    [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:line];
+    return result;
+}
+
+- (int)rh3PerformPrivilegedAction:(int (^)(void))action
+{
+    // Anchor the diagnostic descriptor in the original app container first.
+    [DOUIManager sharedInstance];
+    if (!self.isJailbroken || !roothide_is_active()) return [self rh3ActionStage:@"environment unavailable" result:ENXIO];
+    BOOL elevated = geteuid() != 0 || getegid() != 0;
+    if (elevated) {
+        int result = jbclient_dopamine_get_root();
+        if (result != 0) return [self rh3ActionStage:@"get-root" result:result];
+    }
+    int result = 0;
+    BOOL labelChanged = NO;
+    uint64_t labelBackup = 0;
+    @try {
+        if (geteuid() != 0 || getegid() != 0) result = [self rh3ActionStage:@"verify-root" result:EPERM];
+        else if (![self isInstalledThroughTrollStore]) {
+            result = jbclient_root_set_mac_label(1, -1, &labelBackup);
+            labelChanged = result == 0;
+            if (result) [self rh3ActionStage:@"unsandbox" result:result];
+        }
+        if (!result) result = action();
+    } @finally {
+        if (labelChanged) {
+            int restore = jbclient_root_set_mac_label(1, labelBackup, NULL);
+            if (restore) { [self rh3ActionStage:@"restore-sandbox" result:restore]; if (!result) result = restore; }
+        }
+        if (elevated) {
+            int restore = jbclient_dopamine_drop_root();
+            if (restore) { [self rh3ActionStage:@"drop-root" result:restore]; if (!result) result = restore; }
+        }
+    }
+    return result;
+}
+
 - (int)spawnJbctlAsRootWithArgs:(NSArray *)args
 {
     bool needsLegacySolution = false;
@@ -419,23 +473,34 @@ extern char **environ;
     posix_spawnattr_t attr = NULL;
     posix_spawnattr_init(&attr);
      
-    int waitPipe[2];
+    int waitPipe[2] = {-1, -1};
+    int pipeError = 0;
     
     if (!needsLegacySolution) {
-        pipe(waitPipe);
-        posix_spawn_file_actions_adddup2(&act, waitPipe[0], 3);
+        if (pipe(waitPipe) != 0) pipeError = errno;
+        else {
+            pipeError = posix_spawn_file_actions_adddup2(&act, waitPipe[0], 3);
+            if (!pipeError && waitPipe[1] != 3) pipeError = posix_spawn_file_actions_addclose(&act, waitPipe[1]);
+            if (!pipeError && waitPipe[0] != 3) pipeError = posix_spawn_file_actions_addclose(&act, waitPipe[0]);
+        }
     }
     else {
         posix_spawnattr_setflags(&attr, POSIX_SPAWN_START_SUSPENDED);
     }
 
     __block int pid = 0;
-    __block int r = -1;
+    __block int r = EPERM;
 
-    [self runAsRoot:^{
+    if (pipeError) r = pipeError;
+    else if ([DOBootstrapper rootHidePortEnabled]) {
+        r = [self rh3PerformPrivilegedAction:^int{
+            int status = posix_spawn(&pid, argBuf[0], &act, &attr, (char *const *)argBuf, (char *const *)environ);
+            return [self rh3ActionStage:@"jbctl spawn" result:status];
+        }];
+    } else [self runAsRoot:^{
         [self runUnsandboxed:^{
             r = posix_spawn(&pid, argBuf[0], &act, &attr, (char *const *)argBuf, (char *const *)environ);
-            if (needsLegacySolution) {
+            if (needsLegacySolution && r == 0 && pid > 0) {
                 // Legacy solution is a gamble, which is why it was removed and superseeded by --waitfor
                 // But if jailbroken with <3.0.5, jbctl doesn't support --waitfor yet
                 kill(pid, SIGCONT);
@@ -455,13 +520,16 @@ extern char **environ;
         if (r == 0) {
             // We left the root/unsandbox block, now resume jbctl by writing to pipe
             char w = 'w';
-            write(waitPipe[1], &w, sizeof(w));
+            ssize_t count;
+            do { count = write(waitPipe[1], &w, sizeof(w)); } while (count < 0 && errno == EINTR);
+            if (count != sizeof(w)) r = count < 0 ? errno : EIO;
         }
 
-        close(waitPipe[0]);
-        close(waitPipe[1]);
+        if (waitPipe[0] >= 0) close(waitPipe[0]);
+        if (waitPipe[1] >= 0) close(waitPipe[1]);
     }
 
+    if (r != 0 || pid <= 0) return r != 0 ? r : ECHILD;
     return cmd_wait_for_exit(pid);
 }
 
@@ -475,9 +543,11 @@ extern char **environ;
     return exec_cmd_root(selfPath, "trollstore", action.UTF8String, NULL);
 }
 
-- (void)respring
+- (int)respring
 {
-    [self spawnJbctlAsRootWithArgs:@[@"respring"]];
+    int result = [self spawnJbctlAsRootWithArgs:@[@"respring"]];
+    if ([DOBootstrapper rootHidePortEnabled]) [self rh3ActionStage:@"respring" result:result];
+    return result;
 }
 
 - (void)rebootUserspace
@@ -490,13 +560,20 @@ extern char **environ;
     [self spawnJbctlAsRootWithArgs:@[@"rebuild_icon_cache"]];
 }
 
-- (void)refreshJailbreakApps
+- (int)refreshJailbreakApps
 {
+    if ([DOBootstrapper rootHidePortEnabled]) {
+        int result = [self rh3PerformPrivilegedAction:^int{
+            return exec_cmd(JBROOT_PATH("/usr/bin/uicache"), "-a", NULL);
+        }];
+        return [self rh3ActionStage:@"refresh apps" result:result];
+    }
     [self runAsRoot:^{
         [self runUnsandboxed:^{
             exec_cmd(JBROOT_PATH("/usr/bin/uicache"), "-a", NULL);
         }];
     }];
+    return 0;
 }
 
 - (void)unregisterJailbreakApps

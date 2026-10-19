@@ -39,6 +39,17 @@ int main(void) { @autoreleasepool {
     NSString *text = [NSString stringWithContentsOfURL:latest encoding:NSUTF8StringEncoding error:nil];
     if (![text isEqual:@"second\ncheckpoint after path change\n"]) return 8;
     if (![[NSString stringWithContentsOfFile:[moved stringByAppendingPathComponent:legacy.lastPathComponent] encoding:NSUTF8StringEncoding error:nil] isEqual:@"old attempt"]) return 9;
+    int reopened = RH3OpenLatestDiagnostic(moved);
+    if (reopened < 0 || RH3AppendDiagnostic(reopened, [@"action after relaunch\n" dataUsingEncoding:NSUTF8StringEncoding])) return 17;
+    close(reopened);
+    if (![[NSString stringWithContentsOfURL:latest encoding:NSUTF8StringEncoding error:nil] hasSuffix:@"action after relaunch\n"]) return 18;
+    chmod(latest.path.fileSystemRepresentation,0644);
+    if (RH3OpenLatestDiagnostic(moved) >= 0) return 19;
+    chmod(latest.path.fileSystemRepresentation,0600);
+    NSString *linked = [moved stringByAppendingPathComponent:@"linked"];
+    link(latest.path.fileSystemRepresentation,linked.fileSystemRepresentation);
+    if (RH3OpenLatestDiagnostic(moved) >= 0) return 20;
+    unlink(linked.fileSystemRepresentation);
     // A missing current file must not select the old legacy log.
     [fm removeItemAtURL:latest error:nil];
     if (RH3LatestDiagnosticURL(moved)) return 10;

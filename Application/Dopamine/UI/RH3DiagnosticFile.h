@@ -96,3 +96,21 @@ static NSURL *RH3LatestDiagnosticURL(NSString *directory)
     close(parent);
     return readable ? [NSURL fileURLWithPath:[directory stringByAppendingPathComponent:name]] : nil;
 }
+
+// Reattach before privilege changes on the next app launch. Action diagnostics
+// then append to the same attempt that contains the userspace boot checkpoints.
+static int RH3OpenLatestDiagnostic(NSString *directory)
+{
+    NSURL *latest = RH3LatestDiagnosticURL(directory);
+    if (!latest) return -1;
+    int parent = open(directory.fileSystemRepresentation, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (parent < 0) return -1;
+    struct stat owner, file;
+    int fd = openat(parent, latest.lastPathComponent.fileSystemRepresentation, O_WRONLY | O_APPEND | O_NOFOLLOW | O_CLOEXEC);
+    BOOL valid = fd >= 0 && !fstat(parent, &owner) && !fstat(fd, &file) &&
+        S_ISREG(file.st_mode) && file.st_nlink == 1 && file.st_uid == owner.st_uid &&
+        (file.st_mode & 0777) == 0600 && file.st_size > 0 && file.st_size < RH3DiagnosticLimit;
+    close(parent);
+    if (!valid && fd >= 0) close(fd);
+    return valid ? fd : -1;
+}

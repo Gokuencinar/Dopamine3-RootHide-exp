@@ -48,6 +48,7 @@
         _rh3DiagnosticDirectory = [NSHomeDirectory() stringByAppendingPathComponent:@"Documents"];
         [NSFileManager.defaultManager createDirectoryAtPath:_rh3DiagnosticDirectory
             withIntermediateDirectories:NO attributes:@{NSFilePosixPermissions:@0700} error:nil];
+        _rh3DiagnosticFD = RH3OpenLatestDiagnostic(_rh3DiagnosticDirectory);
 #endif
     }
     return self;
