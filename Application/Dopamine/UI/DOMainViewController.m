@@ -170,14 +170,16 @@
             if (![DOBootstrapper rootHidePortEnabled]) return;
 #endif
             if ([DOBootstrapper rootHidePortEnabled]) {
-                int result = [[DOEnvironmentManager sharedManager] respring];
-                if (result != 0) {
+                dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
+                    int result = [[DOEnvironmentManager sharedManager] respring];
+                    if (result != 0) dispatch_async(dispatch_get_main_queue(), ^{
                     UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"No se pudo reiniciar SpringBoard"
                         message:[NSString stringWithFormat:@"La acción falló con el código %d.", result]
                         preferredStyle:UIAlertControllerStyleAlert];
                     [alert addAction:[UIAlertAction actionWithTitle:@"Aceptar" style:UIAlertActionStyleCancel handler:nil]];
                     [self presentViewController:alert animated:YES completion:nil];
-                }
+                    });
+                });
                 return;
             }
             [self fadeToBlack:^{

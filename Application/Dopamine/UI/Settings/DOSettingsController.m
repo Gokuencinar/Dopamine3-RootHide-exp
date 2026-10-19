@@ -674,6 +674,24 @@
 
 - (void)refreshJailbreakAppsPressed
 {
+    if ([DOBootstrapper rootHidePortEnabled]) {
+        UIAlertController *progress = [UIAlertController alertControllerWithTitle:@"Actualizando apps" message:@"Comprobando los enlaces y el registro de las apps…" preferredStyle:UIAlertControllerStyleAlert];
+        [self presentViewController:progress animated:YES completion:^{
+            dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+                int result = [[DOEnvironmentManager sharedManager] refreshJailbreakApps];
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    [progress dismissViewControllerAnimated:YES completion:^{
+                        UIAlertController *alert = [UIAlertController alertControllerWithTitle:result ? @"No se pudieron actualizar las apps" : @"Apps actualizadas"
+                            message:result ? [NSString stringWithFormat:@"Código %d. Comparte el diagnóstico. Si se agotó el tiempo, el proceso puede seguir en marcha; no repitas la acción.", result] : @"Prueba a abrir Sileo y RootHide."
+                            preferredStyle:UIAlertControllerStyleAlert];
+                        [alert addAction:[UIAlertAction actionWithTitle:@"Aceptar" style:UIAlertActionStyleCancel handler:nil]];
+                        [self presentViewController:alert animated:YES completion:nil];
+                    }];
+                });
+            });
+        }];
+        return;
+    }
     int result = [[DOEnvironmentManager sharedManager] refreshJailbreakApps];
     if (result != 0 || [DOBootstrapper rootHidePortEnabled]) {
         UIAlertController *alert = [UIAlertController alertControllerWithTitle:result ? @"No se pudieron actualizar las apps" : @"El comando ha terminado"
@@ -734,7 +752,16 @@
             });
         }
         else {
-            [[DOEnvironmentManager sharedManager] changeMobilePassword:password];
+            dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+                int result = [[DOEnvironmentManager sharedManager] changeMobilePassword:password];
+                if ([DOBootstrapper rootHidePortEnabled]) dispatch_async(dispatch_get_main_queue(), ^{
+                    UIAlertController *alert = [UIAlertController alertControllerWithTitle:result ? @"No se confirmó el cambio" : @"Contraseña actualizada"
+                        message:result ? [NSString stringWithFormat:@"Código %d. Consulta el diagnóstico.", result] : @"El comando terminó correctamente y cambió el registro de mobile en el bootstrap."
+                        preferredStyle:UIAlertControllerStyleAlert];
+                    [alert addAction:[UIAlertAction actionWithTitle:@"Aceptar" style:UIAlertActionStyleCancel handler:nil]];
+                    [self presentViewController:alert animated:YES completion:nil];
+                });
+            });
         }
     }];
     UIAlertAction *cancelAction = [UIAlertAction actionWithTitle:DOLocalizedString(@"Button_Cancel") style:UIAlertActionStyleCancel handler:nil];

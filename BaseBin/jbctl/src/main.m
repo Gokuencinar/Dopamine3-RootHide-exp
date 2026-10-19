@@ -4,6 +4,8 @@
 #import <libjailbreak/stock_fixes.h>
 #import "internal.h"
 #include "parent_wait.h"
+#include "roothide_respring.h"
+#include <libjailbreak/roothider/common.h>
 
 #import <Foundation/Foundation.h>
 #import <CoreServices/LSApplicationProxy.h>
@@ -145,6 +147,7 @@ int main(int argc, char* argv[])
 		return reboot3(RB2_USERREBOOT);
 	}
 	else if (!strcmp(cmd, "respring")) {
+		if (roothide_is_active()) return rh3_respring_backboardd();
 		const char *sbreloadPath = JBROOT_PATH("/usr/bin/sbreload");
 		if (execve(sbreloadPath, (char *[]){ (char *)sbreloadPath, NULL }, environ) != 0) {
 			killall("/usr/libexec/backboardd", SIGTERM);

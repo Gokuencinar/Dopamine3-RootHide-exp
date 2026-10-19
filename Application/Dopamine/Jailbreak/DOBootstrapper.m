@@ -29,6 +29,7 @@
 #import "RootHideRecovery.h"
 #import "RootHideScriptWait.h"
 #import "RootHideFreshSetup.h"
+#import "RootHideAppLinks.h"
 #import <signal.h>
 #import "RootHideForensics.h"
 extern char **environ;
@@ -1473,6 +1474,26 @@ cleanup_root:
     completion(error);
 }
 
+- (NSError *)repairRootHideAppLinks
+{
+    NSString *root = JBROOT_PATH(@"/");
+    if (geteuid() != 0 || ![DOBootstrapper rootHideBrandForPath:root] || !RH3IsRealDirectory(root))
+        return RH3Error(BootstrapErrorCodeFailedFinalising, @"Cannot repair app links without the active owned RootHide root");
+    NSString *library = [root stringByAppendingPathComponent:@"usr/lib/libroothide.dylib"];
+    struct stat st;
+    if (!RH3IsRealDirectory([root stringByAppendingPathComponent:@"usr"]) ||
+        !RH3IsRealDirectory([root stringByAppendingPathComponent:@"usr/lib"]) ||
+        lstat(library.fileSystemRepresentation, &st) || !S_ISREG(st.st_mode) || st.st_uid != 0 || st.st_size <= 0)
+        return RH3Error(BootstrapErrorCodeFailedFinalising, @"The active bootstrap has no owned libroothide.dylib");
+    int fd = open(root.fileSystemRepresentation, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    int result = fd < 0 ? errno : RH3RepairAppLinks(fd, 0);
+    if (fd >= 0) close(fd);
+    [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
+        [NSString stringWithFormat:@"apps: loader backlinks repair result=%d", result]];
+    return result ? RH3Error(BootstrapErrorCodeFailedFinalising,
+                            [NSString stringWithFormat:@"Cannot repair app loader backlinks (%d)", result]) : nil;
+}
+
 - (NSError *)finalizeRootHideBootstrap
 {
     [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:@"bootstrap: validation starting"];
@@ -1681,6 +1702,8 @@ cleanup_root:
                             [NSString stringWithFormat:@"RootHide Manager install failed (%d)", managerResult]);
         }
     }
+    NSError *appLinksError = [self repairRootHideAppLinks];
+    if (appLinksError) return appLinksError;
     if ([self fileOrSymlinkExistsAtPath:@"/var/jb"])
         return RH3Error(BootstrapErrorCodeFailedFinalising,
                         @"A package exposed /var/jb during RootHide setup; refusing to mark it installed");
@@ -2243,8 +2266,12 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
             if (geteuid() != 0)
                 return RH3Error(BootstrapErrorCodeFailedFinalising,
                                 @"RootHide package installation requires root privileges");
-            int status = exec_cmd_trusted(JBROOT_PATH("/usr/bin/dpkg"),
-                                          "-i", path.fileSystemRepresentation, NULL);
+            int status = jbclient_trust_file_by_path(JBROOT_PATH("/usr/bin/dpkg"));
+            pid_t pid = -1;
+            if (!status) status = exec_cmd_nowait(&pid, JBROOT_PATH("/usr/bin/dpkg"), "-i", path.fileSystemRepresentation, NULL);
+            if (!status) status = RH3WaitForBootstrapChild(pid, 120);
+            [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
+                [NSString stringWithFormat:@"packages: %@ result=%d", package, status]];
             if (status != 0) {
                 return RH3Error(BootstrapErrorCodeFailedFinalising,
                                 [NSString stringWithFormat:@"Installing %@ failed (%d)", package, status]);

@@ -55,7 +55,7 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)rebuildIconCache;
 - (int)refreshJailbreakApps;
 - (void)reboot;
-- (void)changeMobilePassword:(NSString *)newPassword;
+- (int)changeMobilePassword:(NSString *)newPassword;
 - (NSError*)updateEnvironment;
 - (void)updateJailbreakFromTIPA:(NSString *)tipaPath;
 

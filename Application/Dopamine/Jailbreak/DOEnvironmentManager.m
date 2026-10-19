@@ -14,6 +14,7 @@
 #import <sys/stat.h>
 #import <unistd.h>
 #include <errno.h>
+#include <fcntl.h>
 #import <mach-o/dyld.h>
 #import <libgrabkernel2/libgrabkernel2.h>
 #import <libjailbreak/info.h>
@@ -29,6 +30,8 @@
 #import "DOExploitManager.h"
 #import "DOPreferenceManager.h"
 #import "RootHideAppRegistration.h"
+#import "RootHideScriptWait.h"
+#import <libjailbreak/roothider.h>
 #import "NSData+Hex.h"
 #import <LocalAuthentication/LocalAuthentication.h>
 
@@ -421,6 +424,7 @@ static BOOL DOUsesLegacyJbctl(NSString *version)
 
 - (int)rh3PerformPrivilegedAction:(int (^)(void))action
 {
+    @synchronized (self) {
     // Anchor the diagnostic descriptor in the original app container first.
     [DOUIManager sharedInstance];
     if (!self.isJailbroken || !roothide_is_active()) return [self rh3ActionStage:@"environment unavailable" result:ENXIO];
@@ -451,6 +455,7 @@ static BOOL DOUsesLegacyJbctl(NSString *version)
         }
     }
     return result;
+    }
 }
 
 - (int)spawnJbctlAsRootWithArgs:(NSArray *)args
@@ -533,6 +538,13 @@ static BOOL DOUsesLegacyJbctl(NSString *version)
     }
 
     if (r != 0 || pid <= 0) return r != 0 ? r : ECHILD;
+    if ([DOBootstrapper rootHidePortEnabled]) {
+        int raw = -1;
+        int result = RH3WaitForBootstrapChildStatus(pid, 30, &raw);
+        [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
+            [NSString stringWithFormat:@"RootHide jbctl: pid=%d raw_wait=%d result=%d", pid, raw, result]];
+        return result < 0 ? -result : result;
+    }
     return cmd_wait_for_exit(pid);
 }
 
@@ -565,12 +577,68 @@ static BOOL DOUsesLegacyJbctl(NSString *version)
     [self spawnJbctlAsRootWithArgs:@[@"rebuild_icon_cache"]];
 }
 
+- (int)rh3RunCommand:(NSString *)binary arguments:(NSArray<NSString *> *)arguments input:(NSData *)input timeout:(unsigned)timeout
+{
+    if (input.length > 2048) return E2BIG;
+    char **argv = calloc(arguments.count + 2, sizeof(char *));
+    if (!argv) return ENOMEM;
+    argv[0] = strdup(binary.fileSystemRepresentation);
+    for (NSUInteger i = 0; i < arguments.count; i++) argv[i + 1] = strdup(arguments[i].UTF8String);
+    int channel[2] = {-1, -1};
+    posix_spawn_file_actions_t actions;
+    int result = posix_spawn_file_actions_init(&actions);
+    BOOL initialized = result == 0;
+    if (!result && input) {
+        if (pipe(channel)) result = errno;
+        else {
+            result = posix_spawn_file_actions_adddup2(&actions, channel[0], STDIN_FILENO);
+            if (!result && channel[0] != STDIN_FILENO) result = posix_spawn_file_actions_addclose(&actions, channel[0]);
+            if (!result) result = posix_spawn_file_actions_addclose(&actions, channel[1]);
+        }
+    } else if (!result) result = posix_spawn_file_actions_addopen(&actions, STDIN_FILENO, "/dev/null", O_RDONLY, 0);
+    __block pid_t pid = -1;
+    if (!result) result = [self rh3PerformPrivilegedAction:^int{
+        int trust = jbclient_trust_executable_recurse(binary.fileSystemRepresentation, NULL);
+        if (trust) return [self rh3ActionStage:@"command trust" result:trust];
+        return posix_spawn(&pid, argv[0], &actions, NULL, argv, environ);
+    }];
+    if (initialized) posix_spawn_file_actions_destroy(&actions);
+    for (NSUInteger i = 0; i <= arguments.count; i++) free(argv[i]);
+    free(argv);
+    // Retain our read end until the small write completes: even if the child
+    // exits early, the write cannot raise SIGPIPE in the app. Never log input.
+    if (!result && input) {
+        ssize_t count;
+        do { count = write(channel[1], input.bytes, input.length); } while (count < 0 && errno == EINTR);
+        if (count != (ssize_t)input.length) result = count < 0 ? errno : EIO;
+    }
+    if (channel[0] >= 0) close(channel[0]);
+    if (channel[1] >= 0) close(channel[1]);
+    if (result || pid <= 1) return result ?: ECHILD;
+    int raw = -1;
+    int status = RH3WaitForBootstrapChildStatus(pid, timeout, &raw);
+    [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
+        [NSString stringWithFormat:@"RootHide child %@: pid=%d raw_wait=%d result=%d", binary.lastPathComponent, pid, raw, status]];
+    return status < 0 ? -status : status;
+}
+
 - (int)refreshJailbreakApps
 {
     if ([DOBootstrapper rootHidePortEnabled]) {
+        __block NSArray *apps = nil;
         int result = [self rh3PerformPrivilegedAction:^int{
-            return exec_cmd(JBROOT_PATH("/usr/bin/uicache"), "-a", NULL);
+            NSError *error = [self->_bootstrapper repairRootHideAppLinks];
+            if (error) return [self rh3ActionStage:@"app links" result:(int)error.code];
+            apps = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:JBROOT_PATH(@"/Applications") error:&error];
+            return apps ? 0 : EIO;
         }];
+        // Refresh only the jailbreak's own bundles, not every system app.
+        for (NSString *app in apps) {
+            if (result) break;
+            if (![app.pathExtension isEqualToString:@"app"] || ![app.lastPathComponent isEqualToString:app]) continue;
+            NSString *path = [JBROOT_PATH(@"/Applications") stringByAppendingPathComponent:app];
+            result = [self rh3RunCommand:JBROOT_PATH(@"/usr/bin/uicache") arguments:@[@"-p", path] input:nil timeout:30];
+        }
         return [self rh3ActionStage:@"refresh apps" result:result];
     }
     [self runAsRoot:^{
@@ -606,14 +674,50 @@ static BOOL DOUsesLegacyJbctl(NSString *version)
 }
 
 
-- (void)changeMobilePassword:(NSString *)newPassword
+- (NSString *)rh3MobilePasswordHash
 {
+    // Read only the hidden bootstrap's account file; never print the hash.
+    int etc = open(JBROOT_PATH("/etc"), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (etc < 0) return nil;
+    int fd = openat(etc, "master.passwd", O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    close(etc);
+    if (fd < 0) return nil;
+    struct stat st;
+    if (fstat(fd, &st) || !S_ISREG(st.st_mode) || st.st_uid != 0 || st.st_size <= 0 || st.st_size > 65536) { close(fd); return nil; }
+    NSMutableData *data = [NSMutableData dataWithLength:(NSUInteger)st.st_size];
+    ssize_t count = pread(fd, data.mutableBytes, data.length, 0);
+    close(fd);
+    if (count != (ssize_t)data.length) return nil;
+    NSString *contents = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+    for (NSString *line in [contents componentsSeparatedByString:@"\n"]) {
+        NSArray *fields = [line componentsSeparatedByString:@":"];
+        if (fields.count >= 4 && [fields[0] isEqualToString:@"mobile"] && [fields[2] isEqualToString:@"501"]) return fields[1];
+    }
+    return nil;
+}
+
+- (int)changeMobilePassword:(NSString *)newPassword
+{
+    if ([DOBootstrapper rootHidePortEnabled]) {
+        if (!newPassword.length || [newPassword containsString:@"\n"] || [newPassword containsString:@"\r"] ||
+            [newPassword rangeOfString:[NSString stringWithFormat:@"%C", (unichar)0]].location != NSNotFound) return EINVAL;
+        __block NSString *before = nil;
+        int result = [self rh3PerformPrivilegedAction:^int{ before = [self rh3MobilePasswordHash]; return before ? 0 : EIO; }];
+        if (!result) result = [self rh3RunCommand:JBROOT_PATH(@"/usr/sbin/pw") arguments:@[@"usermod", @"501", @"-h", @"0"]
+                                          input:[[newPassword stringByAppendingString:@"\n"] dataUsingEncoding:NSUTF8StringEncoding] timeout:20];
+        if (!result) result = [self rh3PerformPrivilegedAction:^int{
+            NSString *after = [self rh3MobilePasswordHash];
+            return after.length > 1 && ![after hasPrefix:@"!"] && ![after hasPrefix:@"*"] && ![after isEqualToString:before] ? 0 : EIO;
+        }];
+        return [self rh3ActionStage:@"mobile password database update" result:result];
+    }
     [self runAsRoot:^{
         [self runUnsandboxed:^{
             NSString *dashCommand = [NSString stringWithFormat:@"printf \"%%s\\n\" \"%@\" | %@ usermod 501 -h 0", newPassword, JBROOT_PATH(@"/usr/sbin/pw")];
             exec_cmd(JBROOT_PATH("/usr/bin/dash"), "-c", dashCommand.UTF8String, NULL);
         }];
     }];
+    return 0;
 }
 
 - (NSError*)updateEnvironment
@@ -998,6 +1102,16 @@ static BOOL DOUsesLegacyJbctl(NSString *version)
 
 - (NSError *)reinstallPackageManagers
 {
+    if ([DOBootstrapper rootHidePortEnabled]) {
+        __block NSError *error = nil;
+        int result = [self rh3PerformPrivilegedAction:^int{
+            error = [self->_bootstrapper installPackageManagers];
+            if (!error) error = [self->_bootstrapper repairRootHideAppLinks];
+            return error ? (int)error.code : 0;
+        }];
+        [self rh3ActionStage:@"reinstall package managers" result:result];
+        return error ?: (result ? [NSError errorWithDomain:@"RootHide" code:result userInfo:@{NSLocalizedDescriptionKey:@"No se pudieron reinstalar los gestores; consulta el diagnóstico."}] : nil);
+    }
     __block NSError *error;
     [self runAsRoot:^{
         [self runUnsandboxed:^{

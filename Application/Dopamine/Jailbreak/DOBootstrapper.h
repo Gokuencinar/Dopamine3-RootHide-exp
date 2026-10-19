@@ -45,6 +45,7 @@ typedef NS_ENUM(NSInteger, BootstrapErrorCode) {
 - (nullable NSError *)rootHidePreflightError;
 + (nullable NSString *)rootHideExistingRootWithError:(NSError * _Nullable * _Nullable)error;
 + (uint64_t)rootHideBrandForPath:(NSString *)path;
+- (nullable NSError *)repairRootHideAppLinks;
 @end
 
 NS_ASSUME_NONNULL_END

@@ -33,10 +33,16 @@ class RootHideBootstrapRecoveryContracts(unittest.TestCase):
             ["git", "show", "HEAD:Application/Dopamine/Jailbreak/DOBootstrapper.m"],
             cwd=ROOT, capture_output=True, text=True, check=True, encoding="utf-8",
         ).stdout
-        # Only the RootHide category and its helpers may change. The upstream
-        # implementation after the original @implementation is unchanged.
+        # Keep the stock implementation unchanged, allowing the explicitly
+        # dispatched RootHide package-manager branch to evolve independently.
         boundary = "@implementation DOBootstrapper\n"
-        self.assertEqual(SOURCE.split(boundary, 1)[1], original.split(boundary, 1)[1])
+        current = SOURCE.split(boundary, 1)[1]
+        baseline = original.split(boundary, 1)[1]
+        method = "- (NSError *)installPackageManagers\n"
+        stock_tail = "    NSArray *enabledPackageManagers = [[DOUIManager sharedInstance] enabledPackageManagers];"
+        self.assertEqual(current.split(method, 1)[0], baseline.split(method, 1)[0])
+        self.assertEqual(current.split(method, 1)[1].split(stock_tail, 1)[1],
+                         baseline.split(method, 1)[1].split(stock_tail, 1)[1])
 
     def test_unknown_or_damaged_ownership_is_never_adopted(self):
         lookup = section("+ (NSString *)rootHideExistingRootWithError:",
