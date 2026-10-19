@@ -2,9 +2,57 @@
 #include <mach-o/dyld.h>
 #include "jbclient_xpc.h"
 #include "jbserver.h"
+#include "roothider/jailbreakd.h"
 
 #include "roothider/log.h"
 #include "roothider/xpc_private.h"
+
+// Use the existing private daemon and its audit-token/parent checks. Never
+// translate these requests into a privileged launchd action or cache a port
+// across fork. This C client is linked into the standalone systemhook too.
+static int roothide_lifecycle_request(uint64_t action, pid_t pid, const char *path, bool resume)
+{
+	mach_port_t port = jbclient_jailbreakd_lookup();
+	if (!MACH_PORT_VALID(port)) return -1;
+	xpc_object_t pipe = xpc_pipe_create_from_port(port, 0);
+	if (!pipe) { mach_port_deallocate(mach_task_self(), port); return -1; }
+	xpc_object_t request = xpc_dictionary_create_empty();
+	xpc_dictionary_set_uint64(request, "id", action);
+	if (pid > 0) xpc_dictionary_set_int64(request, "pid", pid);
+	if (path) xpc_dictionary_set_string(request, "execfile", path);
+	xpc_dictionary_set_bool(request, "resume", resume);
+	xpc_object_t reply = NULL;
+	int error = xpc_pipe_routine(pipe, request, &reply);
+	xpc_release(request);
+	xpc_release(pipe);
+	mach_port_deallocate(mach_task_self(), port);
+	int result = -1;
+	if (!error && reply && xpc_get_type(reply) == XPC_TYPE_DICTIONARY) {
+		xpc_object_t value = xpc_dictionary_get_value(reply, "result");
+		if (value && xpc_get_type(value) == XPC_TYPE_INT64)
+			result = (int)xpc_int64_get_value(value);
+	}
+	if (reply) xpc_release(reply);
+	return result;
+}
+
+int jbclient_roothide_patch_child(pid_t pid, bool resume)
+{
+	if (pid <= 0) return -1;
+	return roothide_lifecycle_request(JBD_MSG_SPAWN_PATCH_CHILD, pid, NULL, resume);
+}
+
+int jbclient_roothide_exec_start(const char *path, bool resume)
+{
+	if (!path) return -1;
+	return roothide_lifecycle_request(JBD_MSG_SPAWN_EXEC_START, 0, path, resume);
+}
+
+int jbclient_roothide_exec_cancel(const char *path)
+{
+	if (!path) return -1;
+	return roothide_lifecycle_request(JBD_MSG_SPAWN_EXEC_CANCEL, 0, path, false);
+}
 
 #ifdef ENABLE_LOGS
 void (*XPCLogDebugFunction)(const char *format, ...);

@@ -6,6 +6,7 @@
 #include <dlfcn.h>
 #include <sys/stat.h>
 #include <paths.h>
+#include <errno.h>
 #include <util.h>
 #include <ptrauth.h>
 #include <libjailbreak/jbclient_xpc.h>
@@ -298,6 +299,19 @@ int __posix_spawn_hook_with_filter(pid_t *restrict pid, const char *restrict pat
 
 int __execve_hook(const char *path, char *const argv[], char *const envp[])
 {
+	if (path && systemhook_is_roothide_root_path(get_jbroot()) && jbclient_roothide_jailbroken()) {
+		// execve resets the process's code-signing state. Route it through
+		// SETEXEC so jailbreakd can patch the replacement before it runs.
+		posix_spawnattr_t attributes = NULL;
+		int error = posix_spawnattr_init(&attributes);
+		if (!error) {
+			error = posix_spawnattr_setflags(&attributes, POSIX_SPAWN_SETEXEC);
+			if (!error) error = posix_spawn(NULL, path, NULL, &attributes, argv, envp);
+			posix_spawnattr_destroy(&attributes);
+		}
+		errno = error ? error : EIO;
+		return -1;
+	}
 	if (path && jbclient_roothide_jailbroken() && !jbclient_dyld_patch_enabled()) {
 		jbclient_trust_executable_recurse(path, NULL);
 		roothide_trust_injected_libraries(envp);

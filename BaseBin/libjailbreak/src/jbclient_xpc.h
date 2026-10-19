@@ -58,5 +58,8 @@ int jbclient_trust_library_recurse(const char *libraryPath, void *addressInCalle
 int jbclient_trust_executable_recurse(const char *executablePath, xpc_object_t preferredArchsArray);
 bool jbclient_dyld_patch_enabled(void);
 int jbclient_set_dyld_patch(bool enabled);
+int jbclient_roothide_patch_child(pid_t pid, bool resume);
+int jbclient_roothide_exec_start(const char *path, bool resume);
+int jbclient_roothide_exec_cancel(const char *path);
 
 #endif

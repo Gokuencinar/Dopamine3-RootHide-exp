@@ -1,4 +1,5 @@
 #include "common.h"
+#include "roothide_spawn.h"
 #include <xpc/xpc.h>
 #include <xpc_private.h>
 #include <mach-o/dyld.h>
@@ -385,6 +386,11 @@ static int spawn_exec_hook_common(bool isExec,
 	bool envNeedsUpdate = existingLibraryInserts ?
 	                      strcmp(existingLibraryInserts, normalizedInserts) != 0 :
 	                      normalizedInserts[0] != '\0';
+	// Match RootHide's original spawn path: an injected child must use its
+	// private dyld mappings, even if the parent already had the correct inserts.
+	const char *dyldInCache = envbuf_getenv((const char **)envp, "DYLD_IN_CACHE");
+	bool forcePrivateDyld = normalizedInserts[0] && systemhook_is_roothide_root_path(get_jbroot());
+	if (forcePrivateDyld && (!dyldInCache || strcmp(dyldInCache, "0"))) envNeedsUpdate = true;
 	if (!envNeedsUpdate && !hasSafeModeVariable) {
 		// Environment already contains the desired hook and third-party libraries.
 		r = orig(&childPid, envp);
@@ -403,6 +409,7 @@ static int spawn_exec_hook_common(bool isExec,
 		else {
 			envbuf_unsetenv(&envc, "DYLD_INSERT_LIBRARIES");
 		}
+		if (forcePrivateDyld) envbuf_setenv(&envc, "DYLD_IN_CACHE", "0");
 		if (!shouldInsertJBEnv) {
 			envbuf_unsetenv(&envc, "_SafeMode");
 			envbuf_unsetenv(&envc, "_MSSafeMode");
@@ -433,16 +440,39 @@ int posix_spawn_hook_shared(pid_t *restrict pid,
 					   				 double jetsamMultiplier)
 {
 	int (*posix_spawn_orig)(pid_t *restrict, const char *restrict, struct _posix_spawn_args_desc *, char *const[restrict], char *const[restrict]) = orig;
+	bool rootHide = path && systemhook_is_roothide_root_path(get_jbroot()) && jbclient_roothide_jailbroken();
+	if (rootHide && (!desc || !desc->attrp)) {
+		// The public entry builds the correctly sized private descriptor. It
+		// reenters once, with an initialized attrp; keep file actions intact.
+		posix_spawnattr_t attributes = NULL;
+		int error = posix_spawnattr_init(&attributes);
+		if (error) return error;
+		error = posix_spawn(pid, path, desc && desc->file_actions ?
+			(posix_spawn_file_actions_t *)&desc->file_actions : NULL, &attributes, argv, envp);
+		posix_spawnattr_destroy(&attributes);
+		return error;
+	}
 
 	int r = spawn_exec_hook_common(false, path, argv, envp, desc, trust_binary, jetsamMultiplier, ^int(pid_t *pidOut, char *const envp_patched[restrict]) {
-		int rr = posix_spawn_orig(pid ?: pidOut, path, desc, argv, envp_patched);
+		int rr;
+		if (rootHide) {
+			int type = 0;
+			posix_spawnattr_t attributes = desc->attrp;
+			bool driver = posix_spawnattr_getprocesstype_np(&attributes, &type) == 0 && type == POSIX_SPAWN_PROC_TYPE_DRIVER;
+			rr = rh3_spawn_patched(pid ?: pidOut, &attributes, driver,
+				^int(pid_t *child) { return posix_spawn_orig(child, path, desc, argv, envp_patched); },
+				jbclient_roothide_patch_child,
+				^int(bool resume) { return jbclient_roothide_exec_start(path, resume); },
+				^int(void) { return jbclient_roothide_exec_cancel(path); });
+		}
+		else rr = posix_spawn_orig(pid ?: pidOut, path, desc, argv, envp_patched);
 		if (rr == 0 && pid && pidOut) {
 			*pidOut = *pid;
 		}
 		return rr;
 	});
 
-	if (r == 0 && pid && desc) {
+	if (r == 0 && pid && desc && !rootHide) {
 		posix_spawnattr_t attr = desc->attrp;
 		short flags = 0;
 		if (posix_spawnattr_getflags(&attr, &flags) == 0) {
