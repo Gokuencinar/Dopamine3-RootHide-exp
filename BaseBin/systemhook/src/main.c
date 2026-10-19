@@ -485,9 +485,14 @@ __attribute__((constructor)) static void initializer(void)
 
 	// Hook the dyld_shared_cache __fcntl to jump to the dyld __fcntl instead
 	// This makes it so that library validation is also bypassed if someone calls fcntl in userspace to attach a signature manually
-	void *dyld___fcntl = litehook_find_symbol(get_dyld_mach_header(), "___fcntl");
+	const struct mach_header_64 *fcntlDyldHeader = get_dyld_mach_header();
+	void *dyld___fcntl = fcntlDyldHeader ? litehook_find_symbol(fcntlDyldHeader, "___fcntl") : NULL;
 	extern int __fcntl(int fd, int op, ... /* arg */ );
-	litehook_hook_function(__fcntl, dyld___fcntl);
+	// Some dyld builds have no matching symbol. Keep the system implementation
+	// in that case; litehook would otherwise install a branch to address zero.
+	if (dyld___fcntl) {
+		litehook_hook_function(__fcntl, dyld___fcntl);
+	}
 
 	// Initialize stuff neccessary for sandbox_apply hook
 	gLibSandboxHandle = dlopen("/usr/lib/libsandbox.1.dylib", RTLD_FIRST | RTLD_LOCAL | RTLD_LAZY);
