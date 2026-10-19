@@ -33,7 +33,12 @@ int main(void) { @autoreleasepool {
     if (!anchor) return 1;
     RH3ForensicReports(directory, anchor, ^(NSString *line) { [lines addObject:line]; });
     NSString *output = [lines componentsJoinedByString:@"\n"];
-    if (![output containsString:@"namespace=CODESIGNING"] || [output containsString:@"SECRET"]) return 2;
+    if (![output containsString:@"namespace=CODESIGNING"] || [output containsString:@"SECRET"]) {
+        struct stat st = {0}; lstat(path.fileSystemRepresentation, &st);
+        fprintf(stderr, "uid=%u owner=%u directory=%s anchor=%s\n%s\n", getuid(), st.st_uid,
+            directory.UTF8String, anchor.description.UTF8String, output.UTF8String);
+        return 2;
+    }
     [lines removeAllObjects];
     RH3ForensicReports(directory, [anchor dateByAddingTimeInterval:3600], ^(NSString *line) { [lines addObject:line]; });
     if ([[lines componentsJoinedByString:@"\n"] containsString:@"namespace=CODESIGNING"]) return 3;
