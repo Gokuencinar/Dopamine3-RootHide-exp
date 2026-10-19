@@ -8,6 +8,94 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class PostbootActions(unittest.TestCase):
+    def test_reboot_failure_is_reported_before_any_root_hide_fade(self):
+        main = (ROOT/'Application/Dopamine/UI/DOMainViewController.m').read_text()
+        run = main.split('[jailbreaker runWithError:', 1)[1].split('-(void)setupUpdateAvailable:', 1)[0]
+        self.assertLess(run.index('int result = [jailbreaker finalize]'), run.index('if (error && showLogs)'))
+        self.assertIn('error = [NSError errorWithDomain:@"RootHide" code:result', run)
+        self.assertLess(run.index('if ([DOBootstrapper rootHidePortEnabled]) return;'), run.index('[self fadeToBlack:'))
+        env = (ROOT/'Application/Dopamine/Jailbreak/DOEnvironmentManager.m').read_text()
+        reboot = env.split('- (int)rebootUserspace', 1)[1].split('- (void)rebuildIconCache', 1)[0]
+        self.assertIn('return result;', reboot)
+        server = (ROOT/'BaseBin/launchdhook/src/jbserver/jbdomain_dopamine.c').read_text()
+        self.assertIn('.permissionHandler = dopamine_domain_allowed', server)
+        root = (ROOT/'BaseBin/launchdhook/src/jbserver/jbdomain_root.c').read_text()
+        self.assertIn('audit_token_to_euid(clientToken) == 0', root)
+
+    @unittest.skipUnless(sys.platform == 'darwin', 'native caller-only sandbox permission checks')
+    def test_sandbox_action_checks_kernel_credentials_and_changes_only_caller_slot(self):
+        source = (ROOT/'BaseBin/launchdhook/src/jbserver/jbdomain_dopamine.c').read_text()
+        handler = source[source.index('static int dopamine_roothide_set_sandbox_label('):source.index('struct jbserver_domain gDopamineDomain')]
+        boot.BootTransition().run_native(r'''
+#include <stdbool.h>
+#include <stdint.h>
+#include <errno.h>
+typedef struct {int pid;int auditUID;} audit_token_t;
+static bool active=true,hasProc=true,hasCred=true,hasLabel=true,writeFails=false;
+static uint32_t uid,gid;static uint64_t seatbelt=123;static int writes;
+#define koffsetof(a,b) offset_##b
+enum {offset_uid=4,offset_groups=8,offset_label=16};
+static bool roothide_is_active(void){return active;}
+static int audit_token_to_pid(audit_token_t t){return t.pid;}
+static uint64_t proc_find(int pid){return hasProc&&pid==278?100:0;}
+static uint64_t proc_ucred(uint64_t proc){return hasCred&&proc==100?200:0;}
+static uint32_t kread32(uint64_t addr){return addr==204?uid:gid;}
+static uint64_t kread_ptr(uint64_t addr){return hasLabel&&addr==216?300:0;}
+static uint64_t mac_label_get(uint64_t label,int slot){return label==300&&slot==1?seatbelt:0;}
+static void mac_label_set(uint64_t label,int slot,uint64_t value){if(label==300&&slot==1){writes++;if(!writeFails)seatbelt=value;}}
+'''+handler+r'''
+int main(void){
+ audit_token_t caller={278,501};uint64_t old=0;
+ if(dopamine_roothide_set_sandbox_label(&caller,UINT64_MAX,&old)||old!=123||seatbelt!=UINT64_MAX||writes!=1)return 1;
+ if(dopamine_roothide_set_sandbox_label(&caller,old,&old)||seatbelt!=123||old!=UINT64_MAX)return 2;
+ uid=501;if(dopamine_roothide_set_sandbox_label(&caller,0,&old)!=EPERM||writes!=2)return 3;
+ uid=0;gid=501;if(dopamine_roothide_set_sandbox_label(&caller,0,&old)!=EPERM||writes!=2)return 4;
+ gid=0;hasProc=false;if(dopamine_roothide_set_sandbox_label(&caller,0,&old)!=ESRCH||writes!=2)return 5;
+ hasProc=true;hasCred=false;if(dopamine_roothide_set_sandbox_label(&caller,0,&old)!=ESRCH||writes!=2)return 6;
+ hasCred=true;hasLabel=false;if(dopamine_roothide_set_sandbox_label(&caller,0,&old)!=EINVAL||writes!=2)return 7;
+ hasLabel=true;active=false;if(dopamine_roothide_set_sandbox_label(&caller,0,&old)!=ENOTSUP||writes!=2)return 8;
+ active=true;caller.pid=999;if(dopamine_roothide_set_sandbox_label(&caller,0,&old)!=ESRCH||writes!=2)return 9;
+ caller.pid=278;writeFails=true;if(dopamine_roothide_set_sandbox_label(&caller,0,&old)!=EIO)return 10;
+ return 0;
+}
+''', 'BaseBin/libjailbreak/src', False)
+
+    @unittest.skipUnless(sys.platform == 'darwin', 'native sandbox XPC reply validation')
+    def test_sandbox_client_rejects_incomplete_or_untyped_reply(self):
+        source = (ROOT/'BaseBin/libjailbreak/src/jbclient_xpc.c').read_text()
+        client = source[source.index('int jbclient_dopamine_roothide_set_sandbox_label('):]
+        boot.BootTransition().run_native(r'''
+#include <stdint.h>
+#include <stdbool.h>
+#include <string.h>
+#include <errno.h>
+#include <stddef.h>
+typedef struct {int type;int64_t number;} object;typedef object *xpc_object_t;
+enum {XPC_TYPE_INT64=1,XPC_TYPE_UINT64=2,JBS_DOMAIN_DOPAMINE=5,JBS_DOPAMINE_ROOTHIDE_SET_SANDBOX_LABEL=5};
+static object status={1,0},previous={2,123},reply,args;
+static bool available=true,hasStatus=true,hasOld=true;static uint64_t sent;
+static xpc_object_t xpc_dictionary_create_empty(void){return &args;}
+static void xpc_dictionary_set_uint64(xpc_object_t a,const char *k,uint64_t v){(void)a;(void)k;sent=v;}
+static xpc_object_t jbserver_xpc_send(int d,int a,xpc_object_t v){return available&&d==5&&a==5&&v==&args?&reply:NULL;}
+static void xpc_release(xpc_object_t v){(void)v;}
+static xpc_object_t xpc_dictionary_get_value(xpc_object_t r,const char *k){(void)r;return !strcmp(k,"result")?(hasStatus?&status:NULL):(hasOld?&previous:NULL);}
+static int xpc_get_type(xpc_object_t v){return v->type;}
+static int64_t xpc_int64_get_value(xpc_object_t v){return v->number;}
+static uint64_t xpc_uint64_get_value(xpc_object_t v){return (uint64_t)v->number;}
+'''+client+r'''
+int main(void){
+ uint64_t old=999;if(jbclient_dopamine_roothide_set_sandbox_label(UINT64_MAX,&old)||old!=123||sent!=UINT64_MAX)return 1;
+ old=999;status.number=EPERM;if(jbclient_dopamine_roothide_set_sandbox_label(0,&old)!=EPERM||old!=999)return 2;
+ status.number=0;hasOld=false;if(jbclient_dopamine_roothide_set_sandbox_label(0,&old)!=EPROTO||old!=999)return 3;
+ hasOld=true;previous.type=1;if(jbclient_dopamine_roothide_set_sandbox_label(0,NULL)!=EPROTO)return 4;
+ previous.type=2;hasStatus=false;if(jbclient_dopamine_roothide_set_sandbox_label(0,&old)!=EPROTO)return 5;
+ hasStatus=true;status.type=2;if(jbclient_dopamine_roothide_set_sandbox_label(0,&old)!=EPROTO)return 6;
+ available=false;if(jbclient_dopamine_roothide_set_sandbox_label(0,&old)!=ENOTCONN)return 7;
+ available=true;status.type=1;if(jbclient_dopamine_roothide_set_sandbox_label(0,NULL))return 8;
+ return 0;
+}
+''', 'BaseBin/libjailbreak/src', False)
+
     @unittest.skipUnless(sys.platform == 'darwin', 'native numeric version ordering')
     def test_jbctl_3011_uses_parent_pipe_instead_of_legacy_suspension(self):
         source = (ROOT/'Application/Dopamine/Jailbreak/DOEnvironmentManager.m').read_text()
@@ -34,7 +122,8 @@ int main(void){@autoreleasepool{
         self.assertIn('geteuid() != 0 || getegid() != 0', checked)
         self.assertLess(checked.index('jbclient_dopamine_get_root()'), checked.index('action()'))
         self.assertIn('@finally', checked)
-        self.assertIn('jbclient_root_set_mac_label(1, labelBackup, NULL)', checked)
+        self.assertIn('jbclient_dopamine_roothide_set_sandbox_label(labelBackup, NULL)', checked)
+        self.assertNotIn('jbclient_root_set_mac_label', checked)
         self.assertIn('jbclient_dopamine_drop_root()', checked)
 
     def test_failed_spawn_never_waits_on_pid_zero_and_controls_display_failure(self):

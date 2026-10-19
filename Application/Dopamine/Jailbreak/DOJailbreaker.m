@@ -1162,16 +1162,16 @@ static void *rh3_boomerang_server(void *opaque)
 #endif // RH3_INSTALLABLE_DIAGNOSTIC
 }
 
-- (void)finalize
+- (int)finalize
 {
 #if RH3_INSTALLABLE_DIAGNOSTIC
     // No device lifecycle operations in the install/open smoke-test app.
-    return;
+    return 0;
 #else
     [[DOUIManager sharedInstance] sendLog:DOLocalizedString(@"Rebooting Userspace") debug:NO];
     if ([DOBootstrapper rootHidePortEnabled])
         [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:@"phase: requesting intentional userspace reboot"];
-    [[DOEnvironmentManager sharedManager] rebootUserspace];
+    return [[DOEnvironmentManager sharedManager] rebootUserspace];
 #endif
 }
 

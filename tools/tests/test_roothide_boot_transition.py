@@ -57,7 +57,7 @@ int main(void){
         handlers=re.findall(r'\.handler\s*=\s*(\w+)',actions)
         self.assertEqual(bound,names[-1])
         self.assertEqual(len(handlers),len(names))
-        self.assertEqual(handlers[-1],'dopamine_roothide_bootlog')
+        self.assertEqual(handlers[-1],'dopamine_roothide_set_sandbox_label')
 
     def test_registration_failure_is_visible_without_saved_diagnostic(self):
         app=(ROOT/'Application/Dopamine/Jailbreak/DOJailbreaker.m').read_text()

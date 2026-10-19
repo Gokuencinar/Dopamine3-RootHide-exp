@@ -113,6 +113,26 @@ static int dopamine_roothide_bootlog(int fd)
     return roothide_is_active() ? rh3_bootlog_configure(fd) : ENOTSUP;
 }
 
+// GET_ROOT changes ucred directly; its XPC audit token can still carry uid 501
+// on legacy kernels. Authenticate through the app domain and check the actual
+// credentials, rather than relaxing the root domain's audit-token permission.
+static int dopamine_roothide_set_sandbox_label(audit_token_t *callerToken, uint64_t newLabel, uint64_t *oldLabel)
+{
+    if (!roothide_is_active()) return ENOTSUP;
+    uint64_t proc = proc_find(audit_token_to_pid(*callerToken));
+    if (!proc) return ESRCH;
+    uint64_t ucred = proc_ucred(proc);
+    if (!ucred) return ESRCH;
+    if (kread32(ucred + koffsetof(ucred, uid)) != 0 ||
+        kread32(ucred + koffsetof(ucred, groups)) != 0) return EPERM;
+    uint64_t label = kread_ptr(ucred + koffsetof(ucred, label));
+    if (!label) return EINVAL;
+    // Only the authenticated caller's Seatbelt slot can be changed.
+    *oldLabel = mac_label_get(label, 1);
+    mac_label_set(label, 1, newLabel);
+    return mac_label_get(label, 1) == newLabel ? 0 : EIO;
+}
+
 struct jbserver_domain gDopamineDomain = {
 	.permissionHandler = dopamine_domain_allowed,
 	.actions = {
@@ -144,6 +164,15 @@ struct jbserver_domain gDopamineDomain = {
         {
             .handler = dopamine_roothide_bootlog,
             .args = (jbserver_arg[]){{ .name = "log-fd", .type = JBS_TYPE_FD }, {0}},
+        },
+        {
+            .handler = dopamine_roothide_set_sandbox_label,
+            .args = (jbserver_arg[]){
+                { .name = "caller-token", .type = JBS_TYPE_CALLER_TOKEN },
+                { .name = "label", .type = JBS_TYPE_UINT64 },
+                { .name = "org-label", .type = JBS_TYPE_UINT64, .out = true },
+                {0},
+            },
         },
         { 0 },
     },

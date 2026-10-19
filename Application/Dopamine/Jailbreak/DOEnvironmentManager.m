@@ -435,14 +435,14 @@ static BOOL DOUsesLegacyJbctl(NSString *version)
     @try {
         if (geteuid() != 0 || getegid() != 0) result = [self rh3ActionStage:@"verify-root" result:EPERM];
         else if (![self isInstalledThroughTrollStore]) {
-            result = jbclient_root_set_mac_label(1, -1, &labelBackup);
+            result = jbclient_dopamine_roothide_set_sandbox_label(UINT64_MAX, &labelBackup);
             labelChanged = result == 0;
-            if (result) [self rh3ActionStage:@"unsandbox" result:result];
+            [self rh3ActionStage:@"unsandbox" result:result];
         }
         if (!result) result = action();
     } @finally {
         if (labelChanged) {
-            int restore = jbclient_root_set_mac_label(1, labelBackup, NULL);
+            int restore = jbclient_dopamine_roothide_set_sandbox_label(labelBackup, NULL);
             if (restore) { [self rh3ActionStage:@"restore-sandbox" result:restore]; if (!result) result = restore; }
         }
         if (elevated) {
@@ -553,9 +553,11 @@ static BOOL DOUsesLegacyJbctl(NSString *version)
     return result;
 }
 
-- (void)rebootUserspace
+- (int)rebootUserspace
 {
-    [self spawnJbctlAsRootWithArgs:@[@"reboot_userspace"]];
+    int result = [self spawnJbctlAsRootWithArgs:@[@"reboot_userspace"]];
+    if ([DOBootstrapper rootHidePortEnabled]) [self rh3ActionStage:@"reboot userspace" result:result];
+    return result;
 }
 
 - (void)rebuildIconCache
@@ -619,8 +621,8 @@ static BOOL DOUsesLegacyJbctl(NSString *version)
     NSString *newBasebinTarPath = [[NSBundle mainBundle].bundlePath stringByAppendingPathComponent:@"basebin.tar"];
     int result = jbclient_platform_stage_jailbreak_update(newBasebinTarPath.fileSystemRepresentation);
     if (result == 0) {
-        [self rebootUserspace];
-        return nil;
+        result = [self rebootUserspace];
+        if (result == 0) return nil;
     }
     return [NSError errorWithDomain:@"Dopamine" code:result userInfo:nil];
 }

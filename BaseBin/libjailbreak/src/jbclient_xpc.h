@@ -63,5 +63,6 @@ int jbclient_roothide_exec_start(const char *path, bool resume);
 int jbclient_roothide_exec_cancel(const char *path);
 
 int jbclient_dopamine_roothide_bootlog(int fd);
+int jbclient_dopamine_roothide_set_sandbox_label(uint64_t label, uint64_t *oldLabel);
 
 #endif

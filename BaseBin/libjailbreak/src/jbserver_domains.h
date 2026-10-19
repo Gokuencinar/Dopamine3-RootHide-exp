@@ -56,6 +56,7 @@ enum {
     JBS_DOPAMINE_GET_ROOT,
     JBS_DOPAMINE_DROP_ROOT,
     JBS_DOPAMINE_ROOTHIDE_BOOTLOG,
+    JBS_DOPAMINE_ROOTHIDE_SET_SANDBOX_LABEL,
 };
 
 // Reserved for the RootHide port. Its 2.x implementation used domain 5,

@@ -552,3 +552,21 @@ int jbclient_dopamine_roothide_bootlog(int fd)
     int result=value && xpc_get_type(value)==XPC_TYPE_INT64 ? (int)xpc_int64_get_value(value) : -1;
     xpc_release(reply); return result;
 }
+
+int jbclient_dopamine_roothide_set_sandbox_label(uint64_t label, uint64_t *oldLabel)
+{
+    xpc_object_t args = xpc_dictionary_create_empty();
+    xpc_dictionary_set_uint64(args, "label", label);
+    xpc_object_t reply = jbserver_xpc_send(JBS_DOMAIN_DOPAMINE, JBS_DOPAMINE_ROOTHIDE_SET_SANDBOX_LABEL, args);
+    xpc_release(args);
+    if (!reply) return ENOTCONN;
+    xpc_object_t value = xpc_dictionary_get_value(reply, "result");
+    int result = value && xpc_get_type(value) == XPC_TYPE_INT64 ? (int)xpc_int64_get_value(value) : EPROTO;
+    if (result == 0) {
+        xpc_object_t previous = xpc_dictionary_get_value(reply, "org-label");
+        if (!previous || xpc_get_type(previous) != XPC_TYPE_UINT64) result = EPROTO;
+        else if (oldLabel) *oldLabel = xpc_uint64_get_value(previous);
+    }
+    xpc_release(reply);
+    return result;
+}

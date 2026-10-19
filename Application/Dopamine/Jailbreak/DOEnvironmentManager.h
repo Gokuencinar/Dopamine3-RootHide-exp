@@ -51,7 +51,7 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)runAsRoot:(void (^)(void))rootBlock;
 
 - (int)respring;
-- (void)rebootUserspace;
+- (int)rebootUserspace;
 - (void)rebuildIconCache;
 - (int)refreshJailbreakApps;
 - (void)reboot;

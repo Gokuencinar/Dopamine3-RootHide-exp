@@ -81,9 +81,9 @@ class DeviceTestContractTests(unittest.TestCase):
         self.assertIn("return;", guarded)
         self.assertIn("#else", guarded)
         self.assertLess(guarded.index("return;"), guarded.index("[self doExploitation]"))
-        finalize = source_text[source_text.index("- (void)finalize\n"):]
+        finalize = source_text[source_text.index("- (int)finalize\n"):]
         self.assertIn("#if RH3_INSTALLABLE_DIAGNOSTIC", finalize)
-        self.assertLess(finalize.index("return;"), finalize.index("rebootUserspace"))
+        self.assertLess(finalize.index("return 0;"), finalize.index("rebootUserspace"))
         bootstrap = source("Application/Dopamine/Jailbreak/DOBootstrapper.m")
         self.assertIn("#define ROOTHIDE3_BOOTSTRAP_READY 0", bootstrap)
 

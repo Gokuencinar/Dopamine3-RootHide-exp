@@ -188,6 +188,19 @@
 #if RH3_FULL_APP_EXPERIMENTAL
             if (![DOBootstrapper rootHidePortEnabled]) return;
 #endif
+            if ([DOBootstrapper rootHidePortEnabled]) {
+                dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
+                    int result = [[DOEnvironmentManager sharedManager] rebootUserspace];
+                    if (result != 0) dispatch_async(dispatch_get_main_queue(), ^{
+                        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"No se pudo reiniciar el entorno"
+                            message:[NSString stringWithFormat:@"La acción falló con el código %d. Puedes compartir el diagnóstico desde el menú.", result]
+                            preferredStyle:UIAlertControllerStyleAlert];
+                        [alert addAction:[UIAlertAction actionWithTitle:@"Aceptar" style:UIAlertActionStyleCancel handler:nil]];
+                        [self presentViewController:alert animated:YES completion:nil];
+                    });
+                });
+                return;
+            }
             [self fadeToBlack:^{
                 [[DOEnvironmentManager sharedManager] rebootUserspace];
             }];
@@ -398,12 +411,25 @@
         BOOL didRemove = NO;
         BOOL showLogs = YES;
         [jailbreaker runWithError:&error didRemoveJailbreak:&didRemove showLogs:&showLogs];
+        // Keep the UI visible while the RootHide reboot request is checked.
+        // A rejected request must follow the normal error/log flow, not leave
+        // an already faded view behind. A successful reboot terminates the app.
+        if (!error && !didRemove && [DOBootstrapper rootHidePortEnabled]) {
+            int result = [jailbreaker finalize];
+            if (result != 0) {
+                error = [NSError errorWithDomain:@"RootHide" code:result userInfo:@{
+                    NSLocalizedDescriptionKey: [NSString stringWithFormat:@"No se pudo reiniciar el entorno (código %d). Comparte el diagnóstico antes de volver a intentarlo.", result]
+                }];
+                showLogs = YES;
+            }
+        }
 #if RH3_FULL_APP_EXPERIMENTAL
         if (error) [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
             [NSString stringWithFormat:@"END FAILED: %@", error.localizedDescription]];
 #endif
         dispatch_async(dispatch_get_main_queue(), ^{
             if (error && showLogs) {
+                self.hideHomeIndicator = NO;
                 [[DOUIManager sharedInstance] sendLog:[NSString stringWithFormat:@"Jailbreak failed with error: %@", error] debug:NO];
                 [self.navigationController pushViewController:[[DOLogCrashViewController alloc] initWithTitle:[error localizedDescription]] animated:YES];
             }
@@ -427,6 +453,7 @@
             else {
                 // No errors
                 [[DOUIManager sharedInstance] completeJailbreak];
+                if ([DOBootstrapper rootHidePortEnabled]) return;
                 [self fadeToBlack: ^{
                     [jailbreaker finalize];
                 }];
