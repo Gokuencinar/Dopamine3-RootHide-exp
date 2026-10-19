@@ -49,7 +49,7 @@ int main(int argc,char**argv){
  if(!child){execl(argv[0],argv[0],fixturePrefix,NULL);_exit(9);}int status;waitpid(child,&status,0);
  if(status || size(path)<=before)return 5;
  before=size(path);setenv("RH3_BOOT_LOG_INO","0",1);rh3_bootlog("must not write");if(size(path)!=before)return 6;
- if(rh3_bootlog_configure(fd))return 7;
+ if(rh3_bootlog_configure(fd))return 7;before=size(path);
  snprintf(other,sizeof(other),"%s/saved",tmp);rename(path,other);
  int replacement=open(path,O_WRONLY|O_CREAT,0600);close(replacement);
  rh3_bootlog("replacement");if(size(path)!=0)return 8;
