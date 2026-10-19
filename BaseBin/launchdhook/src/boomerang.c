@@ -8,6 +8,7 @@
 #include <libjailbreak/kcall_Fugu14.h>
 #include <libjailbreak/kcall_arm64.h>
 #include <libjailbreak/stock_fixes.h>
+#include <libjailbreak/roothider.h>
 #include "spawn_hook.h"
 #include <unistd.h>
 extern char **environ;
