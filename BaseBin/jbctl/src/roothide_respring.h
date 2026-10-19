@@ -3,6 +3,7 @@
 #include <string.h>
 #include <signal.h>
 #include <errno.h>
+#include <limits.h>
 
 // RootHide uses the exact daemon target of the stock fallback without
 // replacing jbctl with sbreload. Report failed or missing targets explicitly.
@@ -18,7 +19,7 @@ static int rh3_respring_backboardd(void)
     if (count < 0 || count > capacity) { free(pids); return EIO; }
     int result = ESRCH;
     for (int i = 0; i < count; i++) {
-        char path[PROC_PIDPATHINFO_MAXSIZE] = {0};
+        char path[PATH_MAX] = {0};
         if (pids[i] <= 1 || proc_pidpath(pids[i], path, sizeof(path)) <= 0 ||
             strcmp(path, "/usr/libexec/backboardd")) continue;
         result = kill(pids[i], SIGTERM) == 0 ? 0 : errno;

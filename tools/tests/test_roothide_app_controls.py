@@ -66,7 +66,6 @@ int main(void){
 #include <errno.h>
 #include <stddef.h>
 #include <string.h>
-#define PROC_PIDPATHINFO_MAXSIZE 4096
 #define SIGTERM 15
 static int mode,kills,last;
 static int proc_listallpids(void *buffer,int size){(void)size;if(mode==4)return 0;if(!buffer)return 3;pid_t *p=buffer;p[0]=1;p[1]=99;p[2]=100;return 3;}
