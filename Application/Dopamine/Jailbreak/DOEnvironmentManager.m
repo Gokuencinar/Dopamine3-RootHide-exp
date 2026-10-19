@@ -36,6 +36,11 @@ int reboot3(uint64_t flags, ...);
 CFPropertyListRef MGCopyAnswer(CFStringRef);
 extern char **environ;
 
+static BOOL DOUsesLegacyJbctl(NSString *version)
+{
+    return version && [version compare:@"3.0.5" options:NSNumericSearch] == NSOrderedAscending;
+}
+
 @implementation DOEnvironmentManager
 
 + (instancetype)sharedManager
@@ -450,10 +455,7 @@ extern char **environ;
 
 - (int)spawnJbctlAsRootWithArgs:(NSArray *)args
 {
-    bool needsLegacySolution = false;
-    if (self.jailbrokenVersion) {
-        needsLegacySolution = (strcmp(self.jailbrokenVersion.UTF8String, "3.0.5") < 0);
-    }
+    bool needsLegacySolution = DOUsesLegacyJbctl(self.jailbrokenVersion);
 
     char **argBuf = malloc((args.count + 4) * sizeof(char *));
     argBuf[0] = strdup(JBROOT_PATH("/basebin/jbctl"));
@@ -495,6 +497,7 @@ extern char **environ;
     else if ([DOBootstrapper rootHidePortEnabled]) {
         r = [self rh3PerformPrivilegedAction:^int{
             int status = posix_spawn(&pid, argBuf[0], &act, &attr, (char *const *)argBuf, (char *const *)environ);
+            if (needsLegacySolution && status == 0 && pid > 0 && kill(pid, SIGCONT) != 0) status = errno;
             return [self rh3ActionStage:@"jbctl spawn" result:status];
         }];
     } else [self runAsRoot:^{

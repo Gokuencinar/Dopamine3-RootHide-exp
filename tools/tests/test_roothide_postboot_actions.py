@@ -8,6 +8,20 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class PostbootActions(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == 'darwin', 'native numeric version ordering')
+    def test_jbctl_3011_uses_parent_pipe_instead_of_legacy_suspension(self):
+        source = (ROOT/'Application/Dopamine/Jailbreak/DOEnvironmentManager.m').read_text()
+        helper = source.split('static BOOL DOUsesLegacyJbctl', 1)[1].split('@implementation', 1)[0]
+        boot.BootTransition().run_native('#import <Foundation/Foundation.h>\nstatic BOOL DOUsesLegacyJbctl'+helper+r'''
+int main(void){@autoreleasepool{
+ if(!DOUsesLegacyJbctl(@"3.0.4"))return 1;
+ for(NSString *version in @[@"3.0.5",@"3.0.11",@"3.0.100",@"3.1.0",@"4.0.0"])
+  if(DOUsesLegacyJbctl(version))return 2;
+ if(DOUsesLegacyJbctl(nil))return 3;
+ return 0;
+}}
+''','Application/Dopamine/Jailbreak',True)
+
     def test_relaunch_restores_server_root_and_validated_brand_together(self):
         source = (ROOT/'Application/Dopamine/Jailbreak/DOEnvironmentManager.m').read_text()
         init = source.split('- (instancetype)init', 1)[1].split('- (NSString *)nightlyHash', 1)[0]
