@@ -4,8 +4,9 @@
 #include <unistd.h>
 
 // A timeout leaves the non-idempotent child alone and the running marker intact.
-static int RH3WaitForBootstrapChild(pid_t pid, unsigned timeoutSeconds)
+static int RH3WaitForBootstrapChildStatus(pid_t pid, unsigned timeoutSeconds, int *rawStatus)
 {
+    if (rawStatus) *rawStatus = -1;
     if (pid <= 1) return -EINVAL;
     struct timespec start, now;
     if (clock_gettime(CLOCK_MONOTONIC, &start)) return -errno;
@@ -13,6 +14,7 @@ static int RH3WaitForBootstrapChild(pid_t pid, unsigned timeoutSeconds)
         int status = 0;
         pid_t result = waitpid(pid, &status, WNOHANG);
         if (result == pid) {
+            if (rawStatus) *rawStatus = status;
             if (WIFEXITED(status)) return WEXITSTATUS(status);
             if (WIFSIGNALED(status)) return 128 + WTERMSIG(status);
         }
@@ -24,4 +26,9 @@ static int RH3WaitForBootstrapChild(pid_t pid, unsigned timeoutSeconds)
         struct timespec interval = {0, 100000000};
         nanosleep(&interval, NULL);
     }
+}
+
+static int RH3WaitForBootstrapChild(pid_t pid, unsigned timeoutSeconds)
+{
+    return RH3WaitForBootstrapChildStatus(pid, timeoutSeconds, NULL);
 }

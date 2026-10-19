@@ -250,6 +250,18 @@
                 [specifiers addObject:verboseLogSpecifier];
             }
             
+#if RH3_FULL_APP_EXPERIMENTAL
+            if (!envManager.isJailbroken) {
+                PSSpecifier *recovery = [PSSpecifier preferenceSpecifierNamed:@"Recuperar instalación interrumpida" target:self set:defSetter get:defGetter detail:nil cell:PSSwitchCell edit:nil];
+                [recovery setProperty:@"rootHideRecoveryRequested" forKey:@"key"];
+                [recovery setProperty:@NO forKey:@"default"];
+                [specifiers addObject:recovery];
+                PSSpecifier *hint = [PSSpecifier emptyGroupSpecifier];
+                [hint setProperty:@"Reinicia el iPhone antes. Al pulsar Jailbreak se conservará el entorno fallido y se creará uno nuevo. Las copias anteriores se mantienen. La opción se consume en un intento." forKey:@"footerText"];
+                [specifiers addObject:hint];
+            }
+#endif
+
             PSSpecifier *idownloadSpecifier = [PSSpecifier preferenceSpecifierNamed:DOLocalizedString(@"Settings_iDownload") target:self set:@selector(setIDownloadEnabled:specifier:) get:@selector(readIDownloadEnabled:) detail:nil cell:PSSwitchCell edit:nil];
             [idownloadSpecifier setProperty:@YES forKey:@"enabled"];
             [idownloadSpecifier setProperty:@"idownloadEnabled" forKey:@"key"];

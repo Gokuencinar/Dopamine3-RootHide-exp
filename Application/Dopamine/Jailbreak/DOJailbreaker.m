@@ -814,6 +814,10 @@ static void *rh3_boomerang_server(void *opaque)
 - (NSError *)rootHidePreflightError
 {
     if (![DOBootstrapper rootHidePortEnabled]) return nil;
+    BOOL recovery = [[DOPreferenceManager sharedManager] boolPreferenceValueForKey:@"rootHideRecoveryRequested" fallback:NO];
+    [DOBootstrapper setRootHideRecoveryRequested:recovery];
+    if (recovery && [[DOPreferenceManager sharedManager] boolPreferenceValueForKey:@"removeJailbreakEnabled" fallback:NO])
+        return [NSError errorWithDomain:JBErrorDomain code:JBErrorCodeFailedExploitation userInfo:@{NSLocalizedDescriptionKey:@"Disable Remove Jailbreak before requesting recovery"}];
     NSString *reason = nil;
     NSOperatingSystemVersion os = NSProcessInfo.processInfo.operatingSystemVersion;
     DOEnvironmentManager *environment = [DOEnvironmentManager sharedManager];
@@ -864,6 +868,9 @@ static void *rh3_boomerang_server(void *opaque)
         return;
     }
 #endif
+    // Consume the preference before elevation; the captured request lasts for this attempt.
+    if ([DOBootstrapper rootHidePortEnabled])
+        [[DOPreferenceManager sharedManager] setPreferenceValue:@NO forKey:@"rootHideRecoveryRequested"];
     BOOL removeJailbreakEnabled = [[DOPreferenceManager sharedManager] boolPreferenceValueForKey:@"removeJailbreakEnabled" fallback:NO];
     // opainject/jbctl and dyld generation run before the RootHide patch daemon
     // is available. Enable child patching only after launchd and dyld are ready.

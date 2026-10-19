@@ -40,6 +40,7 @@ typedef NS_ENUM(NSInteger, BootstrapErrorCode) {
 // Build-time opt-in; the hidden bootstrap never shares stock /var/jb state.
 @interface DOBootstrapper (RootHidePort)
 + (BOOL)rootHidePortEnabled;
++ (void)setRootHideRecoveryRequested:(BOOL)requested;
 + (nullable NSError *)preserveInterruptedRootHideBootstrap;
 - (nullable NSError *)rootHidePreflightError;
 + (nullable NSString *)rootHideExistingRootWithError:(NSError * _Nullable * _Nullable)error;

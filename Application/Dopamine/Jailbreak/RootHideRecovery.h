@@ -57,9 +57,9 @@ static NSString *RH3RecoveryBackupName(NSString *name)
 
 // Returns nil without an error when no recovery has ever been started.
 // Paths are derived from a checked brand; paths from a plist are never used.
-static NSDictionary *RH3RecoveryInspect(NSString *primary, NSString *secondary, uid_t owner, NSError **error)
+static NSDictionary *RH3RecoveryInspectJournal(NSString *primary, NSString *secondary, uid_t owner, NSString *journalName, NSError **error)
 {
-    NSString *journalPath = [primary stringByAppendingPathComponent:RH3RecoveryJournalName];
+    NSString *journalPath = [primary stringByAppendingPathComponent:journalName];
     struct stat journalStat;
     if (lstat(journalPath.fileSystemRepresentation, &journalStat)) {
         if (errno != ENOENT && error) *error = RH3RecoveryFailure(@"Cannot inspect RootHide recovery journal");
@@ -149,15 +149,15 @@ static NSDictionary *RH3RecoveryInspect(NSString *primary, NSString *secondary, 
 #define RH3_RECOVERY_RENAME(a,b,c,d) renameatx_np(a,b,c,d,RENAME_EXCL)
 #endif
 
-static BOOL RH3RecoveryPreserve(NSString *primary, NSString *secondary, NSString *name,
-                                uid_t owner, NSError **error)
+static BOOL RH3RecoveryPreserveJournal(NSString *primary, NSString *secondary, NSString *name,
+                                uid_t owner, NSString *journalName, NSError **error)
 {
     if (!RH3RecoveryValidName(name)) {
         if (error) *error = RH3RecoveryFailure(@"Invalid RootHide recovery brand");
         return NO;
     }
     NSError *inspectError = nil;
-    NSDictionary *existing = RH3RecoveryInspect(primary, secondary, owner, &inspectError);
+    NSDictionary *existing = RH3RecoveryInspectJournal(primary, secondary, owner, journalName, &inspectError);
     if (inspectError) { if (error) *error = inspectError; return NO; }
     if (existing && ![existing[@"Name"] isEqual:name]) {
         if (error) *error = RH3RecoveryFailure(@"One legacy bootstrap has already been preserved; another automatic recovery is disabled");
@@ -176,7 +176,7 @@ static BOOL RH3RecoveryPreserve(NSString *primary, NSString *secondary, NSString
             record[i == 0 ? @"PrimaryIdentity" : @"SecondaryIdentity"] = @[@((uint64_t)st.st_dev), @((uint64_t)st.st_ino)];
         }
         NSData *bytes = [NSPropertyListSerialization dataWithPropertyList:record format:NSPropertyListBinaryFormat_v1_0 options:0 error:error];
-        NSString *journalPath = [primary stringByAppendingPathComponent:RH3RecoveryJournalName];
+        NSString *journalPath = [primary stringByAppendingPathComponent:journalName];
         int fd = bytes ? open(journalPath.fileSystemRepresentation, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600) : -1;
         if (fd < 0) { if (error) *error = RH3RecoveryFailure(@"Cannot create exclusive RootHide recovery journal"); return NO; }
         size_t used = 0;
@@ -192,7 +192,7 @@ static BOOL RH3RecoveryPreserve(NSString *primary, NSString *secondary, NSString
     }
     // Revalidate both recorded inodes before every rename, including after a crash.
     for (NSUInteger i = 0; i < bases.count; i++) {
-        NSDictionary *state = RH3RecoveryInspect(primary, secondary, owner, error);
+        NSDictionary *state = RH3RecoveryInspectJournal(primary, secondary, owner, journalName, error);
         if (!state) return NO;
         NSString *location = state[@"Locations"][i];
         if (![location.lastPathComponent isEqual:name]) continue;
@@ -207,6 +207,39 @@ static BOOL RH3RecoveryPreserve(NSString *primary, NSString *secondary, NSString
         if (parent >= 0) close(parent);
         if (!synced) { if (error) *error = RH3RecoveryFailure(@"RootHide preservation interrupted; journal and containers retained for resumption"); return NO; }
     }
-    NSDictionary *state = RH3RecoveryInspect(primary, secondary, owner, error);
+    NSDictionary *state = RH3RecoveryInspectJournal(primary, secondary, owner, journalName, error);
     return state && [state[@"Complete"] boolValue];
+}
+
+// The explicit retry has its own immutable journal; original backups stay intact.
+static NSString *const RH3RecoveryRetryJournalName = @".roothide3-recovery-retry.plist";
+static NSDictionary *RH3RecoveryInspect(NSString *primary, NSString *secondary, uid_t owner, NSError **error)
+{
+    NSError *failure = nil;
+    NSDictionary *first = RH3RecoveryInspectJournal(primary, secondary, owner, RH3RecoveryJournalName, &failure);
+    if (failure) { if (error) *error = failure; return nil; }
+    NSDictionary *retry = RH3RecoveryInspectJournal(primary, secondary, owner, RH3RecoveryRetryJournalName, &failure);
+    if (failure) { if (error) *error = failure; return nil; }
+    if (retry && (!first || ![first[@"Complete"] boolValue] || [first[@"Name"] isEqual:retry[@"Name"]])) {
+        if (error) *error = RH3RecoveryFailure(@"Recovery transactions conflict; containers preserved");
+        return nil;
+    }
+    return retry ?: first;
+}
+static BOOL RH3RecoveryPreserve(NSString *primary, NSString *secondary, NSString *name,
+                                uid_t owner, NSError **error)
+{
+    return RH3RecoveryPreserveJournal(primary, secondary, name, owner, RH3RecoveryJournalName, error);
+}
+static BOOL RH3RecoveryPreserveRetry(NSString *primary, NSString *secondary, NSString *name,
+                                     uid_t owner, NSError **error)
+{
+    NSError *failure = nil;
+    NSDictionary *first = RH3RecoveryInspectJournal(primary, secondary, owner, RH3RecoveryJournalName, &failure);
+    if (failure || ![first[@"Complete"] boolValue] || [first[@"Name"] isEqual:name]) {
+        if (error) *error = failure ?: RH3RecoveryFailure(@"Original recovery must be complete and independent");
+        return NO;
+    }
+    if (!RH3RecoveryInspect(primary, secondary, owner, error)) return NO;
+    return RH3RecoveryPreserveJournal(primary, secondary, name, owner, RH3RecoveryRetryJournalName, error);
 }

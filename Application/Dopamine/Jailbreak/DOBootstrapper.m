@@ -28,6 +28,8 @@
 #import <sys/sysctl.h>
 #import "RootHideRecovery.h"
 #import "RootHideScriptWait.h"
+#import "RootHideFreshSetup.h"
+#import <signal.h>
 #import "RootHideForensics.h"
 extern char **environ;
 
@@ -40,6 +42,7 @@ extern char **environ;
 static NSString *const RH3RootDirectory = @"/var/containers/Bundle/Application";
 static NSString *const RH3AppGroupDirectory = @"/var/mobile/Containers/Shared/AppGroup";
 static NSString *const RH3InstalledMarker = @".installed_roothide3";
+static BOOL RH3RecoveryRequested = NO;
 static NSString *const RH3PendingMarker = @".installing_roothide3";
 static NSError *RH3Error(BootstrapErrorCode code, NSString *message);
 
@@ -460,6 +463,99 @@ static NSError *RH3LegacyRecoveryEligibility(NSString *root)
     return nil;
 }
 
+// Only an explicit retry may preserve a partially configured bootstrap.
+// It never executes or repairs anything inside that failed tree.
+extern int proc_listallpids(void *, int);
+extern int proc_pidpath(int, void *, uint32_t);
+static int RH3RunRecoveryCommand(NSString *label, NSString *command, NSString *shell, char **environment)
+{
+    DOUIManager *ui = [DOUIManager sharedInstance];
+    [ui rh3RecordDiagnosticStage:[NSString stringWithFormat:@"setup-step %@ BEGIN", label]];
+    size_t count = 0;
+    while (environment[count]) count++;
+    char **childEnvironment = calloc(count + 1, sizeof(char *));
+    if (!childEnvironment) return ENOMEM;
+    for (size_t i = 0; i < count; i++) {
+        if (!(childEnvironment[i] = strdup(environment[i]))) {
+            RH3FreeShellEnvironment(childEnvironment); return ENOMEM;
+        }
+    }
+    __block pid_t pid = 0;
+    __block int spawnError = -1;
+    dispatch_group_t launch = dispatch_group_create();
+    dispatch_group_async(launch, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        spawnError = exec_cmd_env_nowait(&pid, childEnvironment, shell.fileSystemRepresentation,
+                                       "-e", "-c", command.UTF8String, NULL);
+        RH3FreeShellEnvironment(childEnvironment);
+    });
+    if (dispatch_group_wait(launch, dispatch_time(DISPATCH_TIME_NOW, 20 * NSEC_PER_SEC))) {
+        [ui rh3RecordDiagnosticStage:[NSString stringWithFormat:@"setup-step %@ spawn TIMEOUT; outcome unknown; reboot required", label]];
+        return -ETIMEDOUT;
+    }
+    int raw = -1;
+    int result = spawnError ? spawnError : RH3WaitForBootstrapChildStatus(pid, 90, &raw);
+    [ui rh3RecordDiagnosticStage:[NSString stringWithFormat:
+        @"setup-step %@ END pid=%d spawn=%d raw_wait=%d exit=%d signal=%d result=%d", label, pid, spawnError, raw,
+        raw >= 0 && WIFEXITED(raw) ? WEXITSTATUS(raw) : -1,
+        raw >= 0 && WIFSIGNALED(raw) ? WTERMSIG(raw) : 0, result]];
+    return result;
+}
+
+static NSError *RH3RetryRecoveryEligibility(NSString *root)
+{
+    if (!RH3RecoveryRequested || geteuid() != 0 ||
+        NSProcessInfo.processInfo.operatingSystemVersion.majorVersion != 16)
+        return RH3RecoveryFailure(@"Request recovery from Settings on an unjailbroken iOS 16 boot");
+    NSError *error = RH3CheckInterruptedOperations(root);
+    if (!error) error = RH3CheckBootstrapProfile(root, 1900);
+    if (error) return error;
+    struct stat marker = {0}, installed = {0}, profile = {0};
+    NSString *path = [root stringByAppendingPathComponent:RH3PendingMarker];
+    struct timeval boot = {0}; size_t size = sizeof(boot);
+    int mib[] = {CTL_KERN, KERN_BOOTTIME};
+    if (![RH3PendingState(root) isEqual:@"running-script"] ||
+        lstat(path.fileSystemRepresentation, &marker) || !S_ISREG(marker.st_mode) || marker.st_uid != 0 ||
+        lstat([root stringByAppendingPathComponent:@".roothide3-bootstrap-profile.plist"].fileSystemRepresentation, &profile) ||
+        !S_ISREG(profile.st_mode) || profile.st_uid != 0 ||
+        sysctl(mib, 2, &boot, &size, NULL, 0) || size != sizeof(boot) ||
+        boot.tv_sec <= marker.st_mtime || boot.tv_sec <= marker.st_ctime)
+        return RH3RecoveryFailure(@"Fully reboot after the failed installation before requesting recovery");
+    if (lstat([root stringByAppendingPathComponent:RH3InstalledMarker].fileSystemRepresentation, &installed) == 0 || errno != ENOENT)
+        return RH3RecoveryFailure(@"Recovery refuses an installed or ambiguous bootstrap");
+    if ([DOEnvironmentManager sharedManager].isJailbroken)
+        return RH3RecoveryFailure(@"Recovery requires a full unjailbroken boot");
+    // Enumeration is bounded and fails closed when a live process cannot be inspected.
+    int count = proc_listallpids(NULL, 0);
+    if (count <= 0 || count > 8192) return RH3RecoveryFailure(@"Cannot enumerate processes for recovery");
+    NSMutableData *pids = [NSMutableData dataWithLength:(count + 128) * sizeof(pid_t)];
+    int used = proc_listallpids(pids.mutableBytes, (int)pids.length);
+    if (used <= 0 || used >= count + 128) return RH3RecoveryFailure(@"Process inventory changed; recovery stopped");
+    NSError *historyError = nil;
+    NSDictionary *history = RH3RecoveryInspect(RH3RootDirectory, RH3AppGroupDirectory, 0, &historyError);
+    if (historyError) return historyError;
+    NSString *name = history && ![history[@"Complete"] boolValue] ? history[@"Name"] : root.lastPathComponent;
+    NSMutableArray *prefixes = [NSMutableArray array];
+    for (NSString *base in @[RH3RootDirectory, RH3AppGroupDirectory])
+        for (NSString *entry in @[name, RH3RecoveryBackupName(name)])
+            [prefixes addObject:[[base stringByAppendingPathComponent:entry] stringByAppendingString:@"/"]];
+    for (int i = 0; i < used; i++) {
+        pid_t pid = ((pid_t *)pids.bytes)[i];
+        if (pid <= 0 || pid == getpid()) continue;
+        char executable[4096] = {0};
+        if (proc_pidpath(pid, executable, sizeof(executable)) <= 0) {
+            if (kill(pid, 0) != 0 && errno == ESRCH) continue;
+            return RH3RecoveryFailure([NSString stringWithFormat:@"Cannot inspect live PID %d; no recovery move attempted", pid]);
+        }
+        NSString *process = [NSString stringWithUTF8String:executable];
+        // /var and /private/var refer to the same known container parents.
+        if ([process hasPrefix:@"/private/var/"]) process = [process substringFromIndex:8];
+        for (NSString *prefix in prefixes)
+            if ([process hasPrefix:prefix])
+                return RH3RecoveryFailure(@"A process still uses the failed bootstrap; fully reboot first");
+    }
+    return nil;
+}
+
 @interface DOBootstrapper ()
 - (NSError *)extractTar:(NSString *)tarPath toPath:(NSString *)destinationPath;
 - (void)patchBasebinDaemonPlists;
@@ -474,10 +570,40 @@ static NSError *RH3LegacyRecoveryEligibility(NSString *root)
 // container or /var/jb symlink. It is selected only by an explicit build flag.
 @implementation DOBootstrapper (RootHidePort)
 
++ (void)setRootHideRecoveryRequested:(BOOL)requested { RH3RecoveryRequested = requested; }
+
++ (NSError *)preserveRequestedRootHideBootstrap
+{
+    NSError *error = nil;
+    NSDictionary *state = RH3RecoveryInspect(RH3RootDirectory, RH3AppGroupDirectory, 0, &error);
+    if (error) return error;
+    NSDictionary *retry = RH3RecoveryInspectJournal(RH3RootDirectory, RH3AppGroupDirectory, 0, RH3RecoveryRetryJournalName, &error);
+    if (error) return error;
+    NSString *root = (retry && ![retry[@"Complete"] boolValue]) ? retry[@"Locations"][0] :
+        [self rootHideExistingRootWithError:&error];
+    if (error) return error;
+    if (!root) return nil;
+    if (retry && [retry[@"Complete"] boolValue])
+        return RH3RecoveryFailure(@"The additional recovery has already been used; all backups retained");
+    if (!retry && ![state[@"Complete"] boolValue])
+        return RH3RecoveryFailure(@"Finish the original preservation before requesting another recovery");
+    error = RH3RetryRecoveryEligibility(root);
+    if (error) return error;
+    NSString *name = retry ? retry[@"Name"] : root.lastPathComponent;
+    [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:@"RECOVERY explicit retry: preserving current containers in a separate transaction; old backups unchanged"];
+    if (!RH3RecoveryPreserveRetry(RH3RootDirectory, RH3AppGroupDirectory, name, 0, &error)) return error;
+    gSystemInfo.jailbreakInfo.rootPath = NULL;
+    gSystemInfo.jailbreakInfo.jbrand = 0;
+    [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:@"RECOVERY retry preservation complete; selecting a fresh bootstrap"];
+    return nil;
+}
+
+
 + (NSError *)preserveInterruptedRootHideBootstrap
 {
     if (![self rootHidePortEnabled] || geteuid() != 0)
         return RH3RecoveryFailure(@"RootHide preservation requires its enabled privileged installer");
+    if (RH3RecoveryRequested) return [self preserveRequestedRootHideBootstrap];
     NSError *error = nil;
     NSDictionary *journal = RH3RecoveryInspect(RH3RootDirectory, RH3AppGroupDirectory, 0, &error);
     if (error) return error;
@@ -712,7 +838,7 @@ static NSError *RH3LegacyRecoveryEligibility(NSString *root)
     NSDictionary *recovery = RH3RecoveryInspect(RH3RootDirectory, RH3AppGroupDirectory, 0, &error);
     if (error) return error;
     if (recovery && ![recovery[@"Complete"] boolValue])
-        return RH3LegacyRecoveryEligibility(recovery[@"Locations"][0]);
+        return RH3RecoveryRequested ? RH3RetryRecoveryEligibility(recovery[@"Locations"][0]) : RH3LegacyRecoveryEligibility(recovery[@"Locations"][0]);
     NSString *root = [DOBootstrapper rootHideExistingRootWithError:&error];
     if (error) return error;
     if (root) {
@@ -726,6 +852,7 @@ static NSError *RH3LegacyRecoveryEligibility(NSString *root)
             [stage isEqualToString:@"running-script"]) {
             if ([stage isEqualToString:@"running-script"]) {
                 RH3LogInterruptedBootstrapSnapshot(root);
+                if (RH3RecoveryRequested) return RH3RetryRecoveryEligibility(root);
                 if (!recovery) return RH3LegacyRecoveryEligibility(root);
             }
             return RH3Error(BootstrapErrorCodeFailedReplacing,
@@ -1310,7 +1437,9 @@ cleanup_root:
             NSString *name = [NSString stringWithFormat:@".jbroot-%016llX", brand];
             NSDictionary *preserved = RH3RecoveryInspect(RH3RootDirectory, RH3AppGroupDirectory, 0, &error);
             if (error) { completion(error); return; }
-            if ([name isEqual:preserved[@"Name"]]) continue;
+            NSDictionary *originalPreserved = RH3RecoveryInspectJournal(RH3RootDirectory, RH3AppGroupDirectory, 0, RH3RecoveryJournalName, &error);
+            if (error) { completion(error); return; }
+            if ([name isEqual:preserved[@"Name"]] || [name isEqual:originalPreserved[@"Name"]]) continue;
             NSString *candidate = [RH3RootDirectory stringByAppendingPathComponent:name];
             NSString *secondary = [RH3AppGroupDirectory stringByAppendingPathComponent:name];
             if ([fm fileExistsAtPath:candidate] || [fm fileExistsAtPath:secondary]) continue;
@@ -1446,6 +1575,15 @@ cleanup_root:
         }
         scriptEnvironment[kept] = NULL;
 
+        NSError *retryError = nil;
+        NSDictionary *retry = RH3RecoveryInspectJournal(RH3RootDirectory, RH3AppGroupDirectory, 0, RH3RecoveryRetryJournalName, &retryError);
+        BOOL freshRecovery = [retry[@"Complete"] boolValue] && ![retry[@"Name"] isEqual:root.lastPathComponent];
+        if (retryError || (freshRecovery && ![RH3RecoverySHA256(RH3RecoveryReadFile(script, 4096, 0))
+            isEqual:@"c48a3d0c49d5d71f06d0d041330aa53b144591f72bda2208a305be09ca730489"])) {
+            RH3FreeShellEnvironment(scriptEnvironment);
+            return retryError ?: RH3RecoveryFailure(@"Fresh setup script does not match the pinned donor");
+        }
+
         // Write this marker ONLY after both preflights succeed. Once the
         // shell spawn begins it may have side effects even if no reply comes
         // back, so never reset or automatically replay this state.
@@ -1462,28 +1600,41 @@ cleanup_root:
         [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:@"bootstrap: launching shell with NO_PASSWORD_PROMPT=1 (scoped child env)"];
         __block pid_t scriptPid = 0;
         __block int result = -1;
-        dispatch_group_t launch = dispatch_group_create();
-        // The spawn includes child-patching IPC and may itself stall. Ownership
-        // of the private environment stays with the worker even after timeout.
-        dispatch_group_async(launch, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-            result = exec_cmd_env_nowait(&scriptPid, scriptEnvironment, shell.fileSystemRepresentation,
-                                         "-e", script.fileSystemRepresentation, NULL);
+        if (freshRecovery) {
+            result = RH3RunFreshSetup(^int(NSString *label, NSString *command) {
+                return RH3RunRecoveryCommand(label, command, shell, scriptEnvironment);
+            });
             RH3FreeShellEnvironment(scriptEnvironment);
-        });
-        if (dispatch_group_wait(launch, dispatch_time(DISPATCH_TIME_NOW, 20 * NSEC_PER_SEC)) != 0) {
-            [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:@"bootstrap: shell spawn/child-patch timed out; outcome unknown; running-script preserved"];
-            return RH3Error(BootstrapErrorCodeFailedFinalising,
-                @"RootHide shell launch or child patch did not return within 20 seconds. Export the log and fully reboot; do not replay this bootstrap script.");
-        }
-        [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:[NSString stringWithFormat:
-            @"bootstrap: shell spawn returned %d (pid %d)", result, scriptPid]];
-        if (result == 0 && scriptPid > 1) {
-            [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:@"bootstrap: waiting for setup script process exit"];
-            result = RH3WaitForBootstrapChild(scriptPid, 180);
-            if (result == -ETIMEDOUT)
-                [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:@"bootstrap: setup script exceeded 180 seconds; child not killed; running-script preserved"];
-        } else if (result == 0) {
-            result = -1; // Invalid PID: never declare bootstrap success.
+            if (result == 0) {
+                // All donor commands succeeded; remove only this new tree's setup script.
+                int directory = open(root.fileSystemRepresentation, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+                if (directory < 0 || unlinkat(directory, "prep_bootstrap.sh", 0) || fsync(directory)) result = -EIO;
+                if (directory >= 0) close(directory);
+            }
+        } else {
+            dispatch_group_t launch = dispatch_group_create();
+            // The spawn includes child-patching IPC and may itself stall. Ownership
+            // of the private environment stays with the worker even after timeout.
+            dispatch_group_async(launch, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+                result = exec_cmd_env_nowait(&scriptPid, scriptEnvironment, shell.fileSystemRepresentation,
+                                             "-e", script.fileSystemRepresentation, NULL);
+                RH3FreeShellEnvironment(scriptEnvironment);
+            });
+            if (dispatch_group_wait(launch, dispatch_time(DISPATCH_TIME_NOW, 20 * NSEC_PER_SEC)) != 0) {
+                [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:@"bootstrap: shell spawn/child-patch timed out; outcome unknown; running-script preserved"];
+                return RH3Error(BootstrapErrorCodeFailedFinalising,
+                    @"RootHide shell launch or child patch did not return within 20 seconds. Export the log and fully reboot; do not replay this bootstrap script.");
+            }
+            [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:[NSString stringWithFormat:
+                @"bootstrap: shell spawn returned %d (pid %d)", result, scriptPid]];
+            if (result == 0 && scriptPid > 1) {
+                [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:@"bootstrap: waiting for setup script process exit"];
+                result = RH3WaitForBootstrapChild(scriptPid, 180);
+                if (result == -ETIMEDOUT)
+                    [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:@"bootstrap: setup script exceeded 180 seconds; child not killed; running-script preserved"];
+            } else if (result == 0) {
+                result = -1; // Invalid PID: never declare bootstrap success.
+            }
         }
         [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:[NSString stringWithFormat:@"bootstrap: prep_bootstrap.sh returned %d", result]];
         if (result) {
