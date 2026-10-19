@@ -5,7 +5,7 @@ permissions:
   actions: read
   contents: write
 concurrency:
-  group: publish-roothide3-test-19
+  group: publish-roothide3-test-20
   cancel-in-progress: false
 jobs:
   publish:
@@ -16,31 +16,31 @@ jobs:
     steps:
       - name: Download the previously inspected build
         run: |
-          gh api repos/$GH_REPO/actions/artifacts/12212033105/zip > candidate.zip
-          echo '967d180caa2f8a3b6ba3d2930e3b31a053741a91b83e6820abf6c9dfbad9ebe0  candidate.zip' | sha256sum -c -
+          gh api repos/$GH_REPO/actions/artifacts/12225507047/zip > candidate.zip
+          echo 'd20617a29796bf93e279f659c631eea705d922a4b52f21a8e192498d86446b51  candidate.zip' | sha256sum -c -
           python3 - <<'PY'
           import hashlib, pathlib, zipfile
-          name = 'RootHide3-Hardware-Beta-d131ae9.ipa'
+          name = 'RootHide3-Hardware-Beta-09d3946.ipa'
           with zipfile.ZipFile('candidate.zip') as z:
               payload = z.read('Application/RootHide3-Hardware-Beta.ipa')
-          expected = '88e721711a9de582902c31878802528c9e50725c2a2ac5ae5d075d0c0829978e'
+          expected = 'bc0736fa7ce8ec1f069176e6b8cade8f414b69c98c96c3b0537670d6d2ab1ccd'
           assert hashlib.sha256(payload).hexdigest() == expected
           pathlib.Path(name).write_bytes(payload)
           pathlib.Path(name+'.sha256').write_text(expected+'  '+name+'\n')
           PY
       - name: Verify the existing prerelease draft
         run: |
-          gh api repos/$GH_REPO/releases/417611340 > release.json
+          gh api repos/$GH_REPO/releases/417810621 > release.json
           python3 - <<'PY'
           import json, pathlib
           r = json.loads(pathlib.Path('release.json').read_text())
-          assert r['tag_name'] == 'roothide3-test-19' and r['prerelease'] and r['draft']
-          assert r['target_commitish'] == 'd131ae90b0d9e632366f0495f356b7453ccd95a0'
+          assert r['tag_name'] == 'roothide3-test-20' and r['prerelease'] and r['draft']
+          assert r['target_commitish'] == '09d39461048220837f6e7253d5ba00cfafc1045d'
           assert not r['assets'], 'Draft already has assets; inspect them before resuming'
-          pathlib.Path('LEEME-d131ae9-candidata.txt').write_text('RootHide 3 — Corrección del reinicio d131ae9\n\n'+r['body'], encoding='utf-8')
+          pathlib.Path('LEEME-09d3946-candidata.txt').write_text('RootHide 3 — Enlaces y controles de las apps 09d3946\n\n'+r['body'], encoding='utf-8')
           PY
       - name: Upload and publish the inspected IPA
         run: |
-          gh release upload roothide3-test-19 RootHide3-Hardware-Beta-d131ae9.ipa RootHide3-Hardware-Beta-d131ae9.ipa.sha256 LEEME-d131ae9-candidata.txt
+          gh release upload roothide3-test-20 RootHide3-Hardware-Beta-09d3946.ipa RootHide3-Hardware-Beta-09d3946.ipa.sha256 LEEME-09d3946-candidata.txt
           echo '{"draft":false,"prerelease":true,"make_latest":"false"}' > publish.json
-          gh api --method PATCH repos/$GH_REPO/releases/417611340 --input publish.json > published.json
+          gh api --method PATCH repos/$GH_REPO/releases/417810621 --input publish.json > published.json
