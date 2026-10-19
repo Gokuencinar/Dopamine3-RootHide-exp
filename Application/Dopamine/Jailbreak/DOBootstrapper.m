@@ -1474,6 +1474,28 @@ cleanup_root:
     completion(error);
 }
 
+- (NSArray<NSString *> *)rootHideSelectedManagerPackagesWithError:(NSError **)error
+{
+    NSMutableArray<NSString *> *paths = [NSMutableArray new];
+    for (NSDictionary *manager in [[DOUIManager sharedInstance] enabledPackageManagers]) {
+        NSString *stockPackage = manager[@"Package"];
+        NSString *package = [stockPackage isEqualToString:@"sileo.deb"] ? @"roothide_sileo.deb" :
+                            ([stockPackage isEqualToString:@"zebra.deb"] ? @"roothide_zebra.deb" : nil);
+        NSString *path = package ? [NSBundle.mainBundle.bundlePath stringByAppendingPathComponent:package] : nil;
+        struct stat st;
+        if (!path || lstat(path.fileSystemRepresentation, &st) || !S_ISREG(st.st_mode)) {
+            if (error) *error = RH3Error(BootstrapErrorCodeFailedFinalising, @"Unsupported or missing bundled RootHide package manager");
+            return nil;
+        }
+        [paths addObject:path];
+    }
+    if (!paths.count) {
+        if (error) *error = RH3Error(BootstrapErrorCodeFailedFinalising, @"Select at least one package manager");
+        return nil;
+    }
+    return paths;
+}
+
 - (NSError *)repairRootHideAppLinks
 {
     NSString *root = JBROOT_PATH(@"");
@@ -2253,16 +2275,10 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
     if ([DOBootstrapper rootHidePortEnabled]) {
         // RootHide's arm64e managers are intentionally bundled under distinct
         // names so stock Dopamine's package selection never sees them.
-        for (NSDictionary *manager in [[DOUIManager sharedInstance] enabledPackageManagers]) {
-            NSString *stockPackage = manager[@"Package"];
-            NSString *package = nil;
-            if ([stockPackage isEqualToString:@"sileo.deb"]) package = @"roothide_sileo.deb";
-            else if ([stockPackage isEqualToString:@"zebra.deb"]) package = @"roothide_zebra.deb";
-            if (!package) {
-                return RH3Error(BootstrapErrorCodeFailedFinalising,
-                                [NSString stringWithFormat:@"Unsupported RootHide package manager: %@", stockPackage]);
-            }
-            NSString *path = [NSBundle.mainBundle.bundlePath stringByAppendingPathComponent:package];
+        NSError *selectionError = nil;
+        NSArray<NSString *> *packages = [self rootHideSelectedManagerPackagesWithError:&selectionError];
+        if (!packages) return selectionError;
+        for (NSString *path in packages) {
             if (geteuid() != 0)
                 return RH3Error(BootstrapErrorCodeFailedFinalising,
                                 @"RootHide package installation requires root privileges");
@@ -2271,10 +2287,10 @@ NSString *const bootstrapErrorDomain = @"BootstrapErrorDomain";
             if (!status) status = exec_cmd_nowait(&pid, JBROOT_PATH("/usr/bin/dpkg"), "-i", path.fileSystemRepresentation, NULL);
             if (!status) status = RH3WaitForBootstrapChild(pid, 120);
             [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
-                [NSString stringWithFormat:@"packages: %@ result=%d", package, status]];
+                [NSString stringWithFormat:@"packages: %@ result=%d", path.lastPathComponent, status]];
             if (status != 0) {
                 return RH3Error(BootstrapErrorCodeFailedFinalising,
-                                [NSString stringWithFormat:@"Installing %@ failed (%d)", package, status]);
+                                [NSString stringWithFormat:@"Installing %@ failed (%d)", path.lastPathComponent, status]);
             }
         }
         return nil;

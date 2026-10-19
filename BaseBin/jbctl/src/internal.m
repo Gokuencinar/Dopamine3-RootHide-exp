@@ -3,6 +3,9 @@
 #import <libjailbreak/libjailbreak.h>
 #import <sys/mount.h>
 #import <libjailbreak/stock_fixes.h>
+#include <libjailbreak/roothider/common.h>
+#include <sys/wait.h>
+#include <errno.h>
 
 SInt32 CFUserNotificationDisplayAlert(CFTimeInterval timeout, CFOptionFlags flags, CFURLRef iconURL, CFURLRef soundURL, CFURLRef localizationURL, CFStringRef alertHeader, CFStringRef alertMessage, CFStringRef defaultButtonTitle, CFStringRef alternateButtonTitle, CFStringRef otherButtonTitle, CFOptionFlags *responseFlags) API_AVAILABLE(ios(3.0));
 
@@ -183,6 +186,18 @@ int jbctl_handle_internal(const char *command, int argc, char* argv[])
 		if (argc > 1) {
 			extern char **environ;
 			const char *dpkg = JBROOT_PATH("/usr/bin/dpkg");
+			if (jbclient_roothide_jailbroken()) {
+				int result = jbclient_trust_executable_recurse(dpkg, NULL);
+				pid_t child = 0;
+				char *args[] = {(char *)dpkg, "-i", argv[1], NULL};
+				if (!result) result = exec_cmd_roothide_spawn(&child, dpkg, NULL, NULL, args, environ);
+				if (result || child <= 1) return result ?: ECHILD;
+				int raw = cmd_wait_for_exit(child);
+				if (raw < 0) return ECHILD;
+				if (WIFEXITED(raw)) return WEXITSTATUS(raw);
+				if (WIFSIGNALED(raw)) return 128 + WTERMSIG(raw);
+				return EIO;
+			}
 			int r = execve(dpkg, (char *const *)(const char *[]){dpkg, "-i", argv[1], NULL}, environ);
 			return r;
 		}

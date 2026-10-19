@@ -33,6 +33,17 @@ class AppControls(unittest.TestCase):
         respring = ctl.split('else if (!strcmp(cmd, "respring"))',1)[1].split('else if (!strcmp(cmd, "rebuild_icon_cache"))',1)[0]
         self.assertIn('jbclient_roothide_jailbroken()',respring)
         self.assertNotIn('roothide_is_active()',respring)
+        command = env.split('- (int)rh3RunCommand:',1)[1].split('- (int)refreshJailbreakApps',1)[0]
+        self.assertIn('exec_cmd_roothide_spawn(&pid',command)
+        self.assertNotIn('return posix_spawn(',command)
+        reinstall = env.split('- (NSError *)reinstallPackageManagers',1)[1].split('- (NSError *)updateBootLogo',1)[0]
+        self.assertIn('spawnJbctlAsRootWithArgs:@[@"internal", @"install_pkg", path]',reinstall)
+        self.assertIn('rootHideSelectedManagerPackagesWithError:',reinstall)
+        internal = (ROOT/'BaseBin/jbctl/src/internal.m').read_text().split('else if (!strcmp(command, "install_pkg"))',1)[1]
+        rootInstall = internal.split('int r = execve(',1)[0]
+        self.assertIn('exec_cmd_roothide_spawn(&child',rootInstall)
+        self.assertIn('WEXITSTATUS(raw)',rootInstall)
+        self.assertIn('128 + WTERMSIG(raw)',rootInstall)
 
     @unittest.skipUnless(sys.platform == 'darwin', 'native rooted bundle backlink tests')
     def test_links_survive_root_rename_and_refuse_directory_replacement_or_escape(self):

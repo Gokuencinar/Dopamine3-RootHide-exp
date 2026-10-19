@@ -540,7 +540,8 @@ static BOOL DOUsesLegacyJbctl(NSString *version)
     if (r != 0 || pid <= 0) return r != 0 ? r : ECHILD;
     if ([DOBootstrapper rootHidePortEnabled]) {
         int raw = -1;
-        int result = RH3WaitForBootstrapChildStatus(pid, 30, &raw);
+        BOOL installing = args.count > 1 && [args[0] isEqualToString:@"internal"] && [args[1] isEqualToString:@"install_pkg"];
+        int result = RH3WaitForBootstrapChildStatus(pid, installing ? 120 : 30, &raw);
         [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
             [NSString stringWithFormat:@"RootHide jbctl: pid=%d raw_wait=%d result=%d", pid, raw, result]];
         return result < 0 ? -result : result;
@@ -607,7 +608,7 @@ static BOOL DOUsesLegacyJbctl(NSString *version)
     if (!result) result = [self rh3PerformPrivilegedAction:^int{
         int trust = jbclient_trust_executable_recurse(binary.fileSystemRepresentation, NULL);
         if (trust) return [self rh3ActionStage:@"command trust" result:trust];
-        return posix_spawn(&pid, argv[0], &actions, NULL, argv, environ);
+        return exec_cmd_roothide_spawn(&pid, argv[0], &actions, NULL, argv, environ);
     }];
     if (initialized) posix_spawn_file_actions_destroy(&actions);
     for (NSUInteger i = 0; i <= arguments.count; i++) free(argv[i]);
@@ -1111,9 +1112,17 @@ static BOOL DOUsesLegacyJbctl(NSString *version)
 {
     if ([DOBootstrapper rootHidePortEnabled]) {
         __block NSError *error = nil;
-        int result = [self rh3PerformPrivilegedAction:^int{
-            error = [self->_bootstrapper installPackageManagers];
-            if (!error) error = [self->_bootstrapper repairRootHideAppLinks];
+        NSArray<NSString *> *packages = [self->_bootstrapper rootHideSelectedManagerPackagesWithError:&error];
+        if (!packages) return error;
+        int result = 0;
+        for (NSString *path in packages) {
+            // jbctl establishes real uid 0 after the app restores its own
+            // credentials. dpkg must not inherit the app's real uid 501.
+            result = [self spawnJbctlAsRootWithArgs:@[@"internal", @"install_pkg", path]];
+            if (result) break;
+        }
+        if (!result) result = [self rh3PerformPrivilegedAction:^int{
+            error = [self->_bootstrapper repairRootHideAppLinks];
             return error ? (int)error.code : 0;
         }];
         [self rh3ActionStage:@"reinstall package managers" result:result];
