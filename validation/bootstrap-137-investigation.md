@@ -31,9 +31,12 @@ flags del llamador y cancela el seguimiento si falla SETEXEC. Si el daemon
 rechaza un hijo recién creado, se termina y recoge ese hijo; no se deja
 ejecutar sin preparar. DriverKit y Dopamine sin RootHide siguen su recorrido.
 Los hijos inyectados conservan además DYLD_IN_CACHE=0.
+El puntero de salida del PID llega al kernel sin sustituirse, siguiendo el
+[arreglo 4c781be de RootHide](https://github.com/roothide/Dopamine2-roothide/commit/4c781be0d5b7402995756fce2e38b9d648c3883c).
 
 Se usa el daemon existente y sus comprobaciones de parentesco y audit token.
 No se añaden acciones privilegiadas al servidor de launchd.
+El código compartido excluye PID 1 de las consultas XPC al propio launchd.
 
 ## Qué falta comprobar
 

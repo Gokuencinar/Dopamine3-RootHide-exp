@@ -32,6 +32,7 @@ class SpawnLifecycleTests(unittest.TestCase):
 extern char **environ;
 static int channel[2], patches, starts, cancels, calls;
 static bool reject;
+static pid_t *expectedSlot;
 static int patch(pid_t pid, bool resume) {
     patches++;
     char ch;
@@ -50,12 +51,14 @@ int main(void) {
     CHECK(posix_spawnattr_init(&attributes) == 0, 2);
     int (^spawn)(pid_t *) = ^int(pid_t *pid) {
         calls++;
+        if (pid != expectedSlot) return EFAULT;
         char *args[] = {"sh", "-c", "printf x >&8", NULL};
         return posix_spawn(pid, "/bin/sh", &actions, &attributes, args, environ);
     };
     int (^start)(bool) = ^int(bool resume) { starts++; return 0; };
     int (^cancel)(void) = ^int(void) { cancels++; return 0; };
     pid_t pid = 0;
+    expectedSlot = &pid;
     CHECK(rh3_spawn_patched(&pid, &attributes, false, spawn, patch, start, cancel) == 0, 3);
     int status;
     CHECK(waitpid(pid, &status, 0) == pid && WIFEXITED(status) && WEXITSTATUS(status) == 0, 4);

@@ -24,8 +24,12 @@ static int rh3_spawn_patched(pid_t *pidOut, posix_spawnattr_t *attributes, bool 
         posix_spawnattr_setflags(attributes, flags);
         return EIO;
     }
-    pid_t child = 0;
-    int result = spawn(&child);
+    // Keep the caller's PID pointer all the way to the kernel, as fixed in
+    // RootHide upstream 4c781be. A private temporary is only for NULL callers.
+    pid_t temporary = 0;
+    pid_t *slot = pidOut ? pidOut : &temporary;
+    int result = spawn(slot);
+    pid_t child = result == 0 ? *slot : 0;
     int restored = posix_spawnattr_setflags(attributes, flags);
     // Successful SETEXEC never returns. Cancel the watcher on failed exec.
     if (setexec) {
