@@ -19,3 +19,16 @@ marcas permiten investigar el panic; no son una corrección demostrada del mismo
 
 Actualiza sin borrar la app. Mantén desactivadas recuperación y eliminación del
 jailbreak. El bootstrap instalado se reutiliza y el script no vuelve a ejecutarse.
+
+El intento 90d8f3d ya registra el diagnóstico y actualiza las apps. Sus últimas
+marcas llegan a la llamada de reexec; no aparece la entrada del nuevo hook.
+El panic repite los mismos frames que a566e9e.
+
+Faltaba el paso que usa RootHide 2 para arrancar launchd suspendido y prepararlo
+desde Boomerang antes de reanudarlo. El port restaura ambos lados juntos, solo
+con RootHide activo. Boomerang espera hasta diez segundos a que PID 1 esté
+suspendido; si la preparación falla, no lo reanuda. El log distingue espera,
+preparación, reanudación y retorno inesperado de la llamada al kernel.
+
+Esto corrige una omisión del código. Todavía no demuestra la causa exacta del
+SIGTRAP ni que el reinicio vaya a completar en el iPhone.

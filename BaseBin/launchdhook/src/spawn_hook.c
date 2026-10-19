@@ -159,6 +159,17 @@ int __posix_spawn_hook(pid_t *restrict pid, const char *restrict path,
 		uint32_t bufsize = sizeof(executablePath);
 		_NSGetExecutablePath(&executablePath[0], &bufsize);
 		if (!strcmp(path, executablePath)) {
+			bool rootHideHandoff = roothide_is_active();
+			short originalFlags = 0;
+			if (rootHideHandoff) {
+				if (!desc || !desc->attrp) return EINVAL;
+				int result = posix_spawnattr_getflags(&desc->attrp, &originalFlags);
+				if (result != 0) return result;
+				if (!(originalFlags & POSIX_SPAWN_SETEXEC)) return EINVAL;
+				result = posix_spawnattr_setflags(&desc->attrp, originalFlags | POSIX_SPAWN_START_SUSPENDED);
+				if (result != 0) return result;
+				rh3_bootlog("userspace re-exec: suspended launchd handoff enabled");
+			}
 			// This spawn will perform a userspace reboot...
 			// Instead of the ordinary hook, we want to reinsert this dylib
 			// This has already been done in envp so we only need to call the original posix_spawn
@@ -209,7 +220,16 @@ int __posix_spawn_hook(pid_t *restrict pid, const char *restrict path,
 			// In that case envp may point to garbage or be empty
 			// Say goodbye to this process
 			rh3_bootlog("userspace re-exec: entering kernel spawn");
-			return __posix_spawn_orig_wrapper(pid, path, desc, argv, environ);
+			int result = __posix_spawn_orig_wrapper(pid, path, desc, argv, environ);
+			int spawnError = errno;
+			if (rootHideHandoff) {
+				char stage[128];
+				snprintf(stage, sizeof(stage), "userspace re-exec: kernel spawn RETURNED result=%d errno=%d", result, spawnError);
+				rh3_bootlog(stage);
+				(void)posix_spawnattr_setflags(&desc->attrp, originalFlags);
+			}
+			errno = spawnError;
+			return result;
 		}
 	}
 

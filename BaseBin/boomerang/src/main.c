@@ -8,6 +8,9 @@
 #include <libjailbreak/kcall_arm64.h>
 #include <libjailbreak/jbserver_boomerang.h>
 #include <libjailbreak/stock_fixes.h>
+#include <libjailbreak/roothider.h>
+#include <libjailbreak/roothide_bootlog.h>
+#include "roothide_handoff.h"
 
 int main(int argc, char* argv[])
 {
@@ -51,10 +54,21 @@ int main(int argc, char* argv[])
 	mach_port_deallocate(mach_task_self(), launchdTaskPort);
 
 	// Retrieve primitives
-	jbclient_initialize_primitives_internal(false);
+	int primitiveStatus = jbclient_initialize_primitives_internal(false);
+	bool rootHideHandoff = roothide_is_active();
+	if (primitiveStatus != 0 && rootHideHandoff) return primitiveStatus;
 
 	// Send done message to launchd
 	jbclient_boomerang_done();
+	if (rootHideHandoff) {
+		int result = rh3_prepare_reexecuted_launchd();
+		if (result != 0) {
+			char stage[128];
+			snprintf(stage, sizeof(stage), "boomerang: launchd handoff FAILED result=%d", result);
+			rh3_bootlog(stage);
+			return result;
+		}
+	}
 
 	// Now make our server run so that launchd can get everything back
 	dispatch_main();

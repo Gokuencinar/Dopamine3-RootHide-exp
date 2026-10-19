@@ -7,6 +7,45 @@ import tempfile
 import unittest
 ROOT=Path(__file__).resolve().parents[2]
 class BootTransition(unittest.TestCase):
+    def test_root_hide_self_exec_and_boomerang_preparation_are_paired(self):
+        spawn=(ROOT/'BaseBin/launchdhook/src/spawn_hook.c').read_text()
+        handoff=spawn.split('if (!strcmp(path, executablePath))',1)[1].split('#if LOG_PROCESS_LAUNCHES',1)[0]
+        self.assertIn('bool rootHideHandoff = roothide_is_active()',handoff)
+        self.assertIn('originalFlags & POSIX_SPAWN_SETEXEC',handoff)
+        self.assertIn('originalFlags | POSIX_SPAWN_START_SUSPENDED',handoff)
+        boomerang=(ROOT/'BaseBin/boomerang/src/main.c').read_text()
+        self.assertLess(boomerang.index('jbclient_initialize_primitives_internal(false)'),boomerang.index('jbclient_boomerang_done()'))
+        self.assertLess(boomerang.index('jbclient_boomerang_done()'),boomerang.index('rh3_prepare_reexecuted_launchd()'))
+        self.assertLess(boomerang.index('rh3_prepare_reexecuted_launchd()'),boomerang.index('dispatch_main()'))
+        self.assertIn('if (rootHideHandoff)',boomerang)
+
+    @unittest.skipUnless(sys.platform=='darwin','native bounded handoff state test')
+    def test_handoff_never_patches_running_launchd_or_resumes_failed_patch(self):
+        self.run_native(r'''
+#include <stdbool.h>
+#include <signal.h>
+#include <unistd.h>
+#include <errno.h>
+static int calls,patches,resumes,stoppedAfter,probeError,patchError,resumeError;
+static void rh3_bootlog(const char *s){(void)s;}
+int proc_paused(pid_t p,bool *stopped){if(p!=1)return -1;calls++;*stopped=calls>stoppedAfter;return probeError;}
+static int roothide_patch_proc(pid_t p){if(p!=1)return -2;patches++;return patchError;}
+static int fake_sleep(useconds_t delay){(void)delay;return 0;}
+static int fake_kill(pid_t p,int sig){if(p!=1||sig!=SIGCONT)return -1;resumes++;errno=resumeError;return resumeError?-1:0;}
+#define usleep fake_sleep
+#define kill fake_kill
+#include "roothide_handoff.h"
+static void reset(void){calls=patches=resumes=stoppedAfter=probeError=patchError=resumeError=0;}
+int main(void){
+ reset();stoppedAfter=3;if(rh3_prepare_reexecuted_launchd()||calls!=4||patches!=1||resumes!=1)return 1;
+ reset();stoppedAfter=2000;if(rh3_prepare_reexecuted_launchd()!=ETIMEDOUT||calls!=1000||patches||resumes)return 2;
+ reset();probeError=-1;if(rh3_prepare_reexecuted_launchd()!=ESRCH||patches||resumes)return 3;
+ reset();patchError=77;if(rh3_prepare_reexecuted_launchd()!=77||patches!=1||resumes)return 4;
+ reset();resumeError=EPERM;if(rh3_prepare_reexecuted_launchd()!=EPERM||patches!=1||resumes!=1)return 5;
+ return 0;
+}
+''','BaseBin/boomerang/src',False)
+
     def test_dopamine_dispatch_bound_includes_every_registered_action(self):
         enums=(ROOT/'BaseBin/libjailbreak/src/jbserver_domains.h').read_text()
         block=enums.split('// Domain: Dopamine',1)[1].split('};',1)[0]
