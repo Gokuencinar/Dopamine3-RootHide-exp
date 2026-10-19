@@ -21,10 +21,15 @@ class ForensicsContract(unittest.TestCase):
     def test_real_report_filtering_and_filesystem_boundaries(self):
         source = r'''
 #import "RootHideForensics.h"
+#include <stdlib.h>
+#include <limits.h>
 int main(void) { @autoreleasepool {
     NSFileManager *fm = NSFileManager.defaultManager;
     NSString *directory = [[NSTemporaryDirectory() stringByAppendingPathComponent:NSUUID.UUID.UUIDString] stringByResolvingSymlinksInPath];
     [fm createDirectoryAtPath:directory withIntermediateDirectories:YES attributes:nil error:nil];
+    char resolved[PATH_MAX];
+    if (!realpath(directory.fileSystemRepresentation, resolved)) return 8;
+    directory = [NSString stringWithUTF8String:resolved];
     NSString *report = @"{\"timestamp\":\"2026-10-19 08:34:28.000 +0200\"}\n{\"procName\":\"dash\",\"pid\":416,\"termination\":{\"namespace\":\"CODESIGNING\",\"code\":2},\"crashReporterKey\":\"SECRET\"}";
     NSString *path = [directory stringByAppendingPathComponent:@"dash-test.ips"];
     [report writeToFile:path atomically:YES encoding:NSUTF8StringEncoding error:nil];
