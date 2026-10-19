@@ -8,6 +8,7 @@ ROOT = Path(__file__).resolve().parents[2]
 class AppControls(unittest.TestCase):
     def test_repairs_existing_install_and_reports_controls_without_main_thread_wait(self):
         bootstrap = (ROOT/'Application/Dopamine/Jailbreak/DOBootstrapper.m').read_text()
+        self.assertNotIn('JBROOT_PATH(@"")', bootstrap)
         finalize = bootstrap.split('- (NSError *)finalizeRootHideBootstrap\n', 1)[1].split('- (NSError *)deleteRootHideBootstrap', 1)[0]
         self.assertIn('NSError *appLinksError = [self repairRootHideAppLinks]', finalize)
         self.assertLess(finalize.index('repairRootHideAppLinks'), finalize.index('RootHide finalization committed'))
@@ -44,6 +45,66 @@ class AppControls(unittest.TestCase):
         self.assertIn('exec_cmd_roothide_spawn(&child',rootInstall)
         self.assertIn('WEXITSTATUS(raw)',rootInstall)
         self.assertIn('128 + WTERMSIG(raw)',rootInstall)
+
+    @unittest.skipUnless(sys.platform == 'darwin', 'native Foundation root-path regression')
+    def test_app_link_root_resolution_rejects_missing_root_without_throwing(self):
+        source = (ROOT/'Application/Dopamine/Jailbreak/DOBootstrapper.m').read_text()
+        method = '- (NSError *)repairRootHideAppLinks\n' + source.split(
+            '- (NSError *)repairRootHideAppLinks\n', 1)[1].split(
+            '- (NSError *)finalizeRootHideBootstrap\n', 1)[0]
+        # Execute the production method with real Foundation. Only privilege and
+        # root ownership validation are fixtures; no device or root mutations.
+        prefix = r'''
+#import <Foundation/Foundation.h>
+#include "RootHideAppLinks.h"
+static struct { struct { char *rootPath; } jailbreakInfo; } gSystemInfo;
+static NSString *validatedRoot;
+static int directoriesChecked;
+static NSString *lastStage;
+char *get_jbroot(void) { return gSystemInfo.jailbreakInfo.rootPath; }
+'''
+        prefix += '#include "' + (ROOT/'BaseBin/libjailbreak/src/jbroot.h').as_posix() + '"\n'
+        prefix += r'''
+#define geteuid() ((uid_t)0)
+enum { BootstrapErrorCodeFailedFinalising = 1 };
+static NSError *RH3Error(int code, NSString *message) {
+ return [NSError errorWithDomain:@"test" code:code userInfo:@{NSLocalizedDescriptionKey:message}];
+}
+static BOOL RH3IsRealDirectory(NSString *path) {
+ directoriesChecked++; return NO;
+}
+@interface DOUIManager : NSObject
++ (instancetype)sharedInstance;
+- (void)rh3RecordDiagnosticStage:(NSString *)stage;
+@end
+@implementation DOUIManager
++ (instancetype)sharedInstance { static DOUIManager *m; if(!m)m=[self new]; return m; }
+- (void)rh3RecordDiagnosticStage:(NSString *)stage { lastStage=stage; }
+@end
+@interface DOBootstrapper : NSObject
++ (uint64_t)rootHideBrandForPath:(NSString *)path;
+- (NSError *)repairRootHideAppLinks;
+@end
+@implementation DOBootstrapper
++ (uint64_t)rootHideBrandForPath:(NSString *)path { validatedRoot=path; return path.length ? 1 : 0; }
+'''
+        boot.BootTransition().run_native(prefix + method + r'''
+@end
+int main(void) { @autoreleasepool {
+ DOBootstrapper *bootstrapper=[DOBootstrapper new];
+ @try {
+  gSystemInfo.jailbreakInfo.rootPath=NULL;
+  if(![bootstrapper repairRootHideAppLinks] || validatedRoot || directoriesChecked)return 1;
+  gSystemInfo.jailbreakInfo.rootPath="";
+  if(![bootstrapper repairRootHideAppLinks] || validatedRoot.length || directoriesChecked)return 2;
+  gSystemInfo.jailbreakInfo.rootPath="/var/containers/Bundle/Application/.jbroot-5F98E2BB506DEF4C";
+  if(![bootstrapper repairRootHideAppLinks] || directoriesChecked!=1)return 3;
+  if(![validatedRoot isEqualToString:@"/var/containers/Bundle/Application/.jbroot-5F98E2BB506DEF4C"])return 4;
+  if(![lastStage isEqualToString:@"apps: loader backlinks repair starting"])return 5;
+ } @catch(NSException *exception) { return 6; }
+ return 0;
+}}
+''', 'Application/Dopamine/Jailbreak', True)
 
     @unittest.skipUnless(sys.platform == 'darwin', 'native rooted bundle backlink tests')
     def test_links_survive_root_rename_and_refuse_directory_replacement_or_escape(self):

@@ -1498,7 +1498,9 @@ cleanup_root:
 
 - (NSError *)repairRootHideAppLinks
 {
-    NSString *root = JBROOT_PATH(@"");
+    [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:@"apps: loader backlinks repair starting"];
+    NSString *root = gSystemInfo.jailbreakInfo.rootPath
+        ? [NSString stringWithUTF8String:gSystemInfo.jailbreakInfo.rootPath] : nil;
     if (geteuid() != 0 || ![DOBootstrapper rootHideBrandForPath:root] || !RH3IsRealDirectory(root))
         return RH3Error(BootstrapErrorCodeFailedFinalising, @"Cannot repair app links without the active owned RootHide root");
     NSString *library = [root stringByAppendingPathComponent:@"usr/lib/libroothide.dylib"];
