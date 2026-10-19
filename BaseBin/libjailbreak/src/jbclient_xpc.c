@@ -537,3 +537,14 @@ int jbclient_dopamine_drop_root(void)
 	}
 	return -1;
 }
+int jbclient_dopamine_roothide_bootlog(int fd)
+{
+    xpc_object_t args=xpc_dictionary_create_empty();
+    xpc_dictionary_set_fd(args,"log-fd",fd);
+    xpc_object_t reply=jbserver_xpc_send(JBS_DOMAIN_DOPAMINE,JBS_DOPAMINE_ROOTHIDE_BOOTLOG,args);
+    xpc_release(args);
+    if(!reply) return -1;
+    xpc_object_t value=xpc_dictionary_get_value(reply,"result");
+    int result=value && xpc_get_type(value)==XPC_TYPE_INT64 ? (int)xpc_int64_get_value(value) : -1;
+    xpc_release(reply); return result;
+}

@@ -1,3 +1,4 @@
+#include <libjailbreak/roothide_bootlog.h>
 #include <spawn.h>
 #include "../systemhook/src/common/common.h"
 #include "boomerang.h"
@@ -179,7 +180,9 @@ int __posix_spawn_hook(pid_t *restrict pid, const char *restrict path,
 #endif
 
 			// Before the userspace reboot, we want to stash the primitives into boomerang
+			rh3_bootlog("userspace re-exec: stashing primitives");
 			boomerang_stashPrimitives();
+			rh3_bootlog("userspace re-exec: primitives stashed");
 
 			// Fix Xcode debugging being broken after the userspace reboot
 			if (__builtin_available(iOS 17.0, *)) {
@@ -205,6 +208,7 @@ int __posix_spawn_hook(pid_t *restrict pid, const char *restrict path,
 			// setenv / unsetenv can sometimes cause environ to get reallocated
 			// In that case envp may point to garbage or be empty
 			// Say goodbye to this process
+			rh3_bootlog("userspace re-exec: entering kernel spawn");
 			return __posix_spawn_orig_wrapper(pid, path, desc, argv, environ);
 		}
 	}

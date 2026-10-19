@@ -1,4 +1,5 @@
 #import <Foundation/Foundation.h>
+#include <libjailbreak/roothide_bootlog.h>
 #import <libjailbreak/libjailbreak.h>
 #import <libjailbreak/jbserver.h>
 #import <libjailbreak/util.h>
@@ -84,14 +85,18 @@ int sysctlbyname_hook(const char *name, void *oldp, size_t *oldlenp, void *newp,
 {
 	int r = sysctlbyname_orig(name, oldp, oldlenp, newp, newlen);
 	if (!strcmp(name, "kern.willuserspacereboot")) {
+		rh3_bootlog("boot logo starting");
 		draw_boot_logo(JBROOT_PATH("/basebin/bootlogo.jp2"));
+		rh3_bootlog("boot logo finished");
 	}
 	return r;
 }
 
 __attribute__((constructor)) static void initializer(void)
 {
+	rh3_bootlog("launchdhook constructor entered");
 	crashreporter_start();
+	rh3_bootlog("crashreporter started");
 
 	// Retrieve jbroot path early based on our dylib path (<JBROOT>/basebin/launchd) so we can use JBROOT_PATH before boomerang_recoverPrimitives
 	@autoreleasepool {
@@ -136,7 +141,9 @@ __attribute__((constructor)) static void initializer(void)
 		firstLoad = true;
 	}
 
+	rh3_bootlog("boomerang recovery starting");
 	int err = boomerang_recoverPrimitives(firstLoad, true);
+	rh3_bootlog(err ? "boomerang recovery FAILED" : "boomerang recovery completed");
 	if (err != 0) {
 		char msg[1000];
 		snprintf(msg, 1000, "Dopamine: Failed to recover primitives (error %d), cannot continue.", err);
@@ -177,17 +184,29 @@ __attribute__((constructor)) static void initializer(void)
 		init_hookd_external_support();
 	}
 
+	rh3_bootlog("initXPCHooks starting");
 	initXPCHooks();
+	rh3_bootlog("initXPCHooks completed");
+	rh3_bootlog("initDaemonHooks starting");
 	initDaemonHooks();
+	rh3_bootlog("initDaemonHooks completed");
+	rh3_bootlog("initSpawnHooks starting");
 	initSpawnHooks();
+	rh3_bootlog("initSpawnHooks completed");
+	rh3_bootlog("initIPCHooks starting");
 	initIPCHooks();
+	rh3_bootlog("initIPCHooks completed");
+	rh3_bootlog("initJetsamHook starting");
 	initJetsamHook();
+	rh3_bootlog("initJetsamHook completed");
 
 	// RootHide's patch daemon is separate from Dopamine 3's hookd. Never
 	// initialize it for a normal /private/preboot Dopamine environment.
 	if (roothide_is_active() &&
 	    access(JBROOT_PATH("/basebin/jailbreakd"), X_OK) == 0) {
+		rh3_bootlog("RootHide daemon starting");
 		int rootHideInitStatus = initJailbreakd(firstLoad, &gGlobalServer);
+		rh3_bootlog(rootHideInitStatus ? "RootHide daemon FAILED" : "RootHide daemon ready");
 		if (rootHideInitStatus != 0) {
 			JBLogError("RootHide jailbreakd initialization failed: %d", rootHideInitStatus);
 		}
@@ -220,6 +239,7 @@ __attribute__((constructor)) static void initializer(void)
 	// Mark Dopamine as having been initialized before
 	setenv("DOPAMINE_INITIALIZED", "1", 1);
 
+	rh3_bootlog("launchdhook constructor completed");
 	// Set an identifier that uniquely identifies this userspace boot
 	// Part of rootless v2 spec
 	setenv("LAUNCHD_UUID", [NSUUID UUID].UUIDString.UTF8String, 1);

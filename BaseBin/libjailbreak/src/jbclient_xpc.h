@@ -62,4 +62,6 @@ int jbclient_roothide_patch_child(pid_t pid, bool resume);
 int jbclient_roothide_exec_start(const char *path, bool resume);
 int jbclient_roothide_exec_cancel(const char *path);
 
+int jbclient_dopamine_roothide_bootlog(int fd);
+
 #endif

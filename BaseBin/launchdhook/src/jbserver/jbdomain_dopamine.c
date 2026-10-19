@@ -4,6 +4,8 @@
 #include <libjailbreak/codesign.h>
 #include <libjailbreak/libjailbreak.h>
 #include <libproc.h>
+#include <libjailbreak/roothider/common.h>
+#include <libjailbreak/roothide_bootlog.h>
 
 static char *read_file_to_string(const char *path) {
     FILE *fp = fopen(path, "rb");
@@ -106,6 +108,11 @@ int dopamine_drop_root(audit_token_t *processToken)
 	return 1;
 }
 
+static int dopamine_roothide_bootlog(int fd)
+{
+    return roothide_is_active() ? rh3_bootlog_configure(fd) : ENOTSUP;
+}
+
 struct jbserver_domain gDopamineDomain = {
 	.permissionHandler = dopamine_domain_allowed,
 	.actions = {
@@ -133,6 +140,11 @@ struct jbserver_domain gDopamineDomain = {
 				{ 0 },
 			},
 		},
-		{ 0 },
-	},
+        // App-only domain; stock Dopamine cannot enable this recorder.
+        {
+            .handler = dopamine_roothide_bootlog,
+            .args = (jbserver_arg[]){{ .name = "log-fd", .type = JBS_TYPE_FD }, {0}},
+        },
+        { 0 },
+    },
 };

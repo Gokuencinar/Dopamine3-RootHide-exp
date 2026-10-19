@@ -7,6 +7,8 @@
 
 #import "DOJailbreaker.h"
 #import "RootHideBootstrapProfile.h"
+#import "RootHideAppRegistration.h"
+#import "RootHideScriptWait.h"
 #import "DOEnvironmentManager.h"
 #import "DOExploitManager.h"
 #import "DOUIManager.h"
@@ -707,6 +709,7 @@ static void *rh3_boomerang_server(void *opaque)
 - (NSError *)ensureNoDuplicateApps
 {
     NSMutableSet *dopamineInstalledAppIds = [NSMutableSet new];
+    NSMutableDictionary *rootHideAppPaths = [NSMutableDictionary dictionary];
     NSMutableSet *userInstalledAppIds = [NSMutableSet new];
     
     NSString *dopamineAppsPath = JBROOT_PATH(@"/Applications");
@@ -719,6 +722,7 @@ static void *rh3_boomerang_server(void *opaque)
         if (appId) {
             if (![dopamineInstalledAppIds containsObject:appId]) {
                 [dopamineInstalledAppIds addObject:appId];
+                rootHideAppPaths[appId] = [dopamineAppsPath stringByAppendingPathComponent:dopamineAppName];
             }
             else {
                 return [NSError errorWithDomain:JBErrorDomain code:JBErrorCodeFailedDuplicateApps userInfo:@{ NSLocalizedDescriptionKey : [NSString stringWithFormat:DOLocalizedString(@"Duplicate_Apps_Error_Dopamine_App"), appId, dopamineAppsPath]}];
@@ -760,6 +764,42 @@ static void *rh3_boomerang_server(void *opaque)
         LSApplicationProxy *appProxy = [LSApplicationProxy applicationProxyForIdentifier:dopamineAppId];
         if (appProxy.installed) {
             NSString *appProxyPath = [[appProxy.bundleURL.path stringByResolvingSymlinksInPath] stringByStandardizingPath];
+            if ([DOBootstrapper rootHidePortEnabled]) {
+                NSString *expected = rootHideAppPaths[dopamineAppId];
+                NSString *canonicalExpected = RH3CanonicalAppPath(expected);
+                if ([RH3CanonicalAppPath(appProxy.bundleURL.path) isEqual:canonicalExpected]) continue;
+                NSString *oldRoot = RH3StaleRegisteredRoot(appProxy.bundleURL.path, expected);
+                NSError *ownershipError = nil;
+                NSString *owned = [DOBootstrapper rootHideExistingRootWithError:&ownershipError];
+                struct stat oldInfo = {0}, appInfo = {0}, plistInfo = {0}, appsInfo = {0};
+                int oldStatus = oldRoot ? lstat(oldRoot.fileSystemRepresentation, &oldInfo) : 0;
+                int oldError = errno;
+                NSString *plist = [expected stringByAppendingPathComponent:@"Info.plist"];
+                BOOL valid = oldRoot && [DOBootstrapper rootHideBrandForPath:oldRoot] && oldStatus != 0 && oldError == ENOENT &&
+                    !ownershipError && [RH3CanonicalAppPath(owned) isEqual:RH3CanonicalAppPath(dopamineAppsPath.stringByDeletingLastPathComponent)] &&
+                    lstat(dopamineAppsPath.fileSystemRepresentation, &appsInfo) == 0 && S_ISDIR(appsInfo.st_mode) && appsInfo.st_uid == 0 &&
+                    lstat(expected.fileSystemRepresentation, &appInfo) == 0 && S_ISDIR(appInfo.st_mode) && appInfo.st_uid == 0 &&
+                    lstat(plist.fileSystemRepresentation, &plistInfo) == 0 && S_ISREG(plistInfo.st_mode) && plistInfo.st_uid == 0 &&
+                    [[NSDictionary dictionaryWithContentsOfFile:plist][@"CFBundleIdentifier"] isEqual:dopamineAppId];
+                if (valid) {
+                    [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:[NSString stringWithFormat:@"apps: refreshing stale registration for %@", dopamineAppId]];
+                    NSString *uicache = JBROOT_PATH(@"/usr/bin/uicache");
+                    __block int refresh = -1;
+                    dispatch_group_t work = dispatch_group_create();
+                    dispatch_group_async(work, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+                        int trust = jbclient_trust_file_by_path(uicache.fileSystemRepresentation);
+                        pid_t child = 0;
+                        refresh = trust ? trust : exec_cmd_nowait(&child, uicache.fileSystemRepresentation, "-p", expected.fileSystemRepresentation, NULL);
+                        if (!refresh) refresh = RH3WaitForBootstrapChild(child, 30);
+                    });
+                    BOOL finished = dispatch_group_wait(work, dispatch_time(DISPATCH_TIME_NOW, 40 * NSEC_PER_SEC)) == 0;
+                    [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:[NSString stringWithFormat:@"apps: refresh %@ completed=%d result=%d", dopamineAppId, finished, finished ? refresh : -1]];
+                    if (!finished || refresh) return [NSError errorWithDomain:JBErrorDomain code:JBErrorCodeFailedDuplicateApps userInfo:@{NSLocalizedDescriptionKey:@"RootHide app registration refresh failed or timed out; bootstrap preserved"}];
+                    appProxy = [LSApplicationProxy applicationProxyForIdentifier:dopamineAppId];
+                    if (appProxy.installed && [RH3CanonicalAppPath(appProxy.bundleURL.path) isEqual:canonicalExpected]) continue;
+                }
+                return [NSError errorWithDomain:JBErrorDomain code:JBErrorCodeFailedDuplicateApps userInfo:@{NSLocalizedDescriptionKey:[NSString stringWithFormat:@"RootHide registration for %@ does not match the verified current bundle; no foreign app was removed", dopamineAppId]}];
+            }
             if (![appProxyPath hasPrefix:dopamineAppsPath]) {
                 return [NSError errorWithDomain:JBErrorDomain code:JBErrorCodeFailedDuplicateApps userInfo:@{ NSLocalizedDescriptionKey : [NSString stringWithFormat:DOLocalizedString(@"Duplicate_Apps_Error_Icon_Cache"), dopamineAppId, dopamineAppsPath, appProxy.bundleURL.path]}];
             }
@@ -1008,6 +1048,21 @@ static void *rh3_boomerang_server(void *opaque)
     if ([DOBootstrapper rootHidePortEnabled])
         [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:@"phase: launchd injection completed"];
     
+    if ([DOBootstrapper rootHidePortEnabled]) {
+        int logFD = [[DOUIManager sharedInstance] rh3CopyDiagnosticFD];
+        __block int status = -1;
+        dispatch_group_t registration = dispatch_group_create();
+        dispatch_group_async(registration, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            if (logFD >= 0) { status = jbclient_dopamine_roothide_bootlog(logFD); close(logFD); }
+        });
+        BOOL finished = dispatch_group_wait(registration, dispatch_time(DISPATCH_TIME_NOW, 8 * NSEC_PER_SEC)) == 0;
+        [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:[NSString stringWithFormat:@"boot diagnostic registration: completed=%d result=%d", finished, finished ? status : -1]];
+        if (!finished || status != 0) {
+            *errOut = [NSError errorWithDomain:JBErrorDomain code:JBErrorCodeFailedLaunchdInjection userInfo:@{NSLocalizedDescriptionKey:@"Cannot register persistent boot diagnostics; activation stopped before userspace reboot"}];
+            [self cleanUpPostExploitation]; return;
+        }
+    }
+
     // After the launchd hook is initialized, we need to make the app believe the device is jailbroken
     [[DOEnvironmentManager sharedManager] setJailbroken:YES withVersion:[NSString stringWithContentsOfFile:JBROOT_PATH(@"/basebin/.version") encoding:NSUTF8StringEncoding error:nil]];
     

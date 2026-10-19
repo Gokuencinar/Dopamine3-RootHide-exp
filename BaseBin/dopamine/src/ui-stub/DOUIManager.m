@@ -1,6 +1,7 @@
 #import "DOUIManager.h"
 
 @implementation DOUIManager
+- (int)rh3CopyDiagnosticFD { return -1; }
 
 + (instancetype)sharedInstance
 {

@@ -37,6 +37,7 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)startLogCapture;
 - (void)shareLogRecordFromView:(UIView *)sourceView;
 - (BOOL)rh3BeginDiagnosticAttempt;
+- (int)rh3CopyDiagnosticFD;
 - (void)rh3RecordDiagnosticStage:(NSString *)stage;
 - (nullable NSURL *)rh3PreviousDiagnosticURL;
 - (BOOL)isUpdateAvailable;

@@ -275,6 +275,14 @@
 #endif
 }
 
+- (int)rh3CopyDiagnosticFD
+{
+    [_rh3DiagnosticLock lock];
+    int result = _rh3DiagnosticFD >= 0 ? fcntl(_rh3DiagnosticFD, F_DUPFD_CLOEXEC, 0) : -1;
+    [_rh3DiagnosticLock unlock];
+    return result;
+}
+
 - (BOOL)rh3BeginDiagnosticAttempt
 {
 #if RH3_FULL_APP_EXPERIMENTAL

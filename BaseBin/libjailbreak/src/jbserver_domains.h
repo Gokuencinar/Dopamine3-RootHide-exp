@@ -55,6 +55,7 @@ enum {
     JBS_DOPAMINE_IS_JAILBROKEN = 1,
     JBS_DOPAMINE_GET_ROOT,
     JBS_DOPAMINE_DROP_ROOT,
+    JBS_DOPAMINE_ROOTHIDE_BOOTLOG,
 };
 
 // Reserved for the RootHide port. Its 2.x implementation used domain 5,
