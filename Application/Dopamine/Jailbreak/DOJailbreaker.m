@@ -1050,15 +1050,19 @@ static void *rh3_boomerang_server(void *opaque)
     
     if ([DOBootstrapper rootHidePortEnabled]) {
         int logFD = [[DOUIManager sharedInstance] rh3CopyDiagnosticFD];
+        int descriptorError = logFD < 0 ? errno : 0;
         __block int status = -1;
         dispatch_group_t registration = dispatch_group_create();
         dispatch_group_async(registration, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
             if (logFD >= 0) { status = jbclient_dopamine_roothide_bootlog(logFD); close(logFD); }
         });
         BOOL finished = dispatch_group_wait(registration, dispatch_time(DISPATCH_TIME_NOW, 8 * NSEC_PER_SEC)) == 0;
-        [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:[NSString stringWithFormat:@"boot diagnostic registration: completed=%d result=%d", finished, finished ? status : -1]];
+        NSString *registrationDetails = [NSString stringWithFormat:@"boot diagnostic registration: completed=%d result=%d fd_errno=%d", finished, finished ? status : -1, descriptorError];
+        [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:registrationDetails];
+        [[DOUIManager sharedInstance] sendLog:registrationDetails debug:NO];
         if (!finished || status != 0) {
-            *errOut = [NSError errorWithDomain:JBErrorDomain code:JBErrorCodeFailedLaunchdInjection userInfo:@{NSLocalizedDescriptionKey:@"Cannot register persistent boot diagnostics; activation stopped before userspace reboot"}];
+            NSString *message = [NSString stringWithFormat:@"Cannot register persistent boot diagnostics; activation stopped before userspace reboot (%@)", registrationDetails];
+            *errOut = [NSError errorWithDomain:JBErrorDomain code:JBErrorCodeFailedLaunchdInjection userInfo:@{NSLocalizedDescriptionKey:message}];
             [self cleanUpPostExploitation]; return;
         }
     }

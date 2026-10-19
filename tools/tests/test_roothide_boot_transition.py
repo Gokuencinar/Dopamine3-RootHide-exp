@@ -1,11 +1,33 @@
 """Native checks for stale registrations and persistent PID 1 diagnostics."""
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
 import unittest
 ROOT=Path(__file__).resolve().parents[2]
 class BootTransition(unittest.TestCase):
+    def test_dopamine_dispatch_bound_includes_every_registered_action(self):
+        enums=(ROOT/'BaseBin/libjailbreak/src/jbserver_domains.h').read_text()
+        block=enums.split('// Domain: Dopamine',1)[1].split('};',1)[0]
+        names=re.findall(r'\bJBS_DOPAMINE_[A-Z_]+\b',block)
+        dispatcher=(ROOT/'BaseBin/libjailbreak/src/jbserver.c').read_text()
+        bound=re.search(r'case JBS_DOMAIN_DOPAMINE:\s*return (\w+);',dispatcher).group(1)
+        server=(ROOT/'BaseBin/launchdhook/src/jbserver/jbdomain_dopamine.c').read_text()
+        actions=server.split('struct jbserver_domain gDopamineDomain',1)[1]
+        handlers=re.findall(r'\.handler\s*=\s*(\w+)',actions)
+        self.assertEqual(bound,names[-1])
+        self.assertEqual(len(handlers),len(names))
+        self.assertEqual(handlers[-1],'dopamine_roothide_bootlog')
+
+    def test_registration_failure_is_visible_without_saved_diagnostic(self):
+        app=(ROOT/'Application/Dopamine/Jailbreak/DOJailbreaker.m').read_text()
+        registration=app.split('int logFD =',1)[1].split('// After the launchd hook',1)[0]
+        self.assertIn('sendLog:registrationDetails debug:NO',registration)
+        self.assertIn('fd_errno=%d',registration)
+        self.assertIn('userspace reboot (%@)", registrationDetails',registration)
+        self.assertIn('if (!finished || status != 0)',registration)
+
     def test_recorder_is_app_only_and_does_not_intercept_faults(self):
         header=(ROOT/'BaseBin/libjailbreak/src/roothide_bootlog.h').read_text(encoding='utf-8-sig')
         for item in ('O_NOFOLLOW','O_DIRECTORY','st_nlink!=1','original.st_ino==reopened.st_ino','fsync(fd)','st.st_size>120*1024'):
