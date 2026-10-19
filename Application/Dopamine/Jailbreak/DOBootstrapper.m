@@ -28,6 +28,7 @@
 #import <sys/sysctl.h>
 #import "RootHideRecovery.h"
 #import "RootHideScriptWait.h"
+#import "RootHideForensics.h"
 extern char **environ;
 
 // Enable only after the RootHide 3 launchd/dyld/systemhook stack and packages
@@ -283,6 +284,7 @@ static void RH3LogInterruptedBootstrapSnapshot(NSString *root)
         if (!foundBackup) [ui rh3RecordDiagnosticStage:@"RECOVERY no staged dependency backup name observed"];
     }
     RH3LogRecoveryPackageState(root, ui);
+    RH3CollectForensics(root, ^(NSString *line) { [ui rh3RecordDiagnosticStage:line]; });
     [ui rh3RecordDiagnosticStage:@"RECOVERY result: indeterminate; manual forensic inspection required before any retry"];
 }
 
