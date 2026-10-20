@@ -785,7 +785,7 @@ static void RH3LogCommandSpawnStage(const char *stage, pid_t pid, int result, vo
 {
     if (![DOBootstrapper rootHidePortEnabled]) return ENOTSUP;
     __block NSString *root = nil, *plistPath = nil, *configPath = nil;
-    __block NSString *keyPath = nil, *sshdPath = nil, *keygenPath = nil;
+    __block NSString *keyPath = nil, *publicKeyPath = nil, *sshdPath = nil, *keygenPath = nil;
     __block BOOL needsKey = NO;
     int result = [self rh3PerformPrivilegedAction:^int {
         NSError *error = nil;
@@ -829,6 +829,7 @@ static void RH3LogCommandSpawnStage(const char *stage, pid_t pid, int result, vo
         keygenPath = [root stringByAppendingPathComponent:@"usr/bin/ssh-keygen"];
         configPath = [root stringByAppendingPathComponent:@"etc/ssh/sshd_config"];
         keyPath = [root stringByAppendingPathComponent:@"etc/ssh/ssh_host_ed25519_key"];
+        publicKeyPath = [keyPath stringByAppendingString:@".pub"];
         for (NSString *binary in @[sshdPath, keygenPath]) {
             struct stat st = {0};
             if (lstat(binary.fileSystemRepresentation, &st) != 0 ||
@@ -841,7 +842,15 @@ static void RH3LogCommandSpawnStage(const char *stage, pid_t pid, int result, vo
         if (lstat(keyPath.fileSystemRepresentation, &keyInfo) == 0) {
             if (!S_ISREG(keyInfo.st_mode) || keyInfo.st_uid != 0 ||
                 (keyInfo.st_mode & 077) != 0 || keyInfo.st_size < 32) return EPERM;
-        } else if (errno == ENOENT) needsKey = YES;
+        } else if (errno == ENOENT) {
+            // ssh-keygen creates both files. Refuse any pre-existing public
+            // key path (including symlinks) rather than risk overwriting it.
+            struct stat publicInfo = {0};
+            if (lstat(publicKeyPath.fileSystemRepresentation, &publicInfo) == 0)
+                return EEXIST;
+            if (errno != ENOENT) return errno;
+            needsKey = YES;
+        }
         else return errno;
         return 0;
     }];
@@ -870,6 +879,19 @@ static void RH3LogCommandSpawnStage(const char *stage, pid_t pid, int result, vo
         if (lstat(keyPath.fileSystemRepresentation, &keyInfo) != 0 ||
             !S_ISREG(keyInfo.st_mode) || keyInfo.st_uid != 0 ||
             (keyInfo.st_mode & 077) || keyInfo.st_size < 32) return EPERM;
+        if (needsKey) {
+            struct stat publicInfo = {0};
+            if (lstat(publicKeyPath.fileSystemRepresentation, &publicInfo) != 0 ||
+                !S_ISREG(publicInfo.st_mode) || publicInfo.st_uid != 0 ||
+                (publicInfo.st_mode & (S_IWGRP | S_IWOTH)) ||
+                publicInfo.st_size < 32) return EPERM;
+            int directory = open([root stringByAppendingPathComponent:@"etc/ssh"].fileSystemRepresentation,
+                                 O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+            if (directory < 0) return errno;
+            int syncResult = fsync(directory) == 0 ? 0 : errno;
+            close(directory);
+            if (syncResult) return syncResult;
+        }
         [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
             @"SSH repair: hidden ED25519 host key and sshd config verified; OpenSSH will be rebased in-memory at next userspace reboot"];
         return 0;
