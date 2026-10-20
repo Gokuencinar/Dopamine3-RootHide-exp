@@ -733,8 +733,12 @@ static void RH3LogCommandSpawnStage(const char *stage, pid_t pid, int result, vo
             [root stringByAppendingPathComponent:@"Library/LaunchDaemons"] error:&listingError];
         NSUInteger sshPlists = 0;
         for (NSString *name in daemons) {
-            if ([[name.lowercaseString pathExtension] isEqualToString:@"plist"] &&
-                [name.lowercaseString containsString:@"ssh"]) sshPlists++;
+            NSString *lower = name.lowercaseString;
+            // The donor contains us.diatr.shshd.plist (SHSH blobs daemon),
+            // which is NOT OpenSSH and must not count as an SSH server.
+            if ([[lower pathExtension] isEqualToString:@"plist"] &&
+                [lower containsString:@"ssh"] && ![lower containsString:@"shsh"])
+                sshPlists++;
         }
         [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
             [NSString stringWithFormat:@"runtime: tweak_safe_mode=%d tweak_loader_present=%d newterm_bundle_present=%d sshd_binary_present=%d ssh_plists=%lu daemon_listing_ok=%d; presence is not running state",

@@ -48,6 +48,7 @@ class RuntimeTweakSwitch(unittest.TestCase):
         for name in ("tweak_safe_mode", "tweak_loader_present", "newterm_bundle_present",
                      "sshd_binary_present", "ssh_plists", "daemon_listing_ok"):
             self.assertIn(name, body)
+        self.assertIn('![lower containsString:@"shsh"]', body)
         for forbidden in ("launchctl", "kickstart", "uicache", "install_pkg",
                           "dpkg", "exec_cmd", "rebootUserspace", "writeToFile",
                           "password", "sshd -D"):
