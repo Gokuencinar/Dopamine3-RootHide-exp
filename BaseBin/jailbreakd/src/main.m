@@ -6,6 +6,7 @@
 
 #include <libjailbreak/libjailbreak.h>
 #include <libjailbreak/roothider.h>
+#include <libjailbreak/roothide_bootlog.h>
 
 extern char **environ;
 
@@ -25,12 +26,14 @@ void enableXPCLog(void* debugLog, void* errorLog);
 
 int main(int argc, char* argv[])
 {
+	rh3_bootlog("jailbreakd: process entered main");
 	// The RootHide 2 crash reporter is not linked into Dopamine 3 libjailbreak:
 	// its pause/resume ABI conflicts with launchdhook's crash reporter. Keep
 	// this process on the platform crash-report path until a separate daemon
 	// reporter can be validated without the old panic/reboot behavior.
 
-	setJetsamLimit(50, false);
+		setJetsamLimit(50, false);
+	rh3_bootlog("jailbreakd: jetsam configured");
 
 #ifdef ENABLE_LOGS
 	enableXPCLog(JBLogDebugFunction, JBLogErrorFunction);
@@ -43,8 +46,10 @@ int main(int argc, char* argv[])
 
 		mach_port_t *registeredPorts=NULL;
 		mach_msg_type_number_t registeredPortsCount = 0;
+		rh3_bootlog("jailbreakd: retrieving bootstrap registered ports");
 		kern_return_t kr = mach_ports_lookup(mach_task_self(), &registeredPorts, &registeredPortsCount);
 		if(kr != KERN_SUCCESS || registeredPortsCount < 3) {
+			rh3_bootlog("jailbreakd: registered bootstrap port lookup failed");
 			JBLogError("mach_ports_lookup error: %d, %x, %s", registeredPortsCount, kr, mach_error_string(kr));
 			return 1;
 		}
@@ -54,6 +59,7 @@ int main(int argc, char* argv[])
 
 		mach_port_t bootstraport = registeredPorts[2];
 		if(!MACH_PORT_VALID(bootstraport)) {
+			rh3_bootlog("jailbreakd: registered bootstrap port invalid");
 			JBLogError("invalid bootstraport");
 			return 2;
 		}
@@ -64,7 +70,9 @@ int main(int argc, char* argv[])
 
 		JBLogDebug("start initializing jb primitives");
 		jbclient_xpc_set_custom_port(bootstraport);
+		rh3_bootlog("jailbreakd: initializing primitives");
 		int ret = jbclient_initialize_primitives();
+		rh3_bootlog(ret ? "jailbreakd: primitive initialization failed" : "jailbreakd: primitive initialization completed");
 		JBLogDebug("jbclient_initialize_primitives ret: %d", ret);
 		if(ret != 0) {
 			JBLogError("Failed to initialize jailbreak primitives: %d", ret);
@@ -73,20 +81,23 @@ int main(int argc, char* argv[])
 
 		if(getenv("RESPAWN_REQUIRED"))
 		{
+			rh3_bootlog("jailbreakd: userspace reboot respawn branch entered");
 			unsetenv("RESPAWN_REQUIRED");
 
 			char selfPath[PATH_MAX]={0};
 			uint32_t selfPathSize = sizeof(selfPath);
 			_NSGetExecutablePath(selfPath, &selfPathSize);
 
-			pid_t pid;
+			pid_t pid = 0;
 			posix_spawnattr_t attr = NULL;
 			posix_spawnattr_init(&attr);
 			posix_spawnattr_setflags(&attr, POSIX_SPAWN_START_SUSPENDED);
 			// posix_spawnattr_setspecialport_np(&attr, bootstraport, TASK_BOOTSTRAP_PORT);
 			// posix_spawnattr_set_registered_ports_np(&attr, (mach_port_t[]){ bootstraport, MACH_PORT_NULL }, 3);
 			posix_spawnattr_set_registered_ports_np(&attr, (mach_port_t[]){ MACH_PORT_NULL, MACH_PORT_NULL, bootstraport }, 3);
+			rh3_bootlog("jailbreakd: creating suspended replacement");
 			int ret = posix_spawn(&pid, selfPath, NULL, &attr, argv, environ);
+			rh3_bootlog(ret ? "jailbreakd: replacement spawn failed" : "jailbreakd: suspended replacement spawned");
 			posix_spawnattr_destroy(&attr);
 
 			if(ret != 0) {
@@ -96,34 +107,54 @@ int main(int argc, char* argv[])
 
 			JBLogDebug("jailbreakd respawned: %d", pid);
 
-			if(unrestrict(pid, proc_patch_dyld, false) != 0) {
+			rh3_bootlog("jailbreakd: waiting for suspension and patching replacement");
+			int patchResult = unrestrict(pid, proc_patch_dyld, false);
+			rh3_bootlog(patchResult ? "jailbreakd: replacement patch failed" : "jailbreakd: replacement patch completed");
+			if(patchResult != 0) {
+				// Only the direct child created above. A failed patch must
+				// never leave a permanently suspended runnable daemon.
+				(void)kill(pid, SIGKILL);
+				(void)waitpid(pid, NULL, WNOHANG);
 				JBLogError("Failed to unrestrict process %d", pid);
 				return 5;
 			}
 
 			if(dyld_patch_enabled()) {
-				kill(pid, SIGCONT);
+				rh3_bootlog("jailbreakd: resuming patched replacement");
+				if (kill(pid, SIGCONT) != 0) {
+					rh3_bootlog("jailbreakd: replacement resume failed");
+					(void)kill(pid, SIGKILL);
+					(void)waitpid(pid, NULL, WNOHANG);
+					return 5;
+				}
+				rh3_bootlog("jailbreakd: replacement resume signaled");
 				return 0;
 			} else {
+				rh3_bootlog("jailbreakd: dyld patch inactive, continuing in original daemon");
 				kill(pid, SIGKILL);
-				waitpid(pid, NULL, 0);
+				// Do not block checkin indefinitely on a failed reaper.
+				(void)waitpid(pid, NULL, WNOHANG);
 			}
 		}
 
+		rh3_bootlog("jailbreakd: authenticated checkin starting");
 		JBLogDebug("check in jailbreakd port...");
 		mach_port_t serverPort = jbclient_jailbreakd_checkin();
 		if (!MACH_PORT_VALID(serverPort)) {
+			rh3_bootlog("jailbreakd: authenticated checkin failed");
 			JBLogError("Failed to check in server port");
 			return 6;
 		}
 
 		JBLogDebug("starting jailbreakd server, port=%x", serverPort);
+		rh3_bootlog("jailbreakd: authenticated checkin returned valid server port");
 
 		dispatch_source_t source = dispatch_source_create(DISPATCH_SOURCE_TYPE_MACH_RECV, (uintptr_t)serverPort, 0, dispatch_get_main_queue());
 		dispatch_source_set_event_handler(source, ^{
 			jailbreakd_received_message(serverPort);
 		});
 		dispatch_resume(source);
+		rh3_bootlog("jailbreakd: XPC receive source active");
 
 		dispatch_main();
 	}

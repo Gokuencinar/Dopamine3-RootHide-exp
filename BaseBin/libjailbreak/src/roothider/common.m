@@ -175,7 +175,10 @@ int proc_paused(pid_t pid, bool* paused)
 
 int unrestrict(pid_t pid, int (*callback)(pid_t), bool resume)
 {
-	while(true) {
+	// The RootHide jailbreakd respawn is the sole user of this helper.
+	// A suspended child may never report SSTOP after a userspace reboot;
+	// do not leave the parent daemon blocked forever before checkin.
+	for (unsigned attempt = 0; attempt < 1000; attempt++) {
 		bool paused = false;
 		if (proc_paused(pid, &paused) != 0) {
 			JBLogError("Failed to check if process(%d) is paused", pid);
@@ -184,11 +187,14 @@ int unrestrict(pid_t pid, int (*callback)(pid_t), bool resume)
 		if(paused) {
 			//wait for process to be fully initialized (new task ipc enabling, csflags updating, etc.)
 			usleep(100*1000);
-			break;
+			goto child_paused;
 		}
         usleep(10*1000);
 	}
+	JBLogError("Timed out waiting for suspended child %d", pid);
+	return -ETIMEDOUT;
 
+	child_paused:
     int ret = callback(pid);
     if(ret != 0) {
         JBLogError("Failed to invoke callback for process %d: %d", pid, ret);

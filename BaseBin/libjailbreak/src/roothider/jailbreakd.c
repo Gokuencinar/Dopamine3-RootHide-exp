@@ -11,6 +11,7 @@
 #include "../libjailbreak.h"
 #include "jailbreakd.h"
 #include "jailbreakd_bootstrap.h"
+#include "../roothide_bootlog.h"
 #include "common.h"
 #include "log.h"
 
@@ -163,13 +164,35 @@ int spawnJailbreakd()
 	// posix_spawnattr_setspecialport_np(&attr, bootstraport, TASK_BOOTSTRAP_PORT);
 	// posix_spawnattr_set_registered_ports_np(&attr, (mach_port_t[]){ bootstraport, MACH_PORT_NULL }, 3);
 	posix_spawnattr_set_registered_ports_np(&attr, (mach_port_t[]){ MACH_PORT_NULL, MACH_PORT_NULL, bootstraport }, 3);
-	int ret = posix_spawn(&pid, JBROOT_PATH("/basebin/jailbreakd"), NULL, &attr, (char*[]){"jailbreakd",NULL}, __firstLoad ? NULL :  ((char*[]){"RESPAWN_REQUIRED=1", NULL}));
+	// The regular RootHide boot log belongs to the app and has a verified
+	// inode/device pair. Pass only those three diagnostics to the dedicated
+	// daemon, never launchd's entire environment or unrelated credentials.
+	const char *path=getenv("RH3_BOOT_LOG_PATH");
+	const char *dev=getenv("RH3_BOOT_LOG_DEV");
+	const char *ino=getenv("RH3_BOOT_LOG_INO");
+	char logPath[PATH_MAX+24], logDev[96], logIno[96];
+	char *daemonEnv[5] = {NULL,NULL,NULL,NULL,NULL};
+	size_t index = 0;
+	if (!__firstLoad) daemonEnv[index++] = "RESPAWN_REQUIRED=1";
+	if (path && dev && ino &&
+	    snprintf(logPath,sizeof(logPath),"RH3_BOOT_LOG_PATH=%s",path) < (int)sizeof(logPath) &&
+	    snprintf(logDev,sizeof(logDev),"RH3_BOOT_LOG_DEV=%s",dev) < (int)sizeof(logDev) &&
+	    snprintf(logIno,sizeof(logIno),"RH3_BOOT_LOG_INO=%s",ino) < (int)sizeof(logIno)) {
+		daemonEnv[index++] = logPath;
+		daemonEnv[index++] = logDev;
+		daemonEnv[index++] = logIno;
+	}
+	rh3_bootlog(__firstLoad ? "RootHide daemon spawn: first load" : "RootHide daemon spawn: userspace reboot respawn required");
+	int ret = posix_spawn(&pid, JBROOT_PATH("/basebin/jailbreakd"), NULL, &attr,
+	    (char*[]){"jailbreakd",NULL}, index ? daemonEnv : NULL);
 	posix_spawnattr_destroy(&attr);
 
 	if (ret != 0) {
+		rh3_bootlog("RootHide daemon spawn failed");
 		JBLogError("posix_spawn jailbreakd failed: %d\n", ret);
 		return ret;
 	}
+	rh3_bootlog("RootHide daemon spawn returned successfully");
 
 	JBLogDebug("jailbreakd spawned, pid=%d\n", pid);
 
