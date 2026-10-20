@@ -427,7 +427,13 @@ static BOOL DOUsesLegacyJbctl(NSString *version)
     @synchronized (self) {
     // Anchor the diagnostic descriptor in the original app container first.
     [DOUIManager sharedInstance];
-    if (!self.isJailbroken || !roothide_is_active()) return [self rh3ActionStage:@"environment unavailable" result:ENXIO];
+    BOOL jailbroken = self.isJailbroken;
+    BOOL active = roothide_is_active();
+    if (!jailbroken || !active) {
+        [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
+            [NSString stringWithFormat:@"RootHide action preflight: jailbroken=%d active_root=%d; refused", jailbroken, active]];
+        return [self rh3ActionStage:@"environment unavailable" result:ENXIO];
+    }
     BOOL elevated = geteuid() != 0 || getegid() != 0;
     if (elevated) {
         int result = jbclient_dopamine_get_root();
@@ -461,6 +467,16 @@ static BOOL DOUsesLegacyJbctl(NSString *version)
 - (int)spawnJbctlAsRootWithArgs:(NSArray *)args
 {
     bool needsLegacySolution = DOUsesLegacyJbctl(self.jailbrokenVersion);
+    if ([DOBootstrapper rootHidePortEnabled]) {
+        NSString *operation = args.count ? args[0] : @"unknown";
+        if ([operation isEqualToString:@"internal"] && args.count > 1)
+            operation = [NSString stringWithFormat:@"internal/%@", args[1]];
+        // Only the verb is recorded: package paths and command arguments may
+        // contain private data. This checkpoint also covers an early pipe error.
+        [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
+            [NSString stringWithFormat:@"RootHide jbctl request %@: jailbroken=%d active_root=%d legacy=%d",
+             operation, self.isJailbroken, roothide_is_active(), needsLegacySolution]];
+    }
 
     char **argBuf = malloc((args.count + 4) * sizeof(char *));
     argBuf[0] = strdup(JBROOT_PATH("/basebin/jbctl"));
@@ -537,7 +553,13 @@ static BOOL DOUsesLegacyJbctl(NSString *version)
         if (waitPipe[1] >= 0) close(waitPipe[1]);
     }
 
-    if (r != 0 || pid <= 0) return r != 0 ? r : ECHILD;
+    if (r != 0 || pid <= 0) {
+        int failure = r != 0 ? r : ECHILD;
+        if ([DOBootstrapper rootHidePortEnabled])
+            [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
+                [NSString stringWithFormat:@"RootHide jbctl failed before wait: result=%d pid=%d pipe_error=%d", failure, pid, pipeError]];
+        return failure;
+    }
     if ([DOBootstrapper rootHidePortEnabled]) {
         int raw = -1;
         BOOL installing = args.count > 1 && [args[0] isEqualToString:@"internal"] && [args[1] isEqualToString:@"install_pkg"];
@@ -1124,19 +1146,30 @@ static BOOL DOUsesLegacyJbctl(NSString *version)
         __block NSError *error = nil;
         NSArray<NSString *> *packages = [self->_bootstrapper rootHideSelectedManagerPackagesWithError:&error];
         if (!packages) return error;
+        NSString *rootHideManager = [self->_bootstrapper rootHideManagerPackageWithError:&error];
+        if (!rootHideManager) return error;
         int result = 0;
-        for (NSString *path in packages) {
+        // The picker controls Sileo/Zebra. RootHide Manager has its own
+        // package and must also be restorable on an existing installation.
+        for (NSString *path in [packages arrayByAddingObject:rootHideManager]) {
+            [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
+                [NSString stringWithFormat:@"apps: explicit reinstall starting %@", path.lastPathComponent]];
             // jbctl establishes real uid 0 after the app restores its own
             // credentials. dpkg must not inherit the app's real uid 501.
             result = [self spawnJbctlAsRootWithArgs:@[@"internal", @"install_pkg", path]];
+            [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
+                [NSString stringWithFormat:@"apps: explicit reinstall %@ result=%d", path.lastPathComponent, result]];
             if (result) break;
         }
         if (!result) result = [self rh3PerformPrivilegedAction:^int{
             error = [self->_bootstrapper repairRootHideAppLinks];
             return error ? (int)error.code : 0;
         }];
+        // dpkg exits successfully without guaranteeing SpringBoard has an LS
+        // record. Re-register only bundles in our verified hidden root.
+        if (!result) result = [self refreshJailbreakApps];
         [self rh3ActionStage:@"reinstall package managers" result:result];
-        return error ?: (result ? [NSError errorWithDomain:@"RootHide" code:result userInfo:@{NSLocalizedDescriptionKey:@"No se pudieron reinstalar los gestores; consulta el diagnóstico."}] : nil);
+        return error ?: (result ? [NSError errorWithDomain:@"RootHide" code:result userInfo:@{NSLocalizedDescriptionKey:@"La instalación o el registro de los gestores no terminó; comparte el diagnóstico. Si hubo un timeout, no repitas la acción."}] : nil);
     }
     __block NSError *error;
     [self runAsRoot:^{

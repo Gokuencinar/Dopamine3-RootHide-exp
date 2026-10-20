@@ -40,6 +40,16 @@ class AppControls(unittest.TestCase):
         reinstall = env.split('- (NSError *)reinstallPackageManagers',1)[1].split('- (NSError *)updateBootLogo',1)[0]
         self.assertIn('spawnJbctlAsRootWithArgs:@[@"internal", @"install_pkg", path]',reinstall)
         self.assertIn('rootHideSelectedManagerPackagesWithError:',reinstall)
+        self.assertIn('rootHideManagerPackageWithError:', reinstall)
+        self.assertIn('[packages arrayByAddingObject:rootHideManager]', reinstall)
+        self.assertLess(reinstall.index('spawnJbctlAsRootWithArgs:@[@"internal", @"install_pkg", path]'),
+                        reinstall.index('if (!result) result = [self refreshJailbreakApps]'))
+        self.assertIn('if (!result) result = [self refreshJailbreakApps]', reinstall)
+        self.assertIn('apps: explicit reinstall %@ result=%d', reinstall)
+        self.assertIn('RootHide action preflight: jailbroken=%d active_root=%d; refused', env)
+        self.assertIn('RootHide Manager is a separate always-installed package', bootstrap)
+        self.assertIn('RH3RecordInstalledAppInventory(root)', finalize)
+        self.assertIn('bundle_present=%d bundle_id_valid=%d', bootstrap)
         internal = (ROOT/'BaseBin/jbctl/src/internal.m').read_text().split('else if (!strcmp(command, "install_pkg"))',1)[1]
         rootInstall = internal.split('int r = execve(',1)[0]
         self.assertIn('exec_cmd_roothide_spawn(&child',rootInstall)

@@ -1519,6 +1519,48 @@ cleanup_root:
     return paths;
 }
 
+- (NSString *)rootHideManagerPackageWithError:(NSError **)error
+{
+    // RootHide Manager is a separate always-installed package, not one of the
+    // Sileo/Zebra picker choices. Verify its pinned bytes before a repair.
+    NSString *name = @"roothideapp.deb";
+    NSString *path = [NSBundle.mainBundle.bundlePath stringByAppendingPathComponent:name];
+    struct stat st;
+    if (lstat(path.fileSystemRepresentation, &st) || !S_ISREG(st.st_mode)) {
+        if (error) *error = RH3Error(BootstrapErrorCodeFailedFinalising,
+                                    @"The bundled RootHide Manager package is missing or invalid");
+        return nil;
+    }
+    NSError *check = [self rh3VerifyBundledFile:name
+        sha256:@"b8f075e1844709845962900b22fe71136a66369a2c35bb1201087f2fd9476b7d"];
+    if (check) { if (error) *error = check; return nil; }
+    return path;
+}
+
+static void RH3RecordInstalledAppInventory(NSString *root)
+{
+    if (![DOBootstrapper rootHideBrandForPath:root] || !RH3IsRealDirectory(root)) return;
+    NSDictionary<NSString *, NSString *> *bundles = @{
+        @"Sileo": @"org.coolstar.SileoStore",
+        @"Zebra": @"xyz.willy.Zebra",
+        @"RootHide": @"com.roothide.manager"
+    };
+    for (NSString *name in bundles) {
+        NSString *app = [root stringByAppendingPathComponent:
+                         [@"Applications" stringByAppendingPathComponent:[name stringByAppendingString:@".app"]]];
+        NSString *plist = [app stringByAppendingPathComponent:@"Info.plist"];
+        struct stat appInfo = {0}, plistInfo = {0};
+        BOOL ownedBundle = lstat(app.fileSystemRepresentation, &appInfo) == 0 &&
+                           S_ISDIR(appInfo.st_mode) && appInfo.st_uid == 0 &&
+                           lstat(plist.fileSystemRepresentation, &plistInfo) == 0 &&
+                           S_ISREG(plistInfo.st_mode) && plistInfo.st_uid == 0;
+        BOOL expectedID = ownedBundle &&
+            [[NSDictionary dictionaryWithContentsOfFile:plist][@"CFBundleIdentifier"] isEqualToString:bundles[name]];
+        [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
+            [NSString stringWithFormat:@"apps: %@ bundle_present=%d bundle_id_valid=%d", name, ownedBundle, expectedID]];
+    }
+}
+
 - (NSError *)repairRootHideAppLinks
 {
     [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:@"apps: loader backlinks repair starting"];
@@ -1751,6 +1793,10 @@ cleanup_root:
                             [NSString stringWithFormat:@"RootHide Manager install failed (%d)", managerResult]);
         }
     }
+    // An old .installed_roothide3 marker does not establish that Sileo/Zebra
+    // and RootHide Manager still exist after earlier failed app operations.
+    // Inventory is read-only; package repair remains an explicit user action.
+    RH3RecordInstalledAppInventory(root);
     NSError *appLinksError = [self repairRootHideAppLinks];
     if (appLinksError) return appLinksError;
     if ([self fileOrSymlinkExistsAtPath:@"/var/jb"])

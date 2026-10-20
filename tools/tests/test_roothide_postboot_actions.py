@@ -118,7 +118,9 @@ int main(void){@autoreleasepool{
         self.assertIn('if (brand)', init)
         self.assertIn('gSystemInfo.jailbreakInfo.jbrand = brand', init)
         checked = source.split('- (int)rh3PerformPrivilegedAction:', 1)[1].split('- (int)spawnJbctlAsRootWithArgs:', 1)[0]
-        self.assertIn('!self.isJailbroken || !roothide_is_active()', checked)
+        self.assertIn('BOOL jailbroken = self.isJailbroken', checked)
+        self.assertIn('BOOL active = roothide_is_active()', checked)
+        self.assertIn('if (!jailbroken || !active)', checked)
         self.assertIn('geteuid() != 0 || getegid() != 0', checked)
         self.assertLess(checked.index('jbclient_dopamine_get_root()'), checked.index('action()'))
         self.assertIn('@finally', checked)
@@ -129,10 +131,13 @@ int main(void){@autoreleasepool{
     def test_failed_spawn_never_waits_on_pid_zero_and_controls_display_failure(self):
         env = (ROOT/'Application/Dopamine/Jailbreak/DOEnvironmentManager.m').read_text()
         spawn = env.split('- (int)spawnJbctlAsRootWithArgs:', 1)[1].split('- (int)runTrollStoreAction:', 1)[0]
-        self.assertIn('if (r != 0 || pid <= 0) return', spawn)
-        self.assertLess(spawn.index('if (r != 0 || pid <= 0) return'), spawn.index('cmd_wait_for_exit(pid)'))
+        self.assertIn('if (r != 0 || pid <= 0) {', spawn)
+        self.assertIn('int failure = r != 0 ? r : ECHILD;', spawn)
+        self.assertLess(spawn.index('if (r != 0 || pid <= 0) {'), spawn.index('cmd_wait_for_exit(pid)'))
         self.assertIn('needsLegacySolution && r == 0 && pid > 0', spawn)
         self.assertIn('posix_spawn_file_actions_addclose(&act, waitPipe[1])', spawn)
+        self.assertIn('RootHide jbctl failed before wait: result=%d pid=%d pipe_error=%d', spawn)
+        self.assertIn('RootHide jbctl request %@: jailbroken=%d active_root=%d legacy=%d', spawn)
         settings = (ROOT/'Application/Dopamine/UI/Settings/DOSettingsController.m').read_text()
         self.assertIn('No se pudieron actualizar las apps', settings)
         main = (ROOT/'Application/Dopamine/UI/DOMainViewController.m').read_text()
