@@ -30,13 +30,14 @@ static void roothide_redirect_home(const char *root)
 {
     const char *home = getenv("CFFIXED_USER_HOME");
     // Respect Apple's own app/extension container.
-    if (home && (!strncmp(home, "/private/var/mobile/Containers/Data/", 36)
+    if (!issetugid() && home && (!strncmp(home, "/private/var/mobile/Containers/Data/", 36)
               || !strncmp(home, "/var/mobile/Containers/Data/", 28))) return;
 
-    if (!home || home[0] != '/') {
-        struct passwd *pwd = getpwuid(geteuid());
-        home = pwd && pwd->pw_dir ? pwd->pw_dir : "/var/empty";
-    }
+    // Non-container values belong to the parent. In particular, do not send
+    // mobile apps to an inherited /var/root or prefix an already hidden home
+    // a second time. Match RootHide's user-based home selection.
+    struct passwd *pwd = getpwuid(geteuid());
+    home = pwd && pwd->pw_dir ? pwd->pw_dir : "/var/empty";
 
     char redirected[PATH_MAX];
     size_t rootLen = strlen(root), homeLen = strlen(home);

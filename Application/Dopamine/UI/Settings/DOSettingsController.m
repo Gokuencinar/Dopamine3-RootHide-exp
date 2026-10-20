@@ -20,10 +20,15 @@
 #import "DOSceneDelegate.h"
 #import "DOPSJetsamListItemsController.h"
 #import "DOButtonCell.h"
+#include <errno.h>
 
 #ifndef RH3_FULL_APP_EXPERIMENTAL
 #define RH3_FULL_APP_EXPERIMENTAL 0
 #endif
+
+// Accessed only by UIKit callbacks on the main queue. A timed-out worker may
+// still be running, so closing its progress alert must not permit a duplicate.
+static BOOL gRootHideAppsRefreshInFlight = NO;
 
 @interface DOSettingsController ()
 
@@ -675,11 +680,37 @@
 - (void)refreshJailbreakAppsPressed
 {
     if ([DOBootstrapper rootHidePortEnabled]) {
+        if (gRootHideAppsRefreshInFlight) {
+            UIAlertController *busy = [UIAlertController alertControllerWithTitle:@"La actualización sigue en marcha" message:@"No inicies otra actualización. Comparte el diagnóstico para comprobar dónde se ha detenido." preferredStyle:UIAlertControllerStyleAlert];
+            [busy addAction:[UIAlertAction actionWithTitle:@"Aceptar" style:UIAlertActionStyleCancel handler:nil]];
+            [self presentViewController:busy animated:YES completion:nil];
+            return;
+        }
+        gRootHideAppsRefreshInFlight = YES;
+        __block BOOL completed = NO;
+        __block BOOL timedOut = NO;
         UIAlertController *progress = [UIAlertController alertControllerWithTitle:@"Actualizando apps" message:@"Comprobando los enlaces y el registro de las apps…" preferredStyle:UIAlertControllerStyleAlert];
         [self presentViewController:progress animated:YES completion:^{
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 45 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+                if (completed) return;
+                timedOut = YES;
+                [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:@"apps: refresh UI deadline reached; worker still running; duplicate refresh blocked"];
+                [progress dismissViewControllerAnimated:YES completion:^{
+                    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"La actualización no ha terminado" message:@"Han pasado 45 segundos. Puedes cerrar este aviso y compartir el diagnóstico. La operación puede seguir activa; no se ha cancelado ni se considera completada." preferredStyle:UIAlertControllerStyleAlert];
+                    [alert addAction:[UIAlertAction actionWithTitle:@"Aceptar" style:UIAlertActionStyleCancel handler:nil]];
+                    [self presentViewController:alert animated:YES completion:nil];
+                }];
+            });
             dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
                 int result = [[DOEnvironmentManager sharedManager] refreshJailbreakApps];
                 dispatch_async(dispatch_get_main_queue(), ^{
+                    completed = YES;
+                    // A child timeout does not establish that uicache exited.
+                    gRootHideAppsRefreshInFlight = result == ETIMEDOUT;
+                    if (timedOut) {
+                        [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:[NSString stringWithFormat:@"apps: refresh worker returned after UI deadline; result=%d", result]];
+                        return;
+                    }
                     [progress dismissViewControllerAnimated:YES completion:^{
                         UIAlertController *alert = [UIAlertController alertControllerWithTitle:result ? @"No se pudieron actualizar las apps" : @"Apps actualizadas"
                             message:result ? [NSString stringWithFormat:@"Código %d. Comparte el diagnóstico. Si se agotó el tiempo, el proceso puede seguir en marcha; no repitas la acción.", result] : @"Prueba a abrir Sileo y RootHide."

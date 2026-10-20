@@ -779,7 +779,9 @@ int exec_cmd_roothide_spawn(pid_t* pidp, const char* path, const posix_spawn_fil
     {
         if(need_patch_child) {
             // will fail before launchdhook injected and dyld patched, eg: opainject...
-            if(jbdSpawnPatchChild(pid, should_resume) != 0) {
+            // Use the same launchd-based daemon lookup as systemhook. The
+            // legacy RootHide 2 host special port is not the 3.x client route.
+            if(jbclient_roothide_patch_child(pid, should_resume) != 0) {
                 JBLogError("Failed to patch spawned process (%d) %s", pid, path);
                 ret = 202;
             }

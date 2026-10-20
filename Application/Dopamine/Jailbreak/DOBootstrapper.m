@@ -30,6 +30,7 @@
 #import "RootHideScriptWait.h"
 #import "RootHideFreshSetup.h"
 #import "RootHideAppLinks.h"
+#import "RootHideMobileHome.h"
 #import <signal.h>
 #import "RootHideForensics.h"
 extern char **environ;
@@ -406,6 +407,27 @@ static NSError *RH3Error(BootstrapErrorCode code, NSString *message)
 {
     return [NSError errorWithDomain:bootstrapErrorDomain code:code
                           userInfo:@{NSLocalizedDescriptionKey: message}];
+}
+
+static NSError *RH3PrepareMobileHomeAtRoot(NSString *root)
+{
+    if (geteuid() != 0 || ![DOBootstrapper rootHideBrandForPath:root])
+        return RH3Error(BootstrapErrorCodeFailedFinalising, @"Mobile home requires the owned RootHide root");
+    NSString *secondary = [RH3AppGroupDirectory stringByAppendingPathComponent:root.lastPathComponent];
+    struct stat primaryInfo, secondaryInfo;
+    NSString *backlink = [NSFileManager.defaultManager destinationOfSymbolicLinkAtPath:
+                         [secondary stringByAppendingPathComponent:@".jbroot"] error:nil];
+    if (lstat(root.fileSystemRepresentation, &primaryInfo) || !S_ISDIR(primaryInfo.st_mode) || primaryInfo.st_uid != 0 ||
+        lstat(secondary.fileSystemRepresentation, &secondaryInfo) || !S_ISDIR(secondaryInfo.st_mode) || secondaryInfo.st_uid != 0 ||
+        ![backlink isEqualToString:root])
+        return RH3Error(BootstrapErrorCodeFailedFinalising, @"Mobile home containers do not match the verified RootHide pair");
+    int fd = open(secondary.fileSystemRepresentation, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    int result = fd < 0 ? errno : RH3PrepareMobileHome(fd, 0, 501, 501);
+    if (fd >= 0) close(fd);
+    [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
+        [NSString stringWithFormat:@"apps: mobile home directory preparation result=%d; no database files changed", result]];
+    return result ? RH3Error(BootstrapErrorCodeFailedFinalising,
+                            [NSString stringWithFormat:@"Cannot prepare mobile home directories (%d)", result]) : nil;
 }
 
 static NSString *RH3RecoverySHA256(NSData *data)
@@ -1070,7 +1092,8 @@ static NSError *RH3RetryRecoveryEligibility(NSString *root)
         error = RH3Error(BootstrapErrorCodeFailedExtracting, @"Could not persist RootHide bootstrap OS/ABI profile");
         goto cleanup_both;
     }
-    error = [self rh3BuildPackageSourcesInRoot:root version:version];
+    error = RH3PrepareMobileHomeAtRoot(root);
+    if (!error) error = [self rh3BuildPackageSourcesInRoot:root version:version];
     if (!error) error = RH3WritePendingState(root, @"layout");
     if (!error) return nil;
 
@@ -1711,6 +1734,8 @@ cleanup_root:
     NSError *dependenciesError = [self rh3InstallDependenciesAtRoot:root];
     if (dependenciesError) return dependenciesError;
     [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:@"bootstrap: RootHide dependencies installed"];
+    NSError *mobileHomeError = RH3PrepareMobileHomeAtRoot(root);
+    if (mobileHomeError) return mobileHomeError;
     if (!installed) {
         [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:@"bootstrap: installing package managers"];
         NSError *error = [self installPackageManagers];

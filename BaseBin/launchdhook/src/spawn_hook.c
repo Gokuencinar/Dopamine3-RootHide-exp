@@ -16,6 +16,7 @@
 #include <libjailbreak/jbroot.h>
 #include <errno.h>
 #include <dlfcn.h>
+#include "roothide_manager_spawn.h"
 extern char **environ;
 
 void abort_with_reason(uint32_t reason_namespace, uint64_t reason_code, const char *reason_string, uint64_t reason_flags);
@@ -113,12 +114,30 @@ int __posix_spawn_orig_wrapper(pid_t *restrict pid, const char *restrict path,
 	// Do not dereference the API's optional pid output when it is NULL.
 	pid_t localPid = 0;
 	pid_t *recordedPid = pid ? pid : &localPid;
+	const char *manager = roothide_is_active() ? rh3_manager_spawn_name(path, argv) : NULL;
+	if (manager) {
+		bool hook = false;
+		for (unsigned i=0; envp && envp[i]; i++) {
+			static const char key[] = "DYLD_INSERT_LIBRARIES=";
+			if (!strncmp(envp[i], key, sizeof(key)-1))
+				hook = strstr(envp[i]+sizeof(key)-1, "/systemhook.dylib") != NULL;
+		}
+		char stage[160];
+		snprintf(stage, sizeof(stage), "manager launch %s: systemhook_insert=%d proxy=%d", manager, hook,
+		         !strcmp(path, "/usr/libexec/xpcproxy"));
+		rh3_bootlog(stage);
+	}
 	// we need to disable the crash reporter during the orig call
 	// otherwise the child process inherits the exception ports
 	// and this would trip jailbreak detections
 	crashreporter_pause();	
 	int r = __posix_spawn_inline(recordedPid, path, desc, argv, envp);
 	crashreporter_resume();
+	if (manager) {
+		char stage[160];
+		snprintf(stage, sizeof(stage), "manager launch %s: spawn_result=%d pid=%d", manager, r, *recordedPid);
+		rh3_bootlog(stage);
+	}
 	if (r == 0 && *recordedPid > 0 && roothide_is_active()) {
 		register_job(*recordedPid);
 	}

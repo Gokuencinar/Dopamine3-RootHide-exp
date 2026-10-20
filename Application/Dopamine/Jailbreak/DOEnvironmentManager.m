@@ -605,11 +605,17 @@ static BOOL DOUsesLegacyJbctl(NSString *version)
         }
     } else if (!result) result = posix_spawn_file_actions_addopen(&actions, STDIN_FILENO, "/dev/null", O_RDONLY, 0);
     __block pid_t pid = -1;
+    [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
+        [NSString stringWithFormat:@"RootHide command %@: privilege and trust starting", binary.lastPathComponent]];
     if (!result) result = [self rh3PerformPrivilegedAction:^int{
         int trust = jbclient_trust_executable_recurse(binary.fileSystemRepresentation, NULL);
         if (trust) return [self rh3ActionStage:@"command trust" result:trust];
+        [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
+            [NSString stringWithFormat:@"RootHide command %@: trust complete; spawn starting", binary.lastPathComponent]];
         return exec_cmd_roothide_spawn(&pid, argv[0], &actions, NULL, argv, environ);
     }];
+    [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
+        [NSString stringWithFormat:@"RootHide command %@: spawn returned=%d pid=%d", binary.lastPathComponent, result, pid]];
     if (initialized) posix_spawn_file_actions_destroy(&actions);
     for (NSUInteger i = 0; i <= arguments.count; i++) free(argv[i]);
     free(argv);
@@ -633,11 +639,14 @@ static BOOL DOUsesLegacyJbctl(NSString *version)
 - (int)refreshJailbreakApps
 {
     if ([DOBootstrapper rootHidePortEnabled]) {
+        [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:@"apps: refresh starting; acquiring privileges"];
         __block NSArray *apps = nil;
         int result = [self rh3PerformPrivilegedAction:^int{
             NSError *error = [self->_bootstrapper repairRootHideAppLinks];
             if (error) return [self rh3ActionStage:@"app links" result:(int)error.code];
             apps = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:JBROOT_PATH(@"/Applications") error:&error];
+            [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
+                [NSString stringWithFormat:@"apps: owned Applications directory read; entries=%lu error=%ld", (unsigned long)apps.count, (long)error.code]];
             return apps ? 0 : EIO;
         }];
         // Refresh only the jailbreak's own bundles, not every system app.
@@ -645,6 +654,7 @@ static BOOL DOUsesLegacyJbctl(NSString *version)
             if (result) break;
             if (![app.pathExtension isEqualToString:@"app"] || ![app.lastPathComponent isEqualToString:app]) continue;
             NSString *path = [JBROOT_PATH(@"/Applications") stringByAppendingPathComponent:app];
+            [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:[NSString stringWithFormat:@"apps: registration starting for %@", app]];
             result = [self rh3RunCommand:JBROOT_PATH(@"/usr/bin/uicache") arguments:@[@"-p", path] input:nil timeout:30];
         }
         return [self rh3ActionStage:@"refresh apps" result:result];

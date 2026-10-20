@@ -26,6 +26,8 @@ class InternalSpawnTests(unittest.TestCase):
             self.skipTest('No native C compiler')
         source = (ROOT/'BaseBin/libjailbreak/src/roothider/common.m').read_text()
         function = source[source.index('int exec_cmd_roothide_spawn('):source.index('\nint ensure_dyld_trustcache(')]
+        self.assertIn('jbclient_roothide_patch_child(pid, should_resume)', function)
+        self.assertNotIn('jbdSpawnPatchChild(', function)
         harness = r'''
 #include <stdbool.h>
 #include <stdlib.h>
@@ -71,7 +73,7 @@ static int posix_spawnattr_setflags(const posix_spawnattr_t *a, short f) { (*a)-
 static int posix_spawn(pid_t *pid, const char *path, const void *fa, const posix_spawnattr_t *a, char *const argv[], char *const env[]) {
     state.spawn++; state.seen_flags=(*a)->flags; if(!state.spawn_error) *pid=42; return state.spawn_error;
 }
-static int jbdSpawnPatchChild(pid_t p, bool resume) { state.patch++; state.should_resume=resume; return state.patch_error; }
+static int jbclient_roothide_patch_child(pid_t p, bool resume) { state.patch++; state.should_resume=resume; return state.patch_error; }
 static int kill(pid_t p, int s) { if(s==SIGKILL) state.killed++; else if(s==SIGCONT) { state.resume++; if(state.resume_error) { errno=EPERM; return -1; } } return 0; }
 static pid_t waitpid(pid_t p, int *s, int options) { state.waited++; return p; }
 static int usleep(unsigned x) { return 0; }
