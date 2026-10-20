@@ -194,7 +194,7 @@ int unrestrict(pid_t pid, int (*callback)(pid_t), bool resume)
 	JBLogError("Timed out waiting for suspended child %d", pid);
 	return -ETIMEDOUT;
 
-	child_paused:
+	child_paused: ;
     int ret = callback(pid);
     if(ret != 0) {
         JBLogError("Failed to invoke callback for process %d: %d", pid, ret);
