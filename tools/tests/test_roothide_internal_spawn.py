@@ -25,15 +25,20 @@ class InternalSpawnTests(unittest.TestCase):
         if not compiler:
             self.skipTest('No native C compiler')
         source = (ROOT/'BaseBin/libjailbreak/src/roothider/common.m').read_text()
-        function = source[source.index('int exec_cmd_roothide_spawn('):source.index('\nint ensure_dyld_trustcache(')]
+        function = source[source.index('int exec_cmd_roothide_spawn_traced('):source.index('\nint ensure_dyld_trustcache(')]
         self.assertIn('jbclient_roothide_patch_child(pid, should_resume)', function)
         self.assertNotIn('jbdSpawnPatchChild(', function)
+        self.assertIn('callback("posix_spawn entering"', function)
+        self.assertIn('callback("posix_spawn returned"', function)
+        self.assertIn('callback("patch child XPC entering"', function)
+        self.assertIn('callback("patch child XPC returned"', function)
         harness = r'''
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
 #include <stdio.h>
+typedef void (*rh3_spawn_stage_callback_t)(const char *stage, int pid, int result, void *context);
 typedef int pid_t;
 typedef struct attrs { short flags; } *posix_spawnattr_t;
 typedef void posix_spawn_file_actions_t;
@@ -60,6 +65,10 @@ static bool exec_patch_enabled;
 static struct { int hook, close, trust_error, trust_calls, init_error, read_error,
     spawn_error, patch_error, resume_error, init, destroy, spawn, patch, resume,
     killed, waited, should_resume, seen_flags; } state;
+static char stages[16][48]; static int stage_count;
+static void capture(const char *stage,int pid,int result,void *context) {
+    if(stage_count < 16) snprintf(stages[stage_count++],48,"%s",stage);
+}
 static void reset(void) { memset(&state, 0, sizeof(state)); exec_patch_enabled=true; }
 static void *dlopen(const char *p, int mode) { return state.hook ? (void *)1 : NULL; }
 static int dlclose(void *p) { state.close++; return 0; }
@@ -83,6 +92,13 @@ static int usleep(unsigned x) { return 0; }
 int main(void) {
     char *args[]={(char *)"/tool",NULL}; pid_t pid=99;
     struct attrs external={0}; posix_spawnattr_t attr=&external;
+    reset(); stage_count=0;
+    CHECK(exec_cmd_roothide_spawn_traced(&pid,"/tool",NULL,&attr,args,NULL,capture,NULL)==0);
+    CHECK(stage_count==4);
+    CHECK(strcmp(stages[0],"posix_spawn entering")==0);
+    CHECK(strcmp(stages[1],"posix_spawn returned")==0);
+    CHECK(strcmp(stages[2],"patch child XPC entering")==0);
+    CHECK(strcmp(stages[3],"patch child XPC returned")==0);
     reset(); exec_patch_enabled=false;
     CHECK(exec_cmd_roothide_spawn(&pid,"/tool",NULL,&attr,args,NULL)==0);
     CHECK(pid==42 && state.patch==0 && state.trust_calls==0 && state.resume==1);

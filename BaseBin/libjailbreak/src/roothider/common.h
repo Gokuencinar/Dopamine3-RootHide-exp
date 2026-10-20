@@ -75,6 +75,10 @@ void hideDeveloperMode();
 
 void exec_set_patch(bool enabled);
 int exec_cmd_roothide_spawn(pid_t* pidp, const char* path, const posix_spawn_file_actions_t *fap, const posix_spawnattr_t *attrp, char *const argv[], char *const envp[]);
+// Diagnostic-only callback. The caller may log the stage, PID and errno, but
+// must not alter, resume or retry a suspended child from this callback.
+typedef void (*rh3_spawn_stage_callback_t)(const char *stage, pid_t pid, int result, void *context);
+int exec_cmd_roothide_spawn_traced(pid_t* pidp, const char* path, const posix_spawn_file_actions_t *fap, const posix_spawnattr_t *attrp, char *const argv[], char *const envp[], rh3_spawn_stage_callback_t callback, void *context);
 
 bool roothide_handle_xpc_msg(xpc_object_t xmsg);
 

@@ -35,7 +35,8 @@ class AppControls(unittest.TestCase):
         self.assertIn('jbclient_roothide_jailbroken()',respring)
         self.assertNotIn('roothide_is_active()',respring)
         command = env.split('- (int)rh3RunCommand:',1)[1].split('- (int)refreshJailbreakApps',1)[0]
-        self.assertIn('exec_cmd_roothide_spawn(&pid',command)
+        self.assertIn('exec_cmd_roothide_spawn_traced(&pid',command)
+        self.assertIn('RH3LogCommandSpawnStage', command)
         self.assertNotIn('return posix_spawn(',command)
         reinstall = env.split('- (NSError *)reinstallPackageManagers',1)[1].split('- (NSError *)updateBootLogo',1)[0]
         self.assertIn('spawnJbctlAsRootWithArgs:@[@"internal", @"install_pkg", path]',reinstall)

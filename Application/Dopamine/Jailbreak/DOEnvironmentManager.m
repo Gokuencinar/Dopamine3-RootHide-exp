@@ -44,6 +44,16 @@ static BOOL DOUsesLegacyJbctl(NSString *version)
     return version && [version compare:@"3.0.5" options:NSNumericSearch] == NSOrderedAscending;
 }
 
+static void RH3LogCommandSpawnStage(const char *stage, pid_t pid, int result, void *context)
+{
+    // Only log the static stage and the PID/error. No package arguments,
+    // environment variables, subscription IDs or private app paths.
+    NSString *name = (__bridge NSString *)context;
+    [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
+        [NSString stringWithFormat:@"RootHide command %@: %s pid=%d result=%d",
+         name, stage, pid, result]];
+}
+
 @implementation DOEnvironmentManager
 
 + (instancetype)sharedManager
@@ -627,14 +637,16 @@ static BOOL DOUsesLegacyJbctl(NSString *version)
         }
     } else if (!result) result = posix_spawn_file_actions_addopen(&actions, STDIN_FILENO, "/dev/null", O_RDONLY, 0);
     __block pid_t pid = -1;
+    NSString *commandName = binary.lastPathComponent;
     [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
-        [NSString stringWithFormat:@"RootHide command %@: privilege and trust starting", binary.lastPathComponent]];
+        [NSString stringWithFormat:@"RootHide command %@: privilege and trust starting", commandName]];
     if (!result) result = [self rh3PerformPrivilegedAction:^int{
         int trust = jbclient_trust_executable_recurse(binary.fileSystemRepresentation, NULL);
         if (trust) return [self rh3ActionStage:@"command trust" result:trust];
         [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
-            [NSString stringWithFormat:@"RootHide command %@: trust complete; spawn starting", binary.lastPathComponent]];
-        return exec_cmd_roothide_spawn(&pid, argv[0], &actions, NULL, argv, environ);
+            [NSString stringWithFormat:@"RootHide command %@: trust complete; spawn starting", commandName]];
+        return exec_cmd_roothide_spawn_traced(&pid, argv[0], &actions, NULL, argv, environ,
+                                             RH3LogCommandSpawnStage, (__bridge void *)commandName);
     }];
     [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
         [NSString stringWithFormat:@"RootHide command %@: spawn returned=%d pid=%d", binary.lastPathComponent, result, pid]];

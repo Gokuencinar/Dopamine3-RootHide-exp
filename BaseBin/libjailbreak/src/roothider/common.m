@@ -718,7 +718,7 @@ void exec_set_patch(bool enabled)
 {
 	exec_patch_enabled = enabled;
 }
-int exec_cmd_roothide_spawn(pid_t* pidp, const char* path, const posix_spawn_file_actions_t *fap, const posix_spawnattr_t *attrp, char *const argv[], char *const envp[])
+int exec_cmd_roothide_spawn_traced(pid_t* pidp, const char* path, const posix_spawn_file_actions_t *fap, const posix_spawnattr_t *attrp, char *const argv[], char *const envp[], rh3_spawn_stage_callback_t callback, void *context)
 {
     if (pidp) *pidp = 0;
     int argc = 0;
@@ -766,8 +766,13 @@ int exec_cmd_roothide_spawn(pid_t* pidp, const char* path, const posix_spawn_fil
 	pid_t pidval = 0;
 	if (!pidp) pidp = &pidval;
     *pidp = 0;
+    // posix_spawn and the daemon patch request are *both* synchronous. The
+    // outer child wait timeout cannot cover either of them. Persist separate
+    // checkpoints so a real device log identifies which one failed to return.
+    if (callback) callback("posix_spawn entering", 0, 0, context);
     ret = posix_spawn(pidp, path, fap, attrp, argv, envp);
     pid_t pid = *pidp;
+    if (callback) callback("posix_spawn returned", pid, ret, context);
     if (ret == 0 && pid <= 1) ret = ECHILD;
     // This helper may borrow the caller's attributes. Do not leak the
     // START_SUSPENDED bit into its next spawn, including on spawn failure.
@@ -781,18 +786,24 @@ int exec_cmd_roothide_spawn(pid_t* pidp, const char* path, const posix_spawn_fil
             // will fail before launchdhook injected and dyld patched, eg: opainject...
             // Use the same launchd-based daemon lookup as systemhook. The
             // legacy RootHide 2 host special port is not the 3.x client route.
-            if(jbclient_roothide_patch_child(pid, should_resume) != 0) {
+            if (callback) callback("patch child XPC entering", pid, 0, context);
+            int patched = jbclient_roothide_patch_child(pid, should_resume);
+            if (callback) callback("patch child XPC returned", pid, patched, context);
+            if(patched != 0) {
                 JBLogError("Failed to patch spawned process (%d) %s", pid, path);
                 ret = 202;
             }
         } else {
             if (should_resume) {
+                if (callback) callback("resume child entering", pid, 0, context);
                 if (kill(pid, SIGCONT) != 0) ret = errno;
+                if (callback) callback("resume child returned", pid, ret, context);
             }
         }
     }
 
     if (ret != 0 && pid > 1) {
+        if (callback) callback("failed child cleanup entering", pid, ret, context);
         // Never strand a known suspended child when patching/resuming fails.
         // Reap only our child, without introducing another unbounded wait.
         (void)kill(pid, SIGKILL);
@@ -803,6 +814,7 @@ int exec_cmd_roothide_spawn(pid_t* pidp, const char* path, const posix_spawn_fil
             usleep(10000);
         }
         *pidp = 0;
+        if (callback) callback("failed child cleanup returned", pid, ret, context);
     }
 cleanup:
     if(attr) {
@@ -811,6 +823,11 @@ cleanup:
     }
 
     return ret;
+}
+
+int exec_cmd_roothide_spawn(pid_t* pidp, const char* path, const posix_spawn_file_actions_t *fap, const posix_spawnattr_t *attrp, char *const argv[], char *const envp[])
+{
+    return exec_cmd_roothide_spawn_traced(pidp, path, fap, attrp, argv, envp, NULL, NULL);
 }
 
 int ensure_dyld_trustcache(const char* path)
