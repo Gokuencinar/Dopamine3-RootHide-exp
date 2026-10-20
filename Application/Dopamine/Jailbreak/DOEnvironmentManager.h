@@ -55,6 +55,8 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)rebuildIconCache;
 - (int)refreshJailbreakApps;
 - (int)diagnoseRootHideRuntime;
+- (int)repairRootHideSSH;
+- (int)verifyRootHideTweakInjection;
 - (void)reboot;
 - (int)changeMobilePassword:(NSString *)newPassword;
 - (NSError*)updateEnvironment;

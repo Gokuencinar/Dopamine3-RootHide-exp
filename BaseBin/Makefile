@@ -17,7 +17,7 @@ all: basebin.tar
 # components would otherwise consume most of the build time sequentially.
 staging: .build .include
 
-subprojects: ChOma XPF MachOMerger opainject libjailbreak systemhook forkfix launchdhook hookd boomerang jbctl idownloadd watchdoghook rootlesshooks roothidehooks jailbreakd bootstrapper dopamine
+subprojects: ChOma XPF MachOMerger opainject tweakprobe libjailbreak systemhook forkfix launchdhook hookd boomerang jbctl idownloadd watchdoghook rootlesshooks roothidehooks jailbreakd bootstrapper dopamine
 
 ChOma: staging
 	@python3 ../tools/apply_choma_fixes.py
@@ -40,6 +40,10 @@ MachOMerger: staging
 opainject: staging
 	$(MAKE) -C opainject
 	@cp opainject/opainject .build
+
+tweakprobe: staging
+	$(MAKE) -C tweakprobe
+	@cp tweakprobe/rh3tweakprobe .build
 
 libjailbreak: staging ChOma
 	$(MAKE) -C libjailbreak
@@ -136,6 +140,7 @@ clean:
 	@$(MAKE) -C XPF $@
 	@$(MAKE) -C MachOMerger $@
 	@$(MAKE) -C opainject $@
+	@$(MAKE) -C tweakprobe $@
 	@$(MAKE) -C libjailbreak $@
 	@$(MAKE) -C systemhook $@
 	@$(MAKE) -C forkfix $@
@@ -156,4 +161,4 @@ clean:
 	@rm -rf basebin.tar
 	@rm -rf basebin.tc
 
-.PHONY: clean staging .build .include ChOma XPF MachOMerger opainject libjailbreak systemhook forkfix launchdhook hookd boomerang jbctl idownloadd watchdoghook rootlesshooks roothidehooks jailbreakd bootstrapper basebin.tc dyldhook basebin.tar
+.PHONY: clean staging .build .include ChOma XPF MachOMerger opainject tweakprobe libjailbreak systemhook forkfix launchdhook hookd boomerang jbctl idownloadd watchdoghook rootlesshooks roothidehooks jailbreakd bootstrapper basebin.tc dyldhook basebin.tar

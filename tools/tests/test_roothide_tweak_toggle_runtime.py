@@ -54,7 +54,7 @@ class RuntimeTweakSwitch(unittest.TestCase):
     def test_runtime_diagnostics_are_read_only_and_exclude_private_values(self):
         env = (ROOT / "Application/Dopamine/Jailbreak/DOEnvironmentManager.m").read_text(encoding="utf-8")
         body = env.split("- (int)diagnoseRootHideRuntime", 1)[1].split(
-            "- (void)unregisterJailbreakApps", 1)[0]
+            "// Explicit, opt-in repair for the OpenSSH", 1)[0]
         self.assertIn('rootHideExistingRootWithError:&rootError', body)
         self.assertIn('jbclient_get_jbroot()', body)
         for name in ("tweak_safe_mode", "tweak_loader_present", "newterm_bundle_present",

@@ -69,6 +69,44 @@ SSH, distinguir «conexión rechazada», «tiempo agotado» y «autenticación f
 El registro de apps no se ejecuta automáticamente durante el primer arranque
 porque una versión anterior se bloqueaba en el primer hijo parcheado.
 
+## Diagnóstico y preparación segura de SSH y tweaks (candidata posterior a r146)
+
+En r143, `tweak_safe_mode=1` seguía bloqueando TweakLoader pese a que la
+interfaz indicaba la inyección activada. Además de la lectura privilegiada, se
+elimina otra recreación del marcador basada en una preferencia obsoleta durante
+la fase de jailbreak. La primera instalación sigue activando modo seguro y
+el watchdog puede volver a activarlo tras un panic; no se desactiva el modo
+seguro de forma automática cuando hay señales de fallo.
+
+Tras habilitar **Ajustes → Inyección de tweaks** y realizar **un** reinicio
+de espacio de usuario, pulsa **Verificar carga real de tweaks**. Esta acción
+ejecuta `rh3tweakprobe`, un binario efímero del BaseBin firmado en CI. Solo
+da éxito si se ejecutó `systemhook` en ese proceso y `dlopen` abrió
+`TweakLoader.dylib` realmente. No prueba por sí sola que un tweak específico
+de SpringBoard funcione; si falla, comparte el resultado y el registro, sin
+repetir reinicios.
+
+La distribución inicial RootHide **no contiene OpenSSH**; su
+`us.diatr.shshd.plist` sirve blobs SHSH y no es un servidor SSH. El OpenSSH
+instalado posteriormente tenía `ssh_host_key_files=0`, ejecutable SSH
+presente y un programa del plist no accesible desde launchd. Con el jailbreak
+activo, y **solo tras asegurar contraseñas de acceso no predeterminadas**, pulsa
+**Ajustes → Preparar OpenSSH en RootHide**. La operación valida el bootstrap
+oculto, busca una única entrada `com.openssh.sshd` con socket, genera únicamente
+su clave de host ED25519 bajo `<hidden-root>/etc/ssh` si falta, y ejecuta
+`sshd -t` con rutas explícitas. No inicia servicios, no toca la instalación
+stock de iOS ni reescribe plists de paquetes. Tras un reinicio de espacio de
+usuario, el hook de launchd reubica **solo** `com.openssh.sshd` a rutas del
+bootstrap activo en su diccionario XPC, incluso cuando cambia el nombre
+aleatorio de la raíz. No redirige ni altera `us.diatr.shshd`.
+
+Prueba desde el ordenador con `ssh -vvv -o BatchMode=yes mobile@IP`
+primero, sin enviar contraseña. Se espera recibir un banner de servidor
+`SSH-2.0` y negociar claves; TCP puerto 22 abierto no basta. No compartas
+credenciales ni material de host key. Ante cualquier fallo de prueba física,
+detente y comparte código de error y línea `runtime:`; no reinstales
+el bootstrap ni cambies permisos de `/etc` o `/usr` del sistema.
+
 ## Si falla
 
 Guarda el mensaje de error, los logs, el modelo, la versión exacta de iOS y la revisión de la app. No repitas el proceso sin revisar el fallo: puede haber quedado un bootstrap a medias. No se borra automáticamente una instalación de RootHide 2, y reiniciar no garantiza resolver cualquier estado parcial.

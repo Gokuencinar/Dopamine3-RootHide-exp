@@ -2,12 +2,43 @@
 #import <xpc_private.h>
 #import <sys/types.h>
 #import <sys/stat.h>
+#import <fcntl.h>
 #import <unistd.h>
 #import <substrate.h>
 #import <mach-o/dyld.h>
 #import <libjailbreak/libjailbreak.h>
 #import <Foundation/Foundation.h>
 #import <litehook.h>
+
+// Do not alter third-party plists on disk: RootHide re-randomizes its hidden
+// root, so absolute paths persisted by a package become stale. Rebase ONLY
+// the installed OpenSSH socket job in the launchd XPC dictionary, each boot.
+static void rh3_prepare_openssh_socket_job(xpc_object_t job)
+{
+    if (!job || xpc_get_type(job) != XPC_TYPE_DICTIONARY) return;
+    const char *label = xpc_dictionary_get_string(job, "Label");
+    if (!label || strcmp(label, "com.openssh.sshd")) return;
+    xpc_object_t sockets = xpc_dictionary_get_value(job, "Sockets");
+    if (!sockets || xpc_get_type(sockets) != XPC_TYPE_DICTIONARY) return;
+    NSString *program = JBROOT_PATH(@"/usr/sbin/sshd");
+    NSString *config = JBROOT_PATH(@"/etc/ssh/sshd_config");
+    NSString *key = JBROOT_PATH(@"/etc/ssh/ssh_host_ed25519_key");
+    struct stat st = {0};
+    if (lstat(program.fileSystemRepresentation, &st) ||
+        !S_ISREG(st.st_mode) || st.st_uid != 0 || !(st.st_mode & S_IXUSR)) return;
+    if (lstat(config.fileSystemRepresentation, &st) ||
+        !S_ISREG(st.st_mode) || st.st_uid != 0) return;
+    if (lstat(key.fileSystemRepresentation, &st) ||
+        !S_ISREG(st.st_mode) || st.st_uid != 0 || (st.st_mode & 077) ||
+        st.st_size < 32) return;
+    xpc_object_t args = xpc_array_create(NULL, 0);
+    if (!args) return;
+    for (NSString *part in @[program, @"-i", @"-f", config, @"-h", key])
+        xpc_array_set_string(args, XPC_ARRAY_APPEND, part.fileSystemRepresentation);
+    xpc_dictionary_set_string(job, "Program", program.fileSystemRepresentation);
+    xpc_dictionary_set_value(job, "ProgramArguments", args);
+    xpc_release(args);
+}
 
 void xpc_dictionary_add_launch_daemon_plist_at_path(xpc_object_t xdict, const char *path)
 {
@@ -23,7 +54,9 @@ void xpc_dictionary_add_launch_daemon_plist_at_path(xpc_object_t xdict, const ch
 		if (addr != MAP_FAILED) {
 			xpc_object_t daemonXdict = xpc_create_from_plist(addr, len);
 			if (daemonXdict) {
+				rh3_prepare_openssh_socket_job(daemonXdict);
 				xpc_dictionary_set_value(xdict, path, daemonXdict);
+				xpc_release(daemonXdict);
 			}
 			munmap(addr, len);
 		}

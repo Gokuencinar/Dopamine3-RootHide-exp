@@ -776,6 +776,134 @@ static void RH3LogCommandSpawnStage(const char *stage, pid_t pid, int result, vo
     return [self rh3ActionStage:@"read-only tweak/terminal/SSH diagnosis" result:result];
 }
 
+// Explicit, opt-in repair for the OpenSSH socket job installed later by the
+// package manager. The donor's us.diatr.shshd job is unrelated (SHSH blobs).
+// Never write to /etc or /usr on the stock OS, load a service, or change
+// passwords. The hook rebases OpenSSH IN MEMORY on each launchd boot; this
+// repair prepares a host key without altering installed package plists.
+- (int)repairRootHideSSH
+{
+    if (![DOBootstrapper rootHidePortEnabled]) return ENOTSUP;
+    __block NSString *root = nil, *plistPath = nil, *configPath = nil;
+    __block NSString *keyPath = nil, *sshdPath = nil, *keygenPath = nil;
+    __block BOOL needsKey = NO;
+    int result = [self rh3PerformPrivilegedAction:^int {
+        NSError *error = nil;
+        root = [DOBootstrapper rootHideExistingRootWithError:&error];
+        const char *activeRoot = jbclient_get_jbroot();
+        if (error || !root || !activeRoot ||
+            ![RH3CanonicalAppPath(root) isEqualToString:
+              RH3CanonicalAppPath([NSString stringWithUTF8String:activeRoot])]) return EPERM;
+        // Reject symlinks or writable directories along paths where an
+        // attacker could redirect ssh-keygen or the root-owned host key.
+        for (NSString *suffix in @[@"etc", @"etc/ssh", @"Library", @"Library/LaunchDaemons"]) {
+            NSString *directory = [root stringByAppendingPathComponent:suffix];
+            int fd = open(directory.fileSystemRepresentation, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+            if (fd < 0) return errno;
+            struct stat st = {0};
+            int check = fstat(fd, &st) ? errno :
+                (!S_ISDIR(st.st_mode) || st.st_uid != 0 ||
+                 (st.st_mode & (S_IWGRP | S_IWOTH)) ? EPERM : 0);
+            close(fd);
+            if (check) return check;
+        }
+        NSString *daemonsDir = [root stringByAppendingPathComponent:@"Library/LaunchDaemons"];
+        NSArray<NSString *> *names = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:daemonsDir error:&error];
+        if (!names || error) return EIO;
+        for (NSString *name in names) {
+            if (![name.pathExtension.lowercaseString isEqualToString:@"plist"] ||
+                [name.lowercaseString containsString:@"shsh"]) continue;
+            NSString *candidate = [daemonsDir stringByAppendingPathComponent:name];
+            struct stat st = {0};
+            if (lstat(candidate.fileSystemRepresentation, &st) != 0 ||
+                !S_ISREG(st.st_mode) || st.st_uid != 0 || st.st_size < 32 || st.st_size > 65536)
+                continue;
+            NSDictionary *dict = [NSDictionary dictionaryWithContentsOfFile:candidate];
+            if (![dict[@"Label"] isEqual:@"com.openssh.sshd"]) continue;
+            if (plistPath) return EEXIST; // Ambiguous OpenSSH service: don't guess.
+            if (![dict[@"Sockets"] isKindOfClass:[NSDictionary class]]) return ENOTSUP;
+            plistPath = candidate;
+        }
+        if (!plistPath) return ENOENT;
+        sshdPath = [root stringByAppendingPathComponent:@"usr/sbin/sshd"];
+        keygenPath = [root stringByAppendingPathComponent:@"usr/bin/ssh-keygen"];
+        configPath = [root stringByAppendingPathComponent:@"etc/ssh/sshd_config"];
+        keyPath = [root stringByAppendingPathComponent:@"etc/ssh/ssh_host_ed25519_key"];
+        for (NSString *binary in @[sshdPath, keygenPath]) {
+            struct stat st = {0};
+            if (lstat(binary.fileSystemRepresentation, &st) != 0 ||
+                !S_ISREG(st.st_mode) || st.st_uid != 0 || !(st.st_mode & S_IXUSR)) return ENOENT;
+        }
+        struct stat cfg = {0};
+        if (lstat(configPath.fileSystemRepresentation, &cfg) != 0 ||
+            !S_ISREG(cfg.st_mode) || cfg.st_uid != 0) return ENOENT;
+        struct stat keyInfo = {0};
+        if (lstat(keyPath.fileSystemRepresentation, &keyInfo) == 0) {
+            if (!S_ISREG(keyInfo.st_mode) || keyInfo.st_uid != 0 ||
+                (keyInfo.st_mode & 077) != 0 || keyInfo.st_size < 32) return EPERM;
+        } else if (errno == ENOENT) needsKey = YES;
+        else return errno;
+        return 0;
+    }];
+    if (result) return [self rh3ActionStage:@"SSH repair preflight" result:result];
+    if (needsKey) {
+        // Never use ssh-keygen -A: it writes the stock /etc/ssh directory.
+        // -f pins output to the verified, root-owned hidden bootstrap.
+        result = [self rh3RunCommand:keygenPath arguments:
+            @[@"-q", @"-t", @"ed25519", @"-N", @"", @"-f", keyPath] input:nil timeout:30];
+        if (result) return [self rh3ActionStage:@"SSH host key generation" result:result];
+    }
+    result = [self rh3RunCommand:sshdPath arguments:
+        @[@"-t", @"-f", configPath, @"-h", keyPath] input:nil timeout:20];
+    if (result) return [self rh3ActionStage:@"SSH configuration validation" result:result];
+
+    result = [self rh3PerformPrivilegedAction:^int {
+        NSError *error = nil;
+        NSString *active = [DOBootstrapper rootHideExistingRootWithError:&error];
+        const char *serverRoot = jbclient_get_jbroot();
+        if (error || !active || !serverRoot ||
+            ![RH3CanonicalAppPath(active) isEqualToString:RH3CanonicalAppPath(root)] ||
+            ![RH3CanonicalAppPath(active) isEqualToString:
+              RH3CanonicalAppPath([NSString stringWithUTF8String:serverRoot])])
+            return EPERM;
+        struct stat keyInfo = {0};
+        if (lstat(keyPath.fileSystemRepresentation, &keyInfo) != 0 ||
+            !S_ISREG(keyInfo.st_mode) || keyInfo.st_uid != 0 ||
+            (keyInfo.st_mode & 077) || keyInfo.st_size < 32) return EPERM;
+        [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
+            @"SSH repair: hidden ED25519 host key and sshd config verified; OpenSSH will be rebased in-memory at next userspace reboot"];
+        return 0;
+    }];
+    return [self rh3ActionStage:@"SSH repair (no server started)" result:result];
+}
+
+// Never treat presence of TweakLoader as proof of injection. A throwaway
+// signed helper checks that systemhook ran AND its dlopen returned non-NULL.
+// This does not claim that every third-party tweak works in every process.
+- (int)verifyRootHideTweakInjection
+{
+    if (![DOBootstrapper rootHidePortEnabled]) return ENOTSUP;
+    if (![self isTweakInjectionEnabled])
+        return [self rh3ActionStage:@"tweak injection probe refused (safe mode)" result:EBUSY];
+    __block NSString *helper = nil;
+    int result = [self rh3PerformPrivilegedAction:^int {
+        NSError *rootError = nil;
+        NSString *root = [DOBootstrapper rootHideExistingRootWithError:&rootError];
+        const char *serverRoot = jbclient_get_jbroot();
+        if (rootError || !root || !serverRoot ||
+            ![RH3CanonicalAppPath(root) isEqualToString:
+              RH3CanonicalAppPath([NSString stringWithUTF8String:serverRoot])]) return EPERM;
+        helper = [root stringByAppendingPathComponent:@"basebin/rh3tweakprobe"];
+        struct stat st = {0};
+        if (lstat(helper.fileSystemRepresentation, &st) != 0 ||
+            !S_ISREG(st.st_mode) || st.st_uid != 0 || !(st.st_mode & S_IXUSR)) return ENOENT;
+        return 0;
+    }];
+    if (result) return [self rh3ActionStage:@"tweak injection probe preflight" result:result];
+    result = [self rh3RunCommand:helper arguments:@[] input:nil timeout:15];
+    return [self rh3ActionStage:@"tweak injection executable probe" result:result];
+}
+
 - (void)unregisterJailbreakApps
 {
     [self runAsRoot:^{
@@ -926,6 +1054,15 @@ static void RH3LogCommandSpawnStage(const char *stage, pid_t pid, int result, vo
         // A toggle is not a successful change unless the verified file was
         // actually removed/created. No silent failures or unbounded shell.
         int status = [self rh3PerformPrivilegedAction:^int {
+            NSError *rootError = nil;
+            NSString *root = [DOBootstrapper rootHideExistingRootWithError:&rootError];
+            const char *activeRoot = jbclient_get_jbroot();
+            if (rootError || !root || !activeRoot ||
+                ![RH3CanonicalAppPath(root) isEqualToString:
+                  RH3CanonicalAppPath([NSString stringWithUTF8String:activeRoot])] ||
+                ![RH3CanonicalAppPath(safeModePath) isEqualToString:
+                  RH3CanonicalAppPath([root stringByAppendingPathComponent:@"basebin/.safe_mode"])])
+                return EPERM;
             struct stat info = {0};
             int exists = lstat(safeModePath.fileSystemRepresentation, &info) == 0;
             if (!exists && errno != ENOENT) return errno;
@@ -942,8 +1079,15 @@ static void RH3LogCommandSpawnStage(const char *stage, pid_t pid, int result, vo
             }
             struct stat after = {0};
             int remaining = lstat(safeModePath.fileSystemRepresentation, &after);
-            if (enabled) return remaining == -1 && errno == ENOENT ? 0 : EIO;
-            return remaining == 0 && S_ISREG(after.st_mode) && after.st_uid == 0 ? 0 : EIO;
+            int verified = enabled ? (remaining == -1 && errno == ENOENT ? 0 : EIO) :
+                (remaining == 0 && S_ISREG(after.st_mode) && after.st_uid == 0 ? 0 : EIO);
+            if (verified) return verified;
+            int dir = open([root stringByAppendingPathComponent:@"basebin"].fileSystemRepresentation,
+                           O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+            if (dir < 0) return errno;
+            int synced = fsync(dir) == 0 ? 0 : errno;
+            close(dir);
+            return synced;
         }];
         return [self rh3ActionStage:enabled ? @"enable tweak injection" : @"disable tweak injection"
                                   result:status];

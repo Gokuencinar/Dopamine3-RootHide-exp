@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[2]
 MAKEFILE = (ROOT / "BaseBin/Makefile").read_text(encoding="utf-8")
 
 SUBPROJECTS = (
-    "ChOma", "XPF", "MachOMerger", "opainject", "libjailbreak",
+    "ChOma", "XPF", "MachOMerger", "opainject", "tweakprobe", "libjailbreak",
     "systemhook", "forkfix", "launchdhook", "hookd", "boomerang",
     "jbctl", "idownloadd", "watchdoghook", "rootlesshooks",
     "roothidehooks", "jailbreakd", "bootstrapper", "dopamine",

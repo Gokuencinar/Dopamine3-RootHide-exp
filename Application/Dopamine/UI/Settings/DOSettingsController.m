@@ -341,6 +341,18 @@ static BOOL gRootHideProviderRepairInFlight = NO;
                         [diagnoseRuntime setProperty:@"stethoscope" forKey:@"image"];
                         [diagnoseRuntime setProperty:@"diagnoseRootHideRuntimePressed" forKey:@"action"];
                         [specifiers addObject:diagnoseRuntime];
+                        PSSpecifier *probeTweaks = [PSSpecifier preferenceSpecifierNamed:@"Verificar carga real de tweaks" target:self set:defSetter get:defGetter detail:nil cell:PSStaticTextCell edit:nil];
+                        [probeTweaks setProperty:[DOButtonCell class] forKey:@"cellClass"];
+                        [probeTweaks setProperty:buttonHeight forKey:@"height"];
+                        [probeTweaks setProperty:@"checkmark.shield" forKey:@"image"];
+                        [probeTweaks setProperty:@"verifyRootHideTweaksPressed" forKey:@"action"];
+                        [specifiers addObject:probeTweaks];
+                        PSSpecifier *repairSSH = [PSSpecifier preferenceSpecifierNamed:@"Preparar OpenSSH en RootHide" target:self set:defSetter get:defGetter detail:nil cell:PSStaticTextCell edit:nil];
+                        [repairSSH setProperty:[DOButtonCell class] forKey:@"cellClass"];
+                        [repairSSH setProperty:buttonHeight forKey:@"height"];
+                        [repairSSH setProperty:@"key.horizontal" forKey:@"image"];
+                        [repairSSH setProperty:@"repairRootHideSSHPressed" forKey:@"action"];
+                        [specifiers addObject:repairSSH];
                     }
                 }
 
@@ -702,6 +714,46 @@ static BOOL gRootHideProviderRepairInFlight = NO;
 }
 
 #pragma mark - Button Actions
+
+- (void)verifyRootHideTweaksPressed
+{
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        int result = [[DOEnvironmentManager sharedManager] verifyRootHideTweakInjection];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            NSString *body = result
+                ? [NSString stringWithFormat:@"No se ha demostrado la carga de TweakLoader (código %d). Comprueba el modo seguro y comparte el log de RootHide. No se han activado tweaks a la fuerza.", result]
+                : @"La prueba aislada confirmó que systemhook se ejecutó y TweakLoader se abrió correctamente. Esto no garantiza que cada tweak funcione en todas las apps.";
+            UIAlertController *alert = [UIAlertController alertControllerWithTitle:
+                result ? @"Inyección sin confirmar" : @"Inyección verificada en el proceso de prueba"
+                message:body preferredStyle:UIAlertControllerStyleAlert];
+            [alert addAction:[UIAlertAction actionWithTitle:@"Aceptar" style:UIAlertActionStyleCancel handler:nil]];
+            [self presentViewController:alert animated:YES completion:nil];
+        });
+    });
+}
+
+- (void)repairRootHideSSHPressed
+{
+    UIAlertController *confirm = [UIAlertController alertControllerWithTitle:@"Preparar OpenSSH"
+        message:@"Solo si ya has cambiado las contraseñas de acceso. Se comprobará OpenSSH, se creará una clave ED25519 privada solo si falta, y se verificará su configuración en el bootstrap oculto. No se inicia el servidor ni se cambia el plist instalado. Después necesitas un reinicio de espacio de usuario."
+        preferredStyle:UIAlertControllerStyleAlert];
+    [confirm addAction:[UIAlertAction actionWithTitle:@"Cancelar" style:UIAlertActionStyleCancel handler:nil]];
+    [confirm addAction:[UIAlertAction actionWithTitle:@"Continuar" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            int result = [[DOEnvironmentManager sharedManager] repairRootHideSSH];
+            dispatch_async(dispatch_get_main_queue(), ^{
+                UIAlertController *done = [UIAlertController alertControllerWithTitle:
+                    result ? @"OpenSSH no preparado" : @"OpenSSH preparado"
+                    message:result ? [NSString stringWithFormat:@"Falló una comprobación (código %d). No se han iniciado servicios. Comparte el diagnóstico.", result] :
+                        @"La clave y configuración ocultas están verificadas. Reinicia una vez el espacio de usuario para que launchd importe la ruta corregida y prueba SSH desde tu ordenador."
+                    preferredStyle:UIAlertControllerStyleAlert];
+                [done addAction:[UIAlertAction actionWithTitle:@"Aceptar" style:UIAlertActionStyleCancel handler:nil]];
+                [self presentViewController:done animated:YES completion:nil];
+            });
+        });
+    }]];
+    [self presentViewController:confirm animated:YES completion:nil];
+}
 
 - (void)diagnoseRootHideRuntimePressed
 {

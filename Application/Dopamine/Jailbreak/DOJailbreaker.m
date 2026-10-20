@@ -1036,9 +1036,20 @@ static void *rh3_boomerang_server(void *opaque)
         return;
     }
     
-    if (!tweaksEnabled) {
+    // RootHide's verified bootstrap marker is authoritative after the first
+    // install. The UI preference can be stale: silently applying it again
+    // would recreate .safe_mode after the user removed it successfully.
+    // First-time RootHide safety is enforced by injectRootHideLaunchdHookSafely.
+    if (!tweaksEnabled && ![DOBootstrapper rootHidePortEnabled]) {
         printf("Creating safe mode marker file since tweaks were disabled in settings\n");
         [[NSData data] writeToFile:JBROOT_PATH(@"/basebin/.safe_mode") atomically:YES];
+    }
+    if ([DOBootstrapper rootHidePortEnabled]) {
+        struct stat rh3SafeInfo = {0};
+        int rh3SafeExists = lstat(JBROOT_PATH("/basebin/.safe_mode"), &rh3SafeInfo) == 0;
+        [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
+            [NSString stringWithFormat:@"tweaks: existing RootHide marker authoritative; old_preference=%d safe_mode=%d",
+             tweaksEnabled, rh3SafeExists]];
     }
     
     [[DOUIManager sharedInstance] sendLog:DOLocalizedString(@"Loading BaseBin TrustCache") debug:NO];

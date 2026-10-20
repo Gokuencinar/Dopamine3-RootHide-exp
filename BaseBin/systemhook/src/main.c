@@ -233,9 +233,12 @@ int csops_audittoken_hook(pid_t pid, unsigned int ops, void *useraddr, size_t us
 
 bool should_enable_tweaks(void)
 {
-	if (access(JBROOT_PATH("/basebin/.safe_mode"), F_OK) == 0) {
+	// Treat any stat error except ENOENT as safe mode, not as permission
+	// to load tweaks. On RootHide the marker can be hidden from a sandbox.
+	struct stat safeInfo = {0};
+	if (lstat(JBROOT_PATH("/basebin/.safe_mode"), &safeInfo) == 0)
 		return false;
-	}
+	if (errno != ENOENT) return false;
 	const char *safeMode = getenv("_SafeMode");
 	const char *msSafeMode = getenv("_MSSafeMode");
 	if ((safeMode && !strcmp(safeMode, "1")) ||
@@ -567,11 +570,14 @@ __attribute__((constructor)) static void initializer(void)
 		}
 #endif
 		// Load tweaks if desired
+			bool rh3Probe = string_has_suffix(gExecutablePath, "/basebin/rh3tweakprobe");
+			if (rh3Probe) setenv("RH3_TWEAK_PROBE_SYSTEMHOOK", "1", 1);
 			if (should_enable_tweaks()) {
 				const char *tweakLoaderPath = JBROOT_PATH("/usr/lib/TweakLoader.dylib");
 				if (tweakLoaderPath && access(tweakLoaderPath, F_OK) == 0) {
 				void *tweakLoaderHandle = dlopen(tweakLoaderPath, RTLD_NOW);
 				if (tweakLoaderHandle != NULL) {
+						if (rh3Probe) setenv("RH3_TWEAK_PROBE_LOADER", "1", 1);
 					dlclose(tweakLoaderHandle);
 				}
 			}

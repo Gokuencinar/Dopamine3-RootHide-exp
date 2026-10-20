@@ -1,6 +1,10 @@
 #include "jbserver_global.h"
 
 #include <stdio.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #include <time.h>
 #include <libjailbreak/util.h>
 #include "../crashreporter.h"
@@ -24,8 +28,17 @@ static int watchdog_intercept_userspace_panic(const char *panicMessage)
 	}
 
 	setenv("WATCHDOG_PANIC_MESSAGE", panicMessage, 1);
-	FILE *touchFile = fopen(JBROOT_PATH("/basebin/.safe_mode"), "w");
-	fclose(touchFile);
+	// Never truncate or follow a symlink in PID 1 on a crash-sensitive path.
+	// The userspace reboot is only allowed after the no-tweak marker is durable.
+	int markerFD = open(JBROOT_PATH("/basebin/.safe_mode"),
+	                    O_WRONLY | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0644);
+	if (markerFD < 0) return errno;
+	struct stat markerInfo = {0};
+	int markerError = fstat(markerFD, &markerInfo) ? errno :
+	    (!S_ISREG(markerInfo.st_mode) || markerInfo.st_uid != 0 ? EPERM : 0);
+	if (!markerError && fsync(markerFD)) markerError = errno;
+	if (close(markerFD) && !markerError) markerError = errno;
+	if (markerError) return markerError;
 
 	return 0;
 }
