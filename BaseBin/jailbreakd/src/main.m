@@ -84,6 +84,15 @@ int main(int argc, char* argv[])
 			rh3_bootlog("jailbreakd: userspace reboot respawn branch entered");
 			unsetenv("RESPAWN_REQUIRED");
 
+			// RootHide's legacy dyld-injection path needs a suspended,
+			// patched replacement. With dyld patch disabled, the existing
+			// process already has working primitives and can check in itself.
+			// Previously we patched (and then killed) a throwaway child
+			// unconditionally, causing the entire daemon to exit when that
+			// unnecessary patch failed after userspace reboot.
+			if (!dyld_patch_enabled()) {
+				rh3_bootlog("jailbreakd: dyld patch inactive; skip unnecessary replacement and check in");
+			} else {
 			char selfPath[PATH_MAX]={0};
 			uint32_t selfPathSize = sizeof(selfPath);
 			_NSGetExecutablePath(selfPath, &selfPathSize);
@@ -109,6 +118,9 @@ int main(int argc, char* argv[])
 
 			rh3_bootlog("jailbreakd: waiting for suspension and patching replacement");
 			int patchResult = unrestrict(pid, proc_patch_dyld, false);
+			char stage[112];
+			snprintf(stage, sizeof(stage), "jailbreakd: replacement patch result=%d", patchResult);
+			rh3_bootlog(stage);
 			rh3_bootlog(patchResult ? "jailbreakd: replacement patch failed" : "jailbreakd: replacement patch completed");
 			if(patchResult != 0) {
 				// Only the direct child created above. A failed patch must
@@ -119,21 +131,15 @@ int main(int argc, char* argv[])
 				return 5;
 			}
 
-			if(dyld_patch_enabled()) {
-				rh3_bootlog("jailbreakd: resuming patched replacement");
-				if (kill(pid, SIGCONT) != 0) {
-					rh3_bootlog("jailbreakd: replacement resume failed");
-					(void)kill(pid, SIGKILL);
-					(void)waitpid(pid, NULL, WNOHANG);
-					return 5;
-				}
-				rh3_bootlog("jailbreakd: replacement resume signaled");
-				return 0;
-			} else {
-				rh3_bootlog("jailbreakd: dyld patch inactive, continuing in original daemon");
-				kill(pid, SIGKILL);
-				// Do not block checkin indefinitely on a failed reaper.
+			rh3_bootlog("jailbreakd: resuming patched replacement");
+			if (kill(pid, SIGCONT) != 0) {
+				rh3_bootlog("jailbreakd: replacement resume failed");
+				(void)kill(pid, SIGKILL);
 				(void)waitpid(pid, NULL, WNOHANG);
+				return 5;
+			}
+			rh3_bootlog("jailbreakd: replacement resume signaled");
+			return 0;
 			}
 		}
 

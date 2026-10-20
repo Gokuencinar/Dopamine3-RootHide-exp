@@ -38,8 +38,13 @@ class JailbreakdRespawn(unittest.TestCase):
         self.assertIn('jailbreakd: authenticated checkin starting', DAEMON)
         self.assertIn('jailbreakd: authenticated checkin failed', DAEMON)
         self.assertIn('jailbreakd: XPC receive source active', DAEMON)
-        self.assertLess(DAEMON.index('int patchResult = unrestrict('),
-                        DAEMON.index('if(dyld_patch_enabled())'))
+        self.assertIn('if (!dyld_patch_enabled())', DAEMON)
+        self.assertIn('dyld patch inactive; skip unnecessary replacement and check in', DAEMON)
+        self.assertLess(DAEMON.index('if (!dyld_patch_enabled())'),
+                        DAEMON.index('posix_spawn(&pid, selfPath'))
+        self.assertLess(DAEMON.index('if (!dyld_patch_enabled())'),
+                        DAEMON.index('int patchResult = unrestrict('))
+        self.assertIn('replacement patch result=%d', DAEMON)
         self.assertLess(DAEMON.index('if(patchResult != 0)'),
                         DAEMON.index('kill(pid, SIGCONT)'))
         self.assertIn('waitpid(pid, NULL, WNOHANG)', DAEMON)

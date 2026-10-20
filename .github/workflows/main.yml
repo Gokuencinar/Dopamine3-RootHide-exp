@@ -1,4 +1,5 @@
 name: "Dopamine: build and upload"
+run-name: "RootHide3 r${{ github.run_number }}.a${{ github.run_attempt }} - ${{ github.event_name == 'workflow_dispatch' && inputs.hardware_beta == true && 'Hardware Beta' || 'CI' }}"
 
 on:
   push:
@@ -71,7 +72,7 @@ jobs:
       - name: Upload standalone device-test IPA
         uses: actions/upload-artifact@v4
         with:
-          name: RootHide3-Device-Test-APP-ONLY
+          name: RootHide3-Device-Test-APP-ONLY-r${{ github.run_number }}-a${{ github.run_attempt }}
           retention-days: 7
           if-no-files-found: error
           path: |
@@ -82,6 +83,8 @@ jobs:
   build:
     if: github.event_name != 'workflow_dispatch' || inputs.ui_preview != true
     runs-on: macos-15
+    permissions:
+      contents: write # Manual hardware-beta releases only; PR tokens remain read-only.
     env:
       # Only an explicit manual dispatch can enable the hardware variant.
       ROOTHIDE_HARDWARE_TEST: ${{ github.event_name == 'workflow_dispatch' && inputs.hardware_beta == true && 'YES' || 'NO' }}
@@ -366,7 +369,7 @@ jobs:
         if: steps.roothide_port.outputs.is_port == 'true' && env.ROOTHIDE_HARDWARE_TEST != 'YES'
         uses: actions/upload-artifact@v4
         with:
-          name: RootHide3-COMPILE-ONLY-NOT-FOR-INSTALL
+          name: RootHide3-COMPILE-ONLY-NOT-FOR-INSTALL-r${{ github.run_number }}-a${{ github.run_attempt }}
           if-no-files-found: error
           retention-days: 7
           path: |
@@ -390,7 +393,7 @@ jobs:
         if: steps.roothide_port.outputs.is_port == 'true' && env.ROOTHIDE_HARDWARE_TEST != 'YES'
         uses: actions/upload-artifact@v4
         with:
-          name: RootHide3-FULL-EXPERIMENTAL-JAILBREAK-DISABLED
+          name: RootHide3-FULL-EXPERIMENTAL-JAILBREAK-DISABLED-r${{ github.run_number }}-a${{ github.run_attempt }}
           if-no-files-found: error
           retention-days: 7
           path: |
@@ -400,26 +403,62 @@ jobs:
 
       - name: Verify jailbreak-enabled RootHide hardware beta
         if: steps.roothide_port.outputs.is_port == 'true' && env.ROOTHIDE_HARDWARE_TEST == 'YES'
+        id: hardware_beta_package
         run: |
           set -euo pipefail
           cp Application/Dopamine.ipa Application/RootHide3-Hardware-Beta.ipa
           python3 tools/verify_roothide_full_experimental.py --hardware-beta --ipa Application/RootHide3-Hardware-Beta.ipa --json | tee roothide-hardware-beta-inspection.json
-          shasum -a 256 Application/RootHide3-Hardware-Beta.ipa > RootHide3-Hardware-Beta.ipa.sha256
+          suffix="r${GITHUB_RUN_NUMBER}-a${GITHUB_RUN_ATTEMPT}-${GITHUB_SHA:0:7}"
+          asset="RootHide3-Hardware-Beta-${suffix}.ipa"
+          tag="roothide3-hw-${suffix}"
+          cp Application/RootHide3-Hardware-Beta.ipa "Application/$asset"
+          (cd Application && shasum -a 256 "$asset" > "$asset.sha256")
+          echo "asset=$asset" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
           printf 'RootHide 3: beta con el intento de jailbreak habilitado.\nRevisión: %s\nPerfiles experimentales para arm64/arm64e e iOS 15, 16, 17, 18 y 26. Los exploits de Dopamine deciden la combinación admitida.\nEmpieza sin tweaks. No se ha probado en un iPhone.\nHaz una copia de tus datos y consulta HARDWARE-BETA.md.\n' "$GITHUB_SHA" > ROOT_HIDE_HARDWARE_BETA_README.txt
 
       - name: Upload jailbreak-enabled RootHide hardware beta
         if: steps.roothide_port.outputs.is_port == 'true' && env.ROOTHIDE_HARDWARE_TEST == 'YES'
         uses: actions/upload-artifact@v4
         with:
-          name: RootHide3-HARDWARE-BETA-JAILBREAK-ENABLED
+          name: RootHide3-HARDWARE-BETA-JAILBREAK-ENABLED-r${{ github.run_number }}-a${{ github.run_attempt }}
           if-no-files-found: error
           retention-days: 7
           path: |
-            ${{ github.workspace }}/Application/RootHide3-Hardware-Beta.ipa
+            ${{ github.workspace }}/Application/${{ steps.hardware_beta_package.outputs.asset }}
             ${{ github.workspace }}/roothide-hardware-beta-inspection.json
-            ${{ github.workspace }}/RootHide3-Hardware-Beta.ipa.sha256
+            ${{ github.workspace }}/Application/${{ steps.hardware_beta_package.outputs.asset }}.sha256
             ${{ github.workspace }}/ROOT_HIDE_HARDWARE_BETA_README.txt
             ${{ github.workspace }}/HARDWARE-BETA.md
+
+      # upload-artifact wraps its contents in a ZIP. Publish the verified
+      # IPA itself as a unique prerelease asset for a true direct .ipa URL.
+      # This is deliberately gated to explicit manual hardware beta builds.
+      - name: Publish directly downloadable experimental IPA
+        if: steps.roothide_port.outputs.is_port == 'true' && env.ROOTHIDE_HARDWARE_TEST == 'YES' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/roothide-dopamine3-integration'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          ASSET: ${{ steps.hardware_beta_package.outputs.asset }}
+          TAG: ${{ steps.hardware_beta_package.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$ASSET" && test -n "$TAG"
+          test -f "Application/$ASSET"
+          test -f "Application/$ASSET.sha256"
+          (cd Application && shasum -a 256 -c "$ASSET.sha256")
+          gh release create "$TAG" "Application/$ASSET" "Application/$ASSET.sha256" \
+            --target "$GITHUB_SHA" \
+            --title "RootHide 3 Hardware Beta ${TAG#roothide3-hw-}" \
+            --notes-file ROOT_HIDE_HARDWARE_BETA_README.txt \
+            --prerelease --latest=false
+          url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/download/${TAG}/${ASSET}"
+          {
+            echo '### Experimental RootHide 3 Hardware Beta (not hardware validated)'
+            echo "[Download IPA directly]($url)"
+            echo "SHA-256: \`$(shasum -a 256 "Application/$ASSET" | cut -d ' ' -f 1)\`"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       # Compile first so early RootHide port errors are visible in CI, but
       # never upload an unverified stock artifact as a RootHide release.
