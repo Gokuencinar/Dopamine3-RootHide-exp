@@ -99,7 +99,9 @@ int main(void){
     @unittest.skipUnless(sys.platform == 'darwin', 'native numeric version ordering')
     def test_jbctl_3011_uses_parent_pipe_instead_of_legacy_suspension(self):
         source = (ROOT/'Application/Dopamine/Jailbreak/DOEnvironmentManager.m').read_text()
-        helper = source.split('static BOOL DOUsesLegacyJbctl', 1)[1].split('@implementation', 1)[0]
+        # Compile only the numeric version predicate, not the unrelated
+        # persistent spawn diagnostic callback declared immediately after it.
+        helper = source.split('static BOOL DOUsesLegacyJbctl', 1)[1].split('static void RH3LogCommandSpawnStage', 1)[0]
         boot.BootTransition().run_native('#import <Foundation/Foundation.h>\nstatic BOOL DOUsesLegacyJbctl'+helper+r'''
 int main(void){@autoreleasepool{
  if(!DOUsesLegacyJbctl(@"3.0.4"))return 1;
