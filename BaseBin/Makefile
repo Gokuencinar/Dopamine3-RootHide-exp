@@ -9,35 +9,39 @@
 
 all: basebin.tar
 
-# All components share .build/.include and the signing/trustcache staging tree.
-# Avoid racing their destructive initialization and concurrent tar packaging.
-.NOTPARALLEL:
+# Parallelism is safe only after BOTH staging directories have been recreated.
+# Individual components own distinct staged outputs; explicit prerequisites
+# below serialize consumers of generated headers/libraries. In particular,
+# trustcache and dyldhook/tar must wait for ALL of the parallel subprojects.
+# Do not introduce a global .NOTPARALLEL: MachOMerger and independent BaseBin
+# components would otherwise consume most of the build time sequentially.
+staging: .build .include
 
 subprojects: ChOma XPF MachOMerger opainject libjailbreak systemhook forkfix launchdhook hookd boomerang jbctl idownloadd watchdoghook rootlesshooks roothidehooks jailbreakd bootstrapper dopamine
 
-ChOma: .build .include
+ChOma: staging
 	@python3 ../tools/apply_choma_fixes.py
 	@$(MAKE) -C ChOma TARGET=ios DISABLE_SIGNING=1 DISABLE_TESTS=1 DYLIB_LDFLAGS="-install_name @loader_path/libchoma.dylib"
 	@ldid -Cadhoc -s ChOma/output/ios/lib/libchoma.dylib
 	@cp ChOma/output/ios/lib/libchoma.dylib .build
 	@cp -r ChOma/output/ios/include/choma .include
 
-XPF: .build .include ChOma
+XPF: staging ChOma
 	@$(MAKE) -C XPF output/ios/libxpf.dylib CHOMA_PATH=../ChOma CHOMA_DYLIB_PATH="../.build"
 	@ldid -Cadhoc -s XPF/output/ios/libxpf.dylib
 	@cp XPF/output/ios/libxpf.dylib .build/libxpf.dylib
 	@mkdir -p .include/xpf
 	@cp XPF/src/xpf.h .include/xpf
 
-MachOMerger: .build .include
+MachOMerger: staging
 	@$(MAKE) -C MachOMerger
 	@cp MachOMerger/MachOMerger .build
 
-opainject: .build .include
+opainject: staging
 	$(MAKE) -C opainject
 	@cp opainject/opainject .build
 
-libjailbreak: .build .include ChOma
+libjailbreak: staging ChOma
 	$(MAKE) -C libjailbreak
 	@cp libjailbreak/libjailbreak.dylib .build
 	@mkdir -p .include/libjailbreak
@@ -45,57 +49,57 @@ libjailbreak: .build .include ChOma
 	@mkdir -p .include/libjailbreak/roothider
 	@cp libjailbreak/src/roothider/*.h .include/libjailbreak/roothider
 
-systemhook: .build .include libjailbreak
+systemhook: staging libjailbreak
 	$(MAKE) -C systemhook
 	@cp systemhook/systemhook.dylib .build
 
-forkfix: .build .include libjailbreak systemhook
+forkfix: staging libjailbreak systemhook
 	$(MAKE) -C forkfix
 	@cp forkfix/forkfix.dylib .build
 
-launchdhook: .build .include libjailbreak
+launchdhook: staging libjailbreak
 	$(MAKE) -C launchdhook
 	@cp launchdhook/launchdhook.dylib .build
 
-hookd: .build .include libjailbreak
+hookd: staging libjailbreak
 	$(MAKE) -C hookd
 	@cp hookd/hookd .build
 
-boomerang: .build .include libjailbreak
+boomerang: staging libjailbreak
 	$(MAKE) -C boomerang
 	@cp boomerang/boomerang .build
 
-jbctl: .build .include libjailbreak
+jbctl: staging libjailbreak
 	$(MAKE) -C jbctl
 	@cp jbctl/jbctl .build
 
-idownloadd: .build .include libjailbreak
+idownloadd: staging libjailbreak
 	$(MAKE) -C idownloadd
 	@cp idownloadd/idownloadd .build
 
-watchdoghook: .build .include libjailbreak
+watchdoghook: staging libjailbreak
 	$(MAKE) -C watchdoghook
 	@cp watchdoghook/watchdoghook.dylib .build
 
-rootlesshooks: .build .include libjailbreak
+rootlesshooks: staging libjailbreak
 	$(MAKE) -C rootlesshooks
 	@cp rootlesshooks/.theos/obj/rootlesshooks.dylib .build
 
 # These RootHide components coexist with Dopamine 3's hookd and rootlesshooks;
 # hiding is not activated unless the hidden bootstrap state is initialized.
-roothidehooks: .build .include libjailbreak
+roothidehooks: staging libjailbreak
 	$(MAKE) -C roothidehooks
 	@cp roothidehooks/.theos/obj/roothidehooks.dylib .build
 
-jailbreakd: .build .include libjailbreak
+jailbreakd: staging libjailbreak
 	$(MAKE) -C jailbreakd
 	@cp jailbreakd/jailbreakd .build
 
-bootstrapper: .build .include libjailbreak
+bootstrapper: staging libjailbreak
 	$(MAKE) -C bootstrapper
 	@cp bootstrapper/bootstrapper .build
 
-dopamine: .build .include libjailbreak XPF ChOma
+dopamine: staging libjailbreak XPF ChOma
 	$(MAKE) -C dopamine
 	@cp dopamine/dopamine .build
 
@@ -152,4 +156,4 @@ clean:
 	@rm -rf basebin.tar
 	@rm -rf basebin.tc
 
-.PHONY: clean .build .include ChOma XPF MachOMerger opainject libjailbreak systemhook forkfix launchdhook hookd boomerang jbctl idownloadd watchdoghook rootlesshooks roothidehooks jailbreakd bootstrapper basebin.tc dyldhook basebin.tar
+.PHONY: clean staging .build .include ChOma XPF MachOMerger opainject libjailbreak systemhook forkfix launchdhook hookd boomerang jbctl idownloadd watchdoghook rootlesshooks roothidehooks jailbreakd bootstrapper basebin.tc dyldhook basebin.tar

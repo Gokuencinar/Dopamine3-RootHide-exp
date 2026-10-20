@@ -170,6 +170,6 @@ int main(int argc, char **argv) {
 
     def test_build_applies_overlay_before_compiling_shared_choma(self):
         make=(ROOT/'BaseBin/Makefile').read_text(encoding='utf-8')
-        section=make.split('ChOma: .build .include',1)[1].split('XPF:',1)[0]
+        section=make.split('ChOma: staging',1)[1].split('XPF:',1)[0]
         self.assertLess(section.index('tools/apply_choma_fixes.py'),section.index('$(MAKE) -C ChOma'))
         self.assertIn('CHOMA_PATH=../ChOma',make)
