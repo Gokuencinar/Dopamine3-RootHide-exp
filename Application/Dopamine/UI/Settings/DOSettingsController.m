@@ -335,6 +335,12 @@ static BOOL gRootHideProviderRepairInFlight = NO;
                         [repairProvider setProperty:@"wrench.adjustable" forKey:@"image"];
                         [repairProvider setProperty:@"repairRootHideLibkrwPressed" forKey:@"action"];
                         [specifiers addObject:repairProvider];
+                        PSSpecifier *diagnoseRuntime = [PSSpecifier preferenceSpecifierNamed:@"Diagnosticar tweaks, NewTerm y SSH" target:self set:defSetter get:defGetter detail:nil cell:PSStaticTextCell edit:nil];
+                        [diagnoseRuntime setProperty:[DOButtonCell class] forKey:@"cellClass"];
+                        [diagnoseRuntime setProperty:buttonHeight forKey:@"height"];
+                        [diagnoseRuntime setProperty:@"stethoscope" forKey:@"image"];
+                        [diagnoseRuntime setProperty:@"diagnoseRootHideRuntimePressed" forKey:@"action"];
+                        [specifiers addObject:diagnoseRuntime];
                     }
                 }
 
@@ -502,10 +508,19 @@ static BOOL gRootHideProviderRepairInFlight = NO;
 
 - (void)setTweakInjectionEnabled:(id)value specifier:(PSSpecifier *)specifier
 {
-    [self setPreferenceValue:value specifier:specifier];
     DOEnvironmentManager *envManager = [DOEnvironmentManager sharedManager];
     if (envManager.isJailbroken) {
-        [[DOEnvironmentManager sharedManager] setTweakInjectionEnabled:((NSNumber *)value).boolValue];
+        int status = [envManager setTweakInjectionEnabled:((NSNumber *)value).boolValue];
+        if ([DOBootstrapper rootHidePortEnabled] && status) {
+            [self setPreferenceValue:@(envManager.isTweakInjectionEnabled) specifier:specifier];
+            UIAlertController *failed = [UIAlertController alertControllerWithTitle:@"No se cambió la inyección"
+                message:[NSString stringWithFormat:@"No se pudo actualizar el modo seguro (código %d). Comparte el diagnóstico. No se reiniciará el entorno.", status]
+                preferredStyle:UIAlertControllerStyleAlert];
+            [failed addAction:[UIAlertAction actionWithTitle:@"Aceptar" style:UIAlertActionStyleCancel handler:nil]];
+            [self presentViewController:failed animated:YES completion:nil];
+            return;
+        }
+        [self setPreferenceValue:value specifier:specifier];
         UIAlertController *userspaceRebootAlertController = [UIAlertController alertControllerWithTitle:DOLocalizedString(@"Alert_Tweak_Injection_Toggled_Title") message:DOLocalizedString(@"Alert_Tweak_Injection_Toggled_Body") preferredStyle:UIAlertControllerStyleAlert];
         UIAlertAction *rebootNowAction = [UIAlertAction actionWithTitle:DOLocalizedString(@"Alert_Tweak_Injection_Toggled_Reboot_Now") style:UIAlertActionStyleDefault handler:^(UIAlertAction * _Nonnull action) {
             dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_HIGH, 0), ^{
@@ -524,6 +539,8 @@ static BOOL gRootHideProviderRepairInFlight = NO;
         [userspaceRebootAlertController addAction:rebootNowAction];
         [userspaceRebootAlertController addAction:rebootLaterAction];
         [self presentViewController:userspaceRebootAlertController animated:YES completion:nil];
+    } else {
+        [self setPreferenceValue:value specifier:specifier];
     }
 }
 
@@ -685,6 +702,22 @@ static BOOL gRootHideProviderRepairInFlight = NO;
 }
 
 #pragma mark - Button Actions
+
+- (void)diagnoseRootHideRuntimePressed
+{
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        int result = [[DOEnvironmentManager sharedManager] diagnoseRootHideRuntime];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            UIAlertController *alert = [UIAlertController alertControllerWithTitle:
+                result ? @"Diagnóstico incompleto" : @"Diagnóstico guardado"
+                message:result ? [NSString stringWithFormat:@"No se pudo verificar el entorno (código %d). Comparte el registro de RootHide.", result] :
+                    @"Se han comprobado en modo de solo lectura el estado seguro y la presencia de TweakLoader, NewTerm y SSH. Comparte el registro de diagnóstico para analizar los resultados; esta acción no inicia servicios."
+                preferredStyle:UIAlertControllerStyleAlert];
+            [alert addAction:[UIAlertAction actionWithTitle:@"Aceptar" style:UIAlertActionStyleCancel handler:nil]];
+            [self presentViewController:alert animated:YES completion:nil];
+        });
+    });
+}
 
 - (void)refreshJailbreakAppsPressed
 {

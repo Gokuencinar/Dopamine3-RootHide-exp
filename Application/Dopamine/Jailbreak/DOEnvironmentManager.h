@@ -54,13 +54,14 @@ NS_ASSUME_NONNULL_BEGIN
 - (int)rebootUserspace;
 - (void)rebuildIconCache;
 - (int)refreshJailbreakApps;
+- (int)diagnoseRootHideRuntime;
 - (void)reboot;
 - (int)changeMobilePassword:(NSString *)newPassword;
 - (NSError*)updateEnvironment;
 - (void)updateJailbreakFromTIPA:(NSString *)tipaPath;
 
 - (BOOL)isTweakInjectionEnabled;
-- (void)setTweakInjectionEnabled:(BOOL)enabled;
+- (int)setTweakInjectionEnabled:(BOOL)enabled;
 - (BOOL)isIDownloadEnabled;
 - (void)setIDownloadEnabled:(BOOL)enabled needsUnsandbox:(BOOL)needsUnsandbox;
 - (void)setIDownloadLoaded:(BOOL)loaded needsUnsandbox:(BOOL)needsUnsandbox;

@@ -29,6 +29,27 @@ En la prueba del iPhone X con r134, `pw usermod 501 -h 0` devolvió dos veces el
 
 **Nunca introduzcas tu contraseña en un log, issue o mensaje de diagnóstico.** Si una prueba devuelve error, no reintentes el cambio repetidamente ni edites a mano `master.passwd`/`spwd.db`. Comparte únicamente las etapas y códigos numéricos del diagnóstico.
 
+## Inyección después de repetir Jailbreak, NewTerm y SSH
+
+La prueba en hardware posterior a r138 observó que los tweaks podían funcionar
+solo después de actualizar las aplicaciones y reiniciar el espacio de usuario.
+Se ha corregido el comportamiento que **recreaba forzosamente**
+`basebin/.safe_mode` en cada nuevo intento de jailbreak, aunque el bootstrap
+ya estuviera instalado. En la primera activación se sigue forzando el modo
+seguro; a partir de entonces se conserva la elección registrada del usuario.
+El botón de inyección comprueba ahora el resultado de modificar el marcador y
+no ofrece un reinicio si la operación falla.
+
+La opción **Ajustes → Diagnosticar tweaks, NewTerm y SSH** es de solo lectura:
+registra si existen el marcador de modo seguro, TweakLoader, el bundle NewTerm,
+el ejecutable sshd y plists SSH del root verificado. No almacena las rutas
+privadas completas, no cambia contraseñas ni inicia servidores. **Encontrar un
+plist o binario no demuestra que el daemon esté en ejecución.** Para un fallo de
+NewTerm hace falta además el informe de cierre o el mensaje en pantalla; para
+SSH, distinguir «conexión rechazada», «tiempo agotado» y «autenticación fallida».
+El registro de apps no se ejecuta automáticamente durante el primer arranque
+porque una versión anterior se bloqueaba en el primer hijo parcheado.
+
 ## Si falla
 
 Guarda el mensaje de error, los logs, el modelo, la versión exacta de iOS y la revisión de la app. No repitas el proceso sin revisar el fallo: puede haber quedado un bootstrap a medias. No se borra automáticamente una instalación de RootHide 2, y reiniciar no garantiza resolver cualquier estado parcial.

@@ -701,6 +701,49 @@ static void RH3LogCommandSpawnStage(const char *stage, pid_t pid, int result, vo
     return 0;
 }
 
+// Read-only diagnosis for hardware where NewTerm and SSH are inaccessible.
+// Never start sshd, write launchd state, rebuild databases, or log file paths.
+- (int)diagnoseRootHideRuntime
+{
+    if (![DOBootstrapper rootHidePortEnabled]) return ENOTSUP;
+    int result = [self rh3PerformPrivilegedAction:^int {
+        NSError *rootError = nil;
+        NSString *root = [DOBootstrapper rootHideExistingRootWithError:&rootError];
+        const char *serverRoot = jbclient_get_jbroot();
+        if (rootError || !root || !serverRoot ||
+            ![RH3CanonicalAppPath(root) isEqual:RH3CanonicalAppPath([NSString stringWithUTF8String:serverRoot])])
+            return EPERM;
+        struct stat statInfo = {0};
+        BOOL marker = lstat([root stringByAppendingPathComponent:@"basebin/.safe_mode"].fileSystemRepresentation,
+                            &statInfo) == 0 && S_ISREG(statInfo.st_mode);
+        BOOL loader = lstat([root stringByAppendingPathComponent:@"usr/lib/TweakLoader.dylib"].fileSystemRepresentation,
+                            &statInfo) == 0 && (S_ISREG(statInfo.st_mode) || S_ISLNK(statInfo.st_mode));
+        BOOL newTerm = NO;
+        for (NSString *name in @[@"NewTerm.app", @"NewTerm2.app", @"NewTerm3.app"]) {
+            NSString *bundle = [[root stringByAppendingPathComponent:@"Applications"] stringByAppendingPathComponent:name];
+            if (lstat(bundle.fileSystemRepresentation, &statInfo) == 0 && S_ISDIR(statInfo.st_mode)) {
+                newTerm = YES;
+                break;
+            }
+        }
+        BOOL sshd = lstat([root stringByAppendingPathComponent:@"usr/sbin/sshd"].fileSystemRepresentation,
+                          &statInfo) == 0 && S_ISREG(statInfo.st_mode);
+        NSError *listingError = nil;
+        NSArray<NSString *> *daemons = [NSFileManager.defaultManager contentsOfDirectoryAtPath:
+            [root stringByAppendingPathComponent:@"Library/LaunchDaemons"] error:&listingError];
+        NSUInteger sshPlists = 0;
+        for (NSString *name in daemons) {
+            if ([[name.lowercaseString pathExtension] isEqualToString:@"plist"] &&
+                [name.lowercaseString containsString:@"ssh"]) sshPlists++;
+        }
+        [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
+            [NSString stringWithFormat:@"runtime: tweak_safe_mode=%d tweak_loader_present=%d newterm_bundle_present=%d sshd_binary_present=%d ssh_plists=%lu daemon_listing_ok=%d; presence is not running state",
+             marker, loader, newTerm, sshd, (unsigned long)sshPlists, daemons != nil && listingError == nil]];
+        return 0;
+    }];
+    return [self rh3ActionStage:@"read-only tweak/terminal/SSH diagnosis" result:result];
+}
+
 - (void)unregisterJailbreakApps
 {
     [self runAsRoot:^{
@@ -813,9 +856,35 @@ static void RH3LogCommandSpawnStage(const char *stage, pid_t pid, int result, vo
     return ![[NSFileManager defaultManager] fileExistsAtPath:JBROOT_PATH(@"/basebin/.safe_mode")];
 }
 
-- (void)setTweakInjectionEnabled:(BOOL)enabled
+- (int)setTweakInjectionEnabled:(BOOL)enabled
 {
     NSString *safeModePath = JBROOT_PATH(@"/basebin/.safe_mode");
+    if ([DOBootstrapper rootHidePortEnabled]) {
+        // A toggle is not a successful change unless the verified file was
+        // actually removed/created. No silent failures or unbounded shell.
+        int status = [self rh3PerformPrivilegedAction:^int {
+            struct stat info = {0};
+            int exists = lstat(safeModePath.fileSystemRepresentation, &info) == 0;
+            if (!exists && errno != ENOENT) return errno;
+            if (exists && (!S_ISREG(info.st_mode) || info.st_uid != 0))
+                return EPERM;
+            if (enabled) {
+                if (exists && unlink(safeModePath.fileSystemRepresentation) != 0)
+                    return errno;
+            } else if (!exists) {
+                int fd = open(safeModePath.fileSystemRepresentation,
+                              O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0644);
+                if (fd < 0) return errno;
+                if (close(fd)) return errno;
+            }
+            struct stat after = {0};
+            int remaining = lstat(safeModePath.fileSystemRepresentation, &after);
+            if (enabled) return remaining == -1 && errno == ENOENT ? 0 : EIO;
+            return remaining == 0 && S_ISREG(after.st_mode) && after.st_uid == 0 ? 0 : EIO;
+        }];
+        return [self rh3ActionStage:enabled ? @"enable tweak injection" : @"disable tweak injection"
+                                  result:status];
+    }
     if ([self isJailbroken]) {
         [self runAsRoot:^{
             [self runUnsandboxed:^{
@@ -828,6 +897,7 @@ static void RH3LogCommandSpawnStage(const char *stage, pid_t pid, int result, vo
             }];
         }];
     }
+    return 0;
 }
 
 - (BOOL)isIDownloadEnabled

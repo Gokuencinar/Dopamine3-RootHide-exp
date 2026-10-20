@@ -519,8 +519,23 @@ static void *rh3_boomerang_server(void *opaque)
         }
     }
 
-    // Force the first experimental boot into Dopamine's established no-tweak
-    // mode. The user may explicitly re-enable tweaks after hardware testing.
+    // Only the FIRST RootHide activation must force no-tweak mode. For an
+    // already committed bootstrap, respect the user's saved .safe_mode state.
+    // Recreating that marker on EVERY jailbreak was disabling tweaks again
+    // even after a successful, explicit enable + userspace reboot.
+    NSString *installedMarker = [root stringByAppendingPathComponent:@".installed_roothide3"];
+    struct stat installedInfo = {0};
+    BOOL hasInstalledMarker = lstat(installedMarker.fileSystemRepresentation, &installedInfo) == 0;
+    if (hasInstalledMarker && (!S_ISREG(installedInfo.st_mode) || installedInfo.st_uid != 0 ||
+                               installedInfo.st_size < 1 || installedInfo.st_size > 16)) {
+        return [self rh3LaunchdInjectionError:@"RootHide installed marker is not a verified root-owned regular file"];
+    }
+    if (!hasInstalledMarker && errno != ENOENT) {
+        return [self rh3LaunchdInjectionError:@"Could not inspect RootHide installed marker"];
+    }
+    BOOL installed = hasInstalledMarker &&
+        [[NSString stringWithContentsOfFile:installedMarker encoding:NSUTF8StringEncoding error:nil]
+         isEqualToString:@"3"];
     NSString *safeMode = [root stringByAppendingPathComponent:@"basebin/.safe_mode"];
     struct stat safeModeInfo = {0};
     if (lstat(safeMode.fileSystemRepresentation, &safeModeInfo) == 0) {
@@ -529,8 +544,15 @@ static void *rh3_boomerang_server(void *opaque)
     } else if (errno != ENOENT) {
         return [self rh3LaunchdInjectionError:@"Could not inspect RootHide safe-mode marker"];
     }
-    if (![[NSData data] writeToFile:safeMode atomically:YES]) {
-        return [self rh3LaunchdInjectionError:@"Could not prepare RootHide safe mode before launchd injection"];
+    if (!installed) {
+        if (![[NSData data] writeToFile:safeMode atomically:YES]) {
+            return [self rh3LaunchdInjectionError:@"Could not prepare RootHide safe mode before launchd injection"];
+        }
+        [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:@"launchd: first activation; no-tweak mode enforced"];
+    } else {
+        [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
+            [NSString stringWithFormat:@"launchd: existing bootstrap; saved no-tweak marker present=%d",
+             lstat(safeMode.fileSystemRepresentation, &safeModeInfo) == 0]];
     }
 
     [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:@"launchd: allocating boomerang port"];
