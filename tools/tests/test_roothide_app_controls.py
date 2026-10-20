@@ -26,7 +26,11 @@ class AppControls(unittest.TestCase):
         self.assertIn('NSError *error =', picker)
         self.assertIn('error.localizedDescription', picker)
         password = env.split('- (int)changeMobilePassword:',1)[1].split('- (NSError*)updateEnvironment',1)[0].split('    [self runAsRoot:',1)[0]
-        self.assertIn('@[@"usermod", @"501", @"-h", @"0"]',password)
+        self.assertIn('@[@"-V", hiddenEtc, @"usermod", @"mobile", @"-h", @"0"]',password)
+        self.assertIn('rootHideExistingRootWithError:&rootError',password)
+        self.assertIn('O_DIRECTORY | O_NOFOLLOW',password)
+        self.assertIn('RH3CanonicalAppPath(hiddenEtc)',password)
+        self.assertIn('rh3MobilePasswordHash',password)
         self.assertNotIn('dash',password)
         self.assertIn('![after isEqualToString:before]',password)
         self.assertIn('input:[[newPassword stringByAppendingString:',password)

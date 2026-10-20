@@ -753,9 +753,29 @@ static void RH3LogCommandSpawnStage(const char *stage, pid_t pid, int result, vo
     if ([DOBootstrapper rootHidePortEnabled]) {
         if (!newPassword.length || [newPassword containsString:@"\n"] || [newPassword containsString:@"\r"] ||
             [newPassword rangeOfString:[NSString stringWithFormat:@"%C", (unichar)0]].location != NSNotFound) return EINVAL;
+        // Procursus pw defaults to /etc (the real system directory). The
+        // RootHide archive stores its own mobile account in hidden/etc and
+        // pw has returned EX_NOUSER=67 when called without an explicit
+        // database location. Never mutate the host user database or guess
+        // which file a process hook may redirect.
+        NSString *hiddenEtc = JBROOT_PATH(@"/etc");
         __block NSString *before = nil;
-        int result = [self rh3PerformPrivilegedAction:^int{ before = [self rh3MobilePasswordHash]; return before ? 0 : EIO; }];
-        if (!result) result = [self rh3RunCommand:JBROOT_PATH(@"/usr/sbin/pw") arguments:@[@"usermod", @"501", @"-h", @"0"]
+        int result = [self rh3PerformPrivilegedAction:^int{
+            NSError *rootError = nil;
+            NSString *root = [DOBootstrapper rootHideExistingRootWithError:&rootError];
+            NSString *expected = [root stringByAppendingPathComponent:@"etc"];
+            if (rootError || !root || ![RH3CanonicalAppPath(expected) isEqualToString:RH3CanonicalAppPath(hiddenEtc)])
+                return EPERM;
+            int directory = open(hiddenEtc.fileSystemRepresentation, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+            if (directory < 0) return errno;
+            struct stat info = {0};
+            int check = fstat(directory, &info) ? errno : ((!S_ISDIR(info.st_mode) || info.st_uid != 0) ? EPERM : 0);
+            close(directory);
+            if (check) return check;
+            before = [self rh3MobilePasswordHash];
+            return before ? 0 : EIO;
+        }];
+        if (!result) result = [self rh3RunCommand:JBROOT_PATH(@"/usr/sbin/pw") arguments:@[@"-V", hiddenEtc, @"usermod", @"mobile", @"-h", @"0"]
                                           input:[[newPassword stringByAppendingString:@"\n"] dataUsingEncoding:NSUTF8StringEncoding] timeout:20];
         if (!result) result = [self rh3PerformPrivilegedAction:^int{
             NSString *after = [self rh3MobilePasswordHash];

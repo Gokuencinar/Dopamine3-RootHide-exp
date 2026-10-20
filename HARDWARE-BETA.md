@@ -23,6 +23,12 @@ El bootstrap RootHide incluye `libkrw0`, cuyo paquete depende del proveedor virt
 
 El cierre de Zebra no se considera arreglado por esta reparación. Si continúa, comparte el informe de fallo específico de Zebra en Cr4shed o Ajustes → Privacidad y seguridad → Análisis y mejoras → Datos de análisis; no reinstales el gestor hasta conocer la causa.
 
+## Contraseña de mobile (diagnóstico posterior a r134)
+
+En la prueba del iPhone X con r134, `pw usermod 501 -h 0` devolvió dos veces el código 67 tras completarse la autenticación y el parcheo del proceso. En `sysexits`, 67 corresponde a `EX_NOUSER`; los archivos `etc/master.passwd` de los dos bootstraps fijados sí contienen `mobile` con UID 501. La corrección del código utiliza el nombre `mobile` y `pw -V <hidden-root>/etc` para apuntar explícitamente a la base privada; verifica su ubicación, propietario, estado anterior y cambio real del hash. No se ha validado todavía el cambio en hardware.
+
+**Nunca introduzcas tu contraseña en un log, issue o mensaje de diagnóstico.** Si una prueba devuelve error, no reintentes el cambio repetidamente ni edites a mano `master.passwd`/`spwd.db`. Comparte únicamente las etapas y códigos numéricos del diagnóstico.
+
 ## Si falla
 
 Guarda el mensaje de error, los logs, el modelo, la versión exacta de iOS y la revisión de la app. No repitas el proceso sin revisar el fallo: puede haber quedado un bootstrap a medias. No se borra automáticamente una instalación de RootHide 2, y reiniciar no garantiza resolver cualquier estado parcial.
