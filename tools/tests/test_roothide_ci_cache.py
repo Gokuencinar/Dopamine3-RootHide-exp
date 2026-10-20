@@ -17,8 +17,8 @@ BOOTSTRAPS = ROOT / 'Application/Dopamine/Resources/download_bootstraps.sh'
 class RootHideCICache(unittest.TestCase):
     def test_restores_downloads_only_and_saves_before_strict_failure(self):
         workflow = WORKFLOW.read_text(encoding='utf-8')
-        self.assertEqual(workflow.count('uses: actions/cache/restore@v4'), 2)
-        self.assertEqual(workflow.count('uses: actions/cache/save@v4'), 2)
+        self.assertEqual(workflow.count('uses: actions/cache/restore@v4'), 3)
+        self.assertEqual(workflow.count('uses: actions/cache/save@v4'), 3)
         self.assertLess(workflow.index('Restore pinned Theos SDK download'),
                         workflow.index('- name: Install THEOS'))
         self.assertLess(workflow.index('Save verified Theos SDK download'),
@@ -28,6 +28,8 @@ class RootHideCICache(unittest.TestCase):
         self.assertLess(workflow.index('Save verified Procursus bootstrap downloads'),
                         workflow.index('- name: Build\n'))
         self.assertLess(workflow.index('Save verified Procursus bootstrap downloads'),
+                        workflow.index('- name: Check RootHide port prerequisites before upload'))
+        self.assertLess(workflow.index('Save RootHide object cache'),
                         workflow.index('- name: Check RootHide port prerequisites before upload'))
         for label in ('Save verified Theos SDK download',
                       'Save verified Procursus bootstrap downloads'):
@@ -57,7 +59,47 @@ class RootHideCICache(unittest.TestCase):
                          '[[ -f "$file" && ! -L "$file" ]]',
                          'bytes.fromhex("28b52ffd")'):
             self.assertIn(fragment, script)
-        self.assertNotIn('restore-keys:', workflow)  # No broad or cross-version match.
+        # Download caches must have an exact SHA-pinned key. Only compiled
+        # objects may use a restricted restore prefix (same Xcode and mode).
+        for label in ('Restore pinned Theos SDK download',
+                      'Restore verified Procursus bootstrap downloads'):
+            block = workflow.split(f'- name: {label}\n', 1)[1].split('\n      - name:', 1)[0]
+            self.assertNotIn('restore-keys:', block)
+
+    def test_incremental_cache_is_object_only_and_refuses_untrusted_writes(self):
+        workflow = WORKFLOW.read_text(encoding='utf-8')
+        makefile = (ROOT/'Application/Makefile').read_text(encoding='utf-8')
+        restore = workflow.split('- name: Restore RootHide object cache\n', 1)[1].split(
+            '\n      - name:', 1)[0]
+        save = workflow.split('- name: Save RootHide object cache\n', 1)[1].split(
+            '\n      - name:', 1)[0]
+        configure = workflow.split('- name: Configure incremental C and Objective-C cache\n', 1)[1].split(
+            '\n      - name:', 1)[0]
+        self.assertIn('uses: actions/cache/restore@v4', restore)
+        self.assertIn('uses: actions/cache/save@v4', save)
+        for block in (restore, save):
+            self.assertIn('github.event_name != \'pull_request\'', block)
+            self.assertIn("github.ref == 'refs/heads/roothide-dopamine3-integration'", block)
+            self.assertIn('path: ~/.cache/ccache-roothide3', block)
+            self.assertNotIn('BaseBin/.build', block)
+            self.assertNotIn('DerivedData', block)
+            self.assertNotIn('.ipa', block)
+        self.assertIn('restore-keys:', restore)
+        self.assertEqual(re.search(r'key: (rh3-objects-[^\n]+)', restore).group(1),
+                         re.search(r'key: (rh3-objects-[^\n]+)', save).group(1))
+        self.assertIn('steps.ccache_identity.outputs.xcode_id', restore)
+        self.assertIn('env.ROOTHIDE_HARDWARE_TEST', restore)
+        self.assertIn('github.run_id', save)
+        self.assertIn('CCACHE_MAXSIZE=512M', configure)
+        self.assertIn('CMAKE_C_COMPILER_LAUNCHER=', configure)
+        self.assertIn('CMAKE_CXX_COMPILER_LAUNCHER=', configure)
+        self.assertIn('brew install ccache', configure)
+        self.assertNotIn('CCACHE_SLOPPINESS', configure)
+        self.assertIn('RH3_CCACHE=1', workflow)
+        self.assertIn('ccache --show-stats', workflow)
+        self.assertIn('C_COMPILER_LAUNCHER=', makefile)
+        self.assertIn('CXX_COMPILER_LAUNCHER=', makefile)
+        self.assertIn('ifeq ($(RH3_CCACHE),1)', makefile)
 
     @unittest.skipUnless(sys.platform == 'darwin', 'offline bash/cache verification on macOS CI')
     def test_corrupt_or_symlinked_bootstrap_is_redownloaded_offline(self):

@@ -37,6 +37,13 @@ ifeq ($(ROOTHIDE_HARDWARE_TEST),YES)
 ifneq ($(ROOTHIDE_EXPERIMENTAL_BUILD),1)
 $(error ROOTHIDE_HARDWARE_TEST=YES requires ROOTHIDE_EXPERIMENTAL_BUILD=1)
 endif
+
+# ccache only accelerates individual compile operations. Never cache Xcode's
+# DerivedData, ldid output, IPA or BaseBin trustcache between Actions runs.
+# This must be explicitly enabled by CI after installing ccache.
+ifeq ($(RH3_CCACHE),1)
+RH3_XCODE_CCACHE_ARGS := C_COMPILER_LAUNCHER=$(shell command -v ccache) CXX_COMPILER_LAUNCHER=$(shell command -v ccache)
+endif
 # Dangerous manual-only build. Never set in the scheduled/push CI.
 ROOTHIDE_BOOTSTRAP_GATE := 1
 ROOTHIDE_EXPERIMENT_ID := com.gokuencinar.roothide3.hardwarebeta
@@ -50,13 +57,13 @@ endif
 ifeq ($(ROOTHIDE_EXPERIMENTAL_BUILD), 1)
 build/Build/Products/Debug-iphoneos/Dopamine.app: FORCE
 	@echo "Building full RootHide 3 experimental app with protected jailbreak entrypoint"
-	xcodebuild -scheme Dopamine -derivedDataPath build -destination 'generic/platform=iOS' CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO RH3_APP_BUNDLE_IDENTIFIER=$(ROOTHIDE_EXPERIMENT_ID) RH3_APP_DISPLAY_NAME='$(ROOTHIDE_EXPERIMENT_NAME)' GCC_PREPROCESSOR_DEFINITIONS='RH3_FULL_APP_EXPERIMENTAL=1 ROOTHIDE3_BOOTSTRAP_READY=$(ROOTHIDE_BOOTSTRAP_GATE) $(DOPAMINE_NIGHTLY_DEFINITIONS)'
+	xcodebuild -scheme Dopamine -derivedDataPath build -destination 'generic/platform=iOS' CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO RH3_APP_BUNDLE_IDENTIFIER=$(ROOTHIDE_EXPERIMENT_ID) RH3_APP_DISPLAY_NAME='$(ROOTHIDE_EXPERIMENT_NAME)' GCC_PREPROCESSOR_DEFINITIONS='RH3_FULL_APP_EXPERIMENTAL=1 ROOTHIDE3_BOOTSTRAP_READY=$(ROOTHIDE_BOOTSTRAP_GATE) $(DOPAMINE_NIGHTLY_DEFINITIONS)' $(RH3_XCODE_CCACHE_ARGS)
 else ifeq ($(NIGHTLY), 1)
 build/Build/Products/Debug-iphoneos/Dopamine.app: FORCE
-	xcodebuild -scheme Dopamine -derivedDataPath build -destination 'generic/platform=iOS' CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO GCC_PREPROCESSOR_DEFINITIONS='$(DOPAMINE_NIGHTLY_DEFINITIONS)'
+	xcodebuild -scheme Dopamine -derivedDataPath build -destination 'generic/platform=iOS' CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO GCC_PREPROCESSOR_DEFINITIONS='$(DOPAMINE_NIGHTLY_DEFINITIONS)' $(RH3_XCODE_CCACHE_ARGS)
 else
 build/Build/Products/Debug-iphoneos/Dopamine.app: FORCE
-	xcodebuild -scheme Dopamine -derivedDataPath build -destination 'generic/platform=iOS' CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO
+	xcodebuild -scheme Dopamine -derivedDataPath build -destination 'generic/platform=iOS' CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO $(RH3_XCODE_CCACHE_ARGS)
 endif
 
 clean:

@@ -121,6 +121,55 @@ jobs:
           brew install make
           echo "PATH=$(brew --prefix make)/libexec/gnubin:$PATH" >> $GITHUB_ENV
 
+      # Object-only compilation cache. Keep this separate from the immutable
+      # SDK/bootstrap download caches: an entry is a compiler result, never a
+      # signed executable, BaseBin trustcache, packaged tweak or IPA.
+      # Read/write only on the port branch (never on untrusted PR code).
+      - name: Identify incremental compiler cache
+        if: steps.roothide_port.outputs.is_port == 'true'
+        id: ccache_identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcode_id="$(xcodebuild -version | shasum -a 256 | cut -c 1-16)"
+          echo "xcode_id=$xcode_id" >> "$GITHUB_OUTPUT"
+
+      - name: Restore RootHide object cache
+        if: steps.roothide_port.outputs.is_port == 'true' && github.event_name != 'pull_request' && github.ref == 'refs/heads/roothide-dopamine3-integration'
+        id: rh3_object_cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/ccache-roothide3
+          # Each run writes an immutable entry; later runs restore the latest
+          # compatible one via the Xcode- and build-mode-scoped prefix.
+          key: rh3-objects-macos15-xcode-${{ steps.ccache_identity.outputs.xcode_id }}-${{ env.ROOTHIDE_HARDWARE_TEST }}-v1-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            rh3-objects-macos15-xcode-${{ steps.ccache_identity.outputs.xcode_id }}-${{ env.ROOTHIDE_HARDWARE_TEST }}-v1-
+
+      - name: Configure incremental C and Objective-C cache
+        if: steps.roothide_port.outputs.is_port == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          brew install ccache
+          prefix="$(brew --prefix ccache)"
+          test -x "$prefix/libexec/clang"
+          test -x "$prefix/libexec/clang++"
+          ccache --version | head -n 1
+          # For Theos, Clang Makefiles and projects using PATH. CMake-based
+          # subprojects can use the supported compiler-launcher environment.
+          echo "PATH=$prefix/libexec:$PATH" >> "$GITHUB_ENV"
+          echo "CMAKE_C_COMPILER_LAUNCHER=$prefix/bin/ccache" >> "$GITHUB_ENV"
+          echo "CMAKE_CXX_COMPILER_LAUNCHER=$prefix/bin/ccache" >> "$GITHUB_ENV"
+          echo "CCACHE_DIR=$HOME/.cache/ccache-roothide3" >> "$GITHUB_ENV"
+          echo "CCACHE_BASEDIR=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
+          echo "CCACHE_MAXSIZE=512M" >> "$GITHUB_ENV"
+          echo "CCACHE_COMPRESS=true" >> "$GITHUB_ENV"
+          # Never ignore headers, compiler revisions, preprocessor settings
+          # or system headers to get higher hit rates.
+          export CCACHE_DIR="$HOME/.cache/ccache-roothide3"
+          ccache --zero-stats
+
       # Cache only an immutable, SHA-256-pinned download. Do not cache signed
       # binaries, the BaseBin trustcache, or installable IPAs.
       - name: Restore pinned Theos SDK download
@@ -261,7 +310,34 @@ jobs:
           export BASEDIR="$(pwd)"
           export THEOS="${BASEDIR}/theos"
           bash tools/macos_build_readiness.sh
-          gmake -j$(sysctl -n hw.logicalcpu) NIGHTLY=1
+          if [[ "${{ steps.roothide_port.outputs.is_port }}" == true ]]; then
+            gmake -j$(sysctl -n hw.logicalcpu) NIGHTLY=1 RH3_CCACHE=1
+          else
+            gmake -j$(sysctl -n hw.logicalcpu) NIGHTLY=1
+          fi
+
+      - name: Report incremental compilation cache statistics
+        if: always() && steps.roothide_port.outputs.is_port == 'true'
+        shell: bash
+        run: |
+          if command -v ccache >/dev/null 2>&1; then
+            ccache --show-stats
+            {
+              echo '### RootHide incremental compile cache'
+              echo '\`\`\`text'
+              ccache --show-stats
+              echo '\`\`\`'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      # This must happen BEFORE the deliberately failing strict-readiness
+      # gate. Upload no binaries; save only ccache's compiler objects.
+      - name: Save RootHide object cache
+        if: success() && steps.roothide_port.outputs.is_port == 'true' && github.event_name != 'pull_request' && github.ref == 'refs/heads/roothide-dopamine3-integration'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/ccache-roothide3
+          key: rh3-objects-macos15-xcode-${{ steps.ccache_identity.outputs.xcode_id }}-${{ env.ROOTHIDE_HARDWARE_TEST }}-v1-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Check RootHide binary architecture slices
         if: steps.roothide_port.outputs.is_port == 'true'

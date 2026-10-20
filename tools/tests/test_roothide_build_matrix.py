@@ -39,6 +39,28 @@ class RootHideBuildMatrixTests(unittest.TestCase):
         self.assertIn("ROOTHIDE_BOOTSTRAP_GATE := 1", makefile)
         self.assertIn("$(DOPAMINE_NIGHTLY_DEFINITIONS)", experimental)
 
+    def test_xcode_cache_launcher_requires_explicit_opt_in(self):
+        makefile = MAKEFILE.read_text(encoding="utf-8")
+        self.assertIn('ifeq ($(RH3_CCACHE),1)', makefile)
+        self.assertIn('RH3_XCODE_CCACHE_ARGS := C_COMPILER_LAUNCHER=', makefile)
+        self.assertIn('CXX_COMPILER_LAUNCHER=', makefile)
+        self.assertEqual(makefile.count('$(RH3_XCODE_CCACHE_ARGS)'), 3)
+        make = shutil.which("gmake") or shutil.which("make")
+        if not make or not shutil.which("ccache"):
+            self.skipTest("Native GNU Make and ccache are exercised on macOS CI")
+        for enabled in ("0", "1"):
+            result = subprocess.run(
+                [make, "--no-print-directory", "-n", "-C", "Application",
+                 "Dopamine.ipa", "ROOTHIDE_EXPERIMENTAL_BUILD=1",
+                 "ROOTHIDE_HARDWARE_TEST=YES", f"RH3_CCACHE={enabled}"],
+                cwd=ROOT, capture_output=True, text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            command = next(line for line in result.stdout.splitlines()
+                           if line.lstrip().startswith("xcodebuild "))
+            self.assertEqual("C_COMPILER_LAUNCHER=" in command, enabled == "1")
+            self.assertEqual("CXX_COMPILER_LAUNCHER=" in command, enabled == "1")
+
     def test_effective_xcodebuild_args_for_all_four_build_modes(self):
         make = shutil.which("gmake") or shutil.which("make")
         if not make:
