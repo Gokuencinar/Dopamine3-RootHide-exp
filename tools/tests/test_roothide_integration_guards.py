@@ -177,7 +177,9 @@ class RootHideGuardTests(unittest.TestCase):
 
     def test_macos_ci_unpacks_xz_sdk_with_correct_decoder(self) -> None:
         workflow = self.source(".github/workflows/main.yml")
-        self.assertIn('tar -xJf "$THEOS/sdks/iPhoneOS16.5.sdk.tar.xz"', workflow)
+        self.assertIn('SDK_ARCHIVE="$BASEDIR/.ci-cache/theos/iPhoneOS16.5.sdk.tar.xz"', workflow)
+        self.assertIn('tar -xJf "$SDK_ARCHIVE" -C "$THEOS/sdks"', workflow)
+        self.assertIn('echo "$SDK_SHA256  $SDK_ARCHIVE" | shasum -a 256 -c -', workflow)
         self.assertNotIn("gunzip $THEOS/sdks/iPhoneOS16.5.sdk.tar.xz", workflow)
 
     def test_xcode_momentarius_titan_frameworks_do_not_pin_host_sdk_version(self) -> None:

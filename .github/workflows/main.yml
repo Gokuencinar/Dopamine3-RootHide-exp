@@ -121,6 +121,15 @@ jobs:
           brew install make
           echo "PATH=$(brew --prefix make)/libexec/gnubin:$PATH" >> $GITHUB_ENV
 
+      # Cache only an immutable, SHA-256-pinned download. Do not cache signed
+      # binaries, the BaseBin trustcache, or installable IPAs.
+      - name: Restore pinned Theos SDK download
+        id: theos_sdk_cache
+        uses: actions/cache/restore@v4
+        with:
+          path: .ci-cache/theos/iPhoneOS16.5.sdk.tar.xz
+          key: rh3-macos15-theos-sdk-16.5-5e0fd3f01266cce4-v1
+
       - name: Install THEOS
         env:
           RH3_PORT: ${{ steps.roothide_port.outputs.is_port }}
@@ -143,15 +152,34 @@ jobs:
           git -C "$THEOS" submodule update --init --recursive
           test "$(git -C "$THEOS" rev-parse HEAD)" = "$THEOS_REV"
           mkdir -p "$THEOS/sdks"
-          curl -fL --retry 3 \
-            https://github.com/theos/sdks/releases/download/master-146e41f/iPhoneOS16.5.sdk.tar.xz \
-            --output "$THEOS/sdks/iPhoneOS16.5.sdk.tar.xz"
-          echo "5e0fd3f01266cce4ce012d4a99b38eb56578fca40d09edc81cd83dee958202fb  $THEOS/sdks/iPhoneOS16.5.sdk.tar.xz" | shasum -a 256 -c -
+          SDK_ARCHIVE="$BASEDIR/.ci-cache/theos/iPhoneOS16.5.sdk.tar.xz"
+          SDK_SHA256=5e0fd3f01266cce4ce012d4a99b38eb56578fca40d09edc81cd83dee958202fb
+          mkdir -p "$(dirname "$SDK_ARCHIVE")"
+          if [[ -f "$SDK_ARCHIVE" && ! -L "$SDK_ARCHIVE" ]] &&
+             echo "$SDK_SHA256  $SDK_ARCHIVE" | shasum -a 256 -c - >/dev/null 2>&1; then
+            echo "Using verified cached Theos SDK archive"
+          else
+            rm -f "$SDK_ARCHIVE"
+            curl -fL --retry 3 \
+              https://github.com/theos/sdks/releases/download/master-146e41f/iPhoneOS16.5.sdk.tar.xz \
+              --output "$SDK_ARCHIVE.download"
+            echo "$SDK_SHA256  $SDK_ARCHIVE.download" | shasum -a 256 -c -
+            mv -f "$SDK_ARCHIVE.download" "$SDK_ARCHIVE"
+          fi
+          echo "$SDK_SHA256  $SDK_ARCHIVE" | shasum -a 256 -c -
           # Decode the verified XZ archive (not gzip).
-          tar -xJf "$THEOS/sdks/iPhoneOS16.5.sdk.tar.xz" -C "$THEOS/sdks"
-          rm "$THEOS/sdks/iPhoneOS16.5.sdk.tar.xz"
+          tar -xJf "$SDK_ARCHIVE" -C "$THEOS/sdks"
           test -n "$(find "$THEOS/sdks" -type d -name '*.sdk' -print -quit)"
           cd $BASEDIR
+
+      # Later strict readiness deliberately fails when only 7/9 gates pass.
+      # Save before that gate instead of relying on actions/cache post-job save.
+      - name: Save verified Theos SDK download
+        if: steps.theos_sdk_cache.outputs.cache-hit != 'true' && github.event_name != 'pull_request' && github.ref == 'refs/heads/roothide-dopamine3-integration'
+        uses: actions/cache/save@v4
+        with:
+          path: .ci-cache/theos/iPhoneOS16.5.sdk.tar.xz
+          key: rh3-macos15-theos-sdk-16.5-5e0fd3f01266cce4-v1
 
       - name: Build and Install trustcache
         run: |
@@ -179,11 +207,29 @@ jobs:
         run: |
           brew install libarchive zstd
 
+      - name: Restore verified Procursus bootstrap downloads
+        id: bootstrap_cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            Application/Dopamine/Resources/bootstrap_1800.tar.zst
+            Application/Dopamine/Resources/bootstrap_1900.tar.zst
+          key: rh3-macos15-bootstrap-1800-a99b39bb-1900-8354c3aa-v1
+
       - name: Download Bootstraps
         run: |
             set -euo pipefail
             cd Application/Dopamine/Resources
             bash ./download_bootstraps.sh
+
+      - name: Save verified Procursus bootstrap downloads
+        if: steps.bootstrap_cache.outputs.cache-hit != 'true' && github.event_name != 'pull_request' && github.ref == 'refs/heads/roothide-dopamine3-integration'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            Application/Dopamine/Resources/bootstrap_1800.tar.zst
+            Application/Dopamine/Resources/bootstrap_1900.tar.zst
+          key: rh3-macos15-bootstrap-1800-a99b39bb-1900-8354c3aa-v1
 
       - name: Verify RootHide Boomerang and trustcache regressions
         if: steps.roothide_port.outputs.is_port == 'true'
