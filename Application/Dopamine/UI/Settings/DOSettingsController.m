@@ -29,6 +29,7 @@
 // Accessed only by UIKit callbacks on the main queue. A timed-out worker may
 // still be running, so closing its progress alert must not permit a duplicate.
 static BOOL gRootHideAppsRefreshInFlight = NO;
+static BOOL gRootHideProviderRepairInFlight = NO;
 
 @interface DOSettingsController ()
 
@@ -327,6 +328,14 @@ static BOOL gRootHideAppsRefreshInFlight = NO;
                         [reinstallPackageManagersSpecifier setProperty:@"shippingbox" forKey:@"image"];
                     [reinstallPackageManagersSpecifier setProperty:@"reinstallPackageManagersPressed" forKey:@"action"];
                     [specifiers addObject:reinstallPackageManagersSpecifier];
+                    if ([DOBootstrapper rootHidePortEnabled]) {
+                        PSSpecifier *repairProvider = [PSSpecifier preferenceSpecifierNamed:@"Reparar dependencia libkrw (Sileo)" target:self set:defSetter get:defGetter detail:nil cell:PSStaticTextCell edit:nil];
+                        [repairProvider setProperty:[DOButtonCell class] forKey:@"cellClass"];
+                        [repairProvider setProperty:buttonHeight forKey:@"height"];
+                        [repairProvider setProperty:@"wrench.adjustable" forKey:@"image"];
+                        [repairProvider setProperty:@"repairRootHideLibkrwPressed" forKey:@"action"];
+                        [specifiers addObject:repairProvider];
+                    }
                 }
 
                 BOOL hideJailbreakButtonShown =
@@ -731,6 +740,68 @@ static BOOL gRootHideAppsRefreshInFlight = NO;
         [alert addAction:[UIAlertAction actionWithTitle:@"Aceptar" style:UIAlertActionStyleCancel handler:nil]];
         [self presentViewController:alert animated:YES completion:nil];
     }
+}
+
+- (void)repairRootHideLibkrwPressed
+{
+    if (gRootHideProviderRepairInFlight || gRootHideAppsRefreshInFlight) {
+        UIAlertController *busy = [UIAlertController alertControllerWithTitle:@"Operación pendiente"
+            message:@"No inicies otra reparación mientras esté ejecutándose una operación RootHide. Comparte el diagnóstico si se ha bloqueado."
+            preferredStyle:UIAlertControllerStyleAlert];
+        [busy addAction:[UIAlertAction actionWithTitle:@"Aceptar" style:UIAlertActionStyleCancel handler:nil]];
+        [self presentViewController:busy animated:YES completion:nil];
+        return;
+    }
+    UIAlertController *confirm = [UIAlertController alertControllerWithTitle:@"Reparar libkrw0-plugin"
+        message:@"Registra únicamente el proveedor de la dependencia libkrw en el bootstrap RootHide existente. No reinstala Sileo, Zebra ni el bootstrap. Úsalo una sola vez si Sileo informa de libkrw0-plugin."
+        preferredStyle:UIAlertControllerStyleAlert];
+    [confirm addAction:[UIAlertAction actionWithTitle:@"Cancelar" style:UIAlertActionStyleCancel handler:nil]];
+    [confirm addAction:[UIAlertAction actionWithTitle:@"Reparar" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
+        if (gRootHideProviderRepairInFlight) return;
+        gRootHideProviderRepairInFlight = YES;
+        __block BOOL finished = NO;
+        __block BOOL timedOut = NO;
+        UIAlertController *progress = [UIAlertController alertControllerWithTitle:@"Registrando proveedor libkrw"
+            message:@"Comprobando la biblioteca y registrando sus metadatos en dpkg…"
+            preferredStyle:UIAlertControllerStyleAlert];
+        [self presentViewController:progress animated:YES completion:^{
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 135 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+                if (finished) return;
+                timedOut = YES;
+                [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
+                    @"packages: libkrw repair UI deadline reached; operation outcome unknown; duplicate repair blocked"];
+                [progress dismissViewControllerAnimated:YES completion:^{
+                    UIAlertController *warning = [UIAlertController alertControllerWithTitle:@"La reparación sigue pendiente"
+                        message:@"Comparte el diagnóstico. No repitas la operación: un timeout no confirma que dpkg haya terminado."
+                        preferredStyle:UIAlertControllerStyleAlert];
+                    [warning addAction:[UIAlertAction actionWithTitle:@"Aceptar" style:UIAlertActionStyleCancel handler:nil]];
+                    [self presentViewController:warning animated:YES completion:nil];
+                }];
+            });
+            dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+                NSError *error = [[DOEnvironmentManager sharedManager] repairRootHideLibkrwProvider];
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    finished = YES;
+                    gRootHideProviderRepairInFlight = error && error.code == ETIMEDOUT;
+                    if (timedOut) {
+                        [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
+                            [NSString stringWithFormat:@"packages: libkrw repair returned after UI deadline result=%ld", (long)error.code]];
+                        return;
+                    }
+                    [progress dismissViewControllerAnimated:YES completion:^{
+                        UIAlertController *result = [UIAlertController alertControllerWithTitle:
+                            error ? @"No se completó la reparación" : @"Dependencia registrada"
+                            message:error ? [NSString stringWithFormat:@"%@. Comparte el diagnóstico y no repitas la acción si hubo un timeout.", error.localizedDescription] :
+                                @"Vuelve a abrir Sileo y actualiza las fuentes; comprueba si desaparece el error libkrw0-plugin."
+                            preferredStyle:UIAlertControllerStyleAlert];
+                        [result addAction:[UIAlertAction actionWithTitle:@"Aceptar" style:UIAlertActionStyleCancel handler:nil]];
+                        [self presentViewController:result animated:YES completion:nil];
+                    }];
+                });
+            });
+        }];
+    }]];
+    [self presentViewController:confirm animated:YES completion:nil];
 }
 
 - (void)reinstallPackageManagersPressed

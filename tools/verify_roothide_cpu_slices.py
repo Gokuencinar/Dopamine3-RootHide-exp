@@ -63,6 +63,15 @@ def check_payload(data, label):
     return count
 
 
+def check_empty_provider_payload(data):
+    # The official libkrw0-dummy has only dpkg metadata. It must NEVER gain
+    # executable payload, symlinks or paths affecting the jailbreak root.
+    with tarfile.open(fileobj=io.BytesIO(data), mode="r:*") as archive:
+        for member in archive:
+            if not member.isdir():
+                raise ValueError(f"libkrw virtual provider has unexpected payload: {member.name}")
+
+
 def main():
     results = []
     resources = ROOT / "Application/Dopamine/Resources"
@@ -71,6 +80,10 @@ def main():
         if hashlib.sha256(data).hexdigest() != expected:
             raise ValueError(f"{name}: unexpected asset hash")
         payload = deb_payload(data) if name.endswith(".deb") else decompress(data)
+        if name == "roothide_libkrw0_dummy.deb":
+            check_empty_provider_payload(payload)
+            results.append(dict(asset=name, sha256=expected, arm64_macho_files=0, metadata_only=True))
+            continue
         count = check_payload(payload, name)
         results.append(dict(asset=name, sha256=expected, arm64_macho_files=count))
     print(json.dumps(results, indent=2))

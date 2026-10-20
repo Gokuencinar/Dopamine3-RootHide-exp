@@ -815,6 +815,7 @@ static NSError *RH3RetryRecoveryEligibility(NSString *root)
         @"roothideapp.deb": @"b8f075e1844709845962900b22fe71136a66369a2c35bb1201087f2fd9476b7d",
         @"roothide_sileo.deb": @"e85ab12f8d98da9a5350293647266b898282b0d766df2397526ab253d84eede3",
         @"roothide_zebra.deb": @"ca82c18256e19ff78af3e53308d53f047a2d429cb7e025c892377abe4d2e7825",
+        @"roothide_libkrw0_dummy.deb": @"2e0054419a379ba3ca8d42f5769cbdcd1b85e5e753a73cf1204039472e0388b4",
     };
     for (NSString *name in assets) {
         NSError *error = [self rh3VerifyBundledFile:name sha256:assets[name]];
@@ -1537,6 +1538,19 @@ cleanup_root:
     return path;
 }
 
+// RootHide's official metadata-only package provides libkrw0-plugin to APT.
+// The actual Dopamine provider dylib was already installed in the verified
+// hidden root by rh3InstallDependenciesAtRoot; dpkg cannot infer Provides
+// from that file alone. Never install the stock /var/jb-targeted .deb.
+- (NSString *)rootHideLibkrwProviderPackageWithError:(NSError **)error
+{
+    NSString *name = @"roothide_libkrw0_dummy.deb";
+    NSError *check = [self rh3VerifyBundledFile:name
+        sha256:@"2e0054419a379ba3ca8d42f5769cbdcd1b85e5e753a73cf1204039472e0388b4"];
+    if (check) { if (error) *error = check; return nil; }
+    return [NSBundle.mainBundle.bundlePath stringByAppendingPathComponent:name];
+}
+
 static void RH3RecordInstalledAppInventory(NSString *root)
 {
     if (![DOBootstrapper rootHideBrandForPath:root] || !RH3IsRealDirectory(root)) return;
@@ -1779,6 +1793,19 @@ static void RH3RecordInstalledAppInventory(NSString *root)
     NSError *mobileHomeError = RH3PrepareMobileHomeAtRoot(root);
     if (mobileHomeError) return mobileHomeError;
     if (!installed) {
+        // Match the official RootHide bootstrap: register the libkrw0-plugin
+        // virtual provider before package managers begin using APT. This
+        // package has no payload, does not touch /var/jb or reinstall libkrw.
+        NSError *providerError = nil;
+        NSString *provider = [self rootHideLibkrwProviderPackageWithError:&providerError];
+        if (!provider) return providerError;
+        int providerResult = exec_cmd_trusted(JBROOT_PATH("/usr/bin/dpkg"),
+                                              "-i", provider.fileSystemRepresentation, NULL);
+        [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
+            [NSString stringWithFormat:@"packages: RootHide libkrw provider registration result=%d", providerResult]];
+        if (providerResult)
+            return RH3Error(BootstrapErrorCodeFailedFinalising,
+                            [NSString stringWithFormat:@"RootHide libkrw provider registration failed (%d)", providerResult]);
         [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:@"bootstrap: installing package managers"];
         NSError *error = [self installPackageManagers];
         if (error) return error;

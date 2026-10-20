@@ -48,6 +48,7 @@ typedef NS_ENUM(NSInteger, BootstrapErrorCode) {
 - (nullable NSError *)repairRootHideAppLinks;
 - (nullable NSArray<NSString *> *)rootHideSelectedManagerPackagesWithError:(NSError * _Nullable * _Nullable)error;
 - (nullable NSString *)rootHideManagerPackageWithError:(NSError * _Nullable * _Nullable)error;
+- (nullable NSString *)rootHideLibkrwProviderPackageWithError:(NSError * _Nullable * _Nullable)error;
 @end
 
 NS_ASSUME_NONNULL_END

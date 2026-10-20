@@ -1192,6 +1192,43 @@ static void RH3LogCommandSpawnStage(const char *stage, pid_t pid, int result, vo
     return error;
 }
 
+- (NSError *)repairRootHideLibkrwProvider
+{
+    if (![DOBootstrapper rootHidePortEnabled] || !self.isJailbroken)
+        return [NSError errorWithDomain:@"RootHide" code:ENXIO
+                               userInfo:@{NSLocalizedDescriptionKey:@"RootHide must be active to repair the libkrw provider"}];
+    NSError *fileError = nil;
+    NSString *provider = [self->_bootstrapper rootHideLibkrwProviderPackageWithError:&fileError];
+    if (!provider) return fileError ?: [NSError errorWithDomain:@"RootHide" code:ENOENT userInfo:nil];
+    // Only an explicit user action may add the virtual dpkg provider to an
+    // existing root. Verify that the real compiled plugin is already present:
+    // the metadata-only donor must never conceal a missing binary.
+    int preflight = [self rh3PerformPrivilegedAction:^int{
+        NSError *rootError = nil;
+        NSString *root = [DOBootstrapper rootHideExistingRootWithError:&rootError];
+        const char *active = jbclient_get_jbroot();
+        if (rootError || !root || !active ||
+            ![RH3CanonicalAppPath(root) isEqual:RH3CanonicalAppPath([NSString stringWithUTF8String:active])])
+            return EPERM;
+        NSString *library = [root stringByAppendingPathComponent:@"usr/lib/libkrw/libkrw-dopamine.dylib"];
+        struct stat info = {0};
+        if (lstat(library.fileSystemRepresentation, &info) != 0 || !S_ISREG(info.st_mode) ||
+            info.st_uid != 0 || info.st_size <= 0) return ENOENT;
+        return 0;
+    }];
+    [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
+        [NSString stringWithFormat:@"packages: libkrw metadata-only repair preflight result=%d", preflight]];
+    if (preflight)
+        return [NSError errorWithDomain:@"RootHide" code:preflight
+                               userInfo:@{NSLocalizedDescriptionKey:@"RootHide provider binary or verified root not found; no changes made"}];
+    int result = [self spawnJbctlAsRootWithArgs:@[@"internal", @"install_pkg", provider]];
+    [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
+        [NSString stringWithFormat:@"packages: explicit libkrw virtual provider install result=%d", result]];
+    return result ? [NSError errorWithDomain:@"RootHide" code:result userInfo:@{
+        NSLocalizedDescriptionKey: @"libkrw metadata registration did not complete. Export the diagnostic; if timed out do not retry."
+    }] : nil;
+}
+
 - (NSError *)updateBootLogo
 {
     const char *bootLogoPath = JBROOT_PATH("/basebin/bootlogo.jp2");

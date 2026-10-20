@@ -31,6 +31,7 @@ PINNED_RESOURCES = {
     "roothideapp.deb": "b8f075e1844709845962900b22fe71136a66369a2c35bb1201087f2fd9476b7d",
     "roothide_sileo.deb": "e85ab12f8d98da9a5350293647266b898282b0d766df2397526ab253d84eede3",
     "roothide_zebra.deb": "ca82c18256e19ff78af3e53308d53f047a2d429cb7e025c892377abe4d2e7825",
+    "roothide_libkrw0_dummy.deb": "2e0054419a379ba3ca8d42f5769cbdcd1b85e5e753a73cf1204039472e0388b4",
 }
 
 # BaseBin/dyldhook/Makefile builds all six variants and BaseBin/Makefile

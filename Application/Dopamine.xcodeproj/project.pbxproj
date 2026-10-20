@@ -106,6 +106,7 @@
 			FA3100000000000000000013 /* roothideapp.deb in Resources */ = {isa = PBXBuildFile; fileRef = FA3100000000000000000023 /* roothideapp.deb */; };
 			FA3100000000000000000014 /* roothide_sileo.deb in Resources */ = {isa = PBXBuildFile; fileRef = FA3100000000000000000024 /* roothide_sileo.deb */; };
 			FA3100000000000000000015 /* roothide_zebra.deb in Resources */ = {isa = PBXBuildFile; fileRef = FA3100000000000000000025 /* roothide_zebra.deb */; };
+				FA3100000000000000000016 /* roothide_libkrw0_dummy.deb in Resources */ = {isa = PBXBuildFile; fileRef = FA3100000000000000000026 /* roothide_libkrw0_dummy.deb */; };
 		8C2131912B50CA4B008E682C /* krkw.h in Headers */ = {isa = PBXBuildFile; fileRef = 8C2131782B50CA4B008E682C /* krkw.h */; };
 		8C2131922B50CA4B008E682C /* kread_sem_open.h in Headers */ = {isa = PBXBuildFile; fileRef = 8C21317B2B50CA4B008E682C /* kread_sem_open.h */; };
 		8C2131932B50CA4B008E682C /* kread_IOSurface.h in Headers */ = {isa = PBXBuildFile; fileRef = 8C21317C2B50CA4B008E682C /* kread_IOSurface.h */; };
@@ -551,6 +552,7 @@
 			FA3100000000000000000023 /* roothideapp.deb */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; path = roothideapp.deb; sourceTree = "<group>"; };
 			FA3100000000000000000024 /* roothide_sileo.deb */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; path = roothide_sileo.deb; sourceTree = "<group>"; };
 			FA3100000000000000000025 /* roothide_zebra.deb */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; path = roothide_zebra.deb; sourceTree = "<group>"; };
+				FA3100000000000000000026 /* roothide_libkrw0_dummy.deb */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; path = roothide_libkrw0_dummy.deb; sourceTree = "<group>"; };
 		8C1FC8422B6460FD00282536 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		8C2131782B50CA4B008E682C /* krkw.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = krkw.h; sourceTree = "<group>"; };
 		8C21317B2B50CA4B008E682C /* kread_sem_open.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = kread_sem_open.h; sourceTree = "<group>"; };
@@ -1425,6 +1427,7 @@
 					FA3100000000000000000023 /* roothideapp.deb */,
 					FA3100000000000000000024 /* roothide_sileo.deb */,
 					FA3100000000000000000025 /* roothide_zebra.deb */,
+					FA3100000000000000000026 /* roothide_libkrw0_dummy.deb */,
 				8CB94F032B59E17A0098BAFD /* basebin.tar */,
 				8CB94F022B59E17A0098BAFD /* basebin.tc */,
 				8C512B8B2B5C9DE800C6F14A /* sileo.deb */,
@@ -2014,6 +2017,7 @@
 					FA3100000000000000000013 /* roothideapp.deb in Resources */,
 					FA3100000000000000000014 /* roothide_sileo.deb in Resources */,
 					FA3100000000000000000015 /* roothide_zebra.deb in Resources */,
+					FA3100000000000000000016 /* roothide_libkrw0_dummy.deb in Resources */,
 				042479A42B66916B0082581B /* Credits.plist in Resources */,
 				8C2875212BD850B4008B24DA /* LICENSE_libgrabkernel2.md in Resources */,
 				8C512B912B5C9F9100C6F14A /* sileo.deb in Resources */,
