@@ -59,6 +59,11 @@ int jbclient_trust_executable_recurse(const char *executablePath, xpc_object_t p
 bool jbclient_dyld_patch_enabled(void);
 int jbclient_set_dyld_patch(bool enabled);
 int jbclient_roothide_patch_child(pid_t pid, bool resume);
+// Optional read-only checkpoints for the app's persistent spawn diagnosis.
+// A callback must never retry or resume a suspended process.
+int jbclient_roothide_patch_child_traced(pid_t pid, bool resume,
+    void (*checkpoint)(const char *stage, pid_t pid, int result, void *context),
+    void *context);
 int jbclient_roothide_exec_start(const char *path, bool resume);
 int jbclient_roothide_exec_cancel(const char *path);
 

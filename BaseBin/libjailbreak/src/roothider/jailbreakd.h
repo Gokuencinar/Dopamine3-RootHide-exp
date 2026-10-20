@@ -21,6 +21,10 @@ void enableJBDLog(void* debugLog, void* errorLog);
 struct jbserver_impl;
 int initJailbreakd(bool firstLoad, struct jbserver_impl *bootstrapServer);
 bool jailbreakd_is_ready(void);
+// "Spawned" is not the same as "checked in and able to receive XPC".
+// Only expose the patch-child port to clients after authenticated checkin.
+bool jailbreakd_has_checked_in(void);
+void jailbreakd_mark_checked_in(pid_t pid);
 
 void setJailbreakdProcess(pid_t pid);
 

@@ -1,4 +1,5 @@
 #include <signal.h>
+#include <libjailbreak/roothide_bootlog.h>
 #include "jbserver_global.h"
 
 #include <libjailbreak/libjailbreak.h>
@@ -147,7 +148,14 @@ static int roothide_blacklist_check(audit_token_t *callerToken, const char* chec
 
 static int roothide_jailbreakd_lookup(audit_token_t *callerToken, xpc_object_t *portOut)
 {
-	if (!portOut || !jailbreakd_is_ready()) return -1;
+	if (!portOut || !jailbreakd_has_checked_in()) {
+		// A missing daemon can trigger many requests from system processes;
+		// record the first refusal without repeatedly writing to PID 1's log.
+		static int loggedUnavailable = 0;
+		if (__sync_bool_compare_and_swap(&loggedUnavailable, 0, 1))
+			rh3_bootlog("RootHide jailbreakd lookup refused: checkin not confirmed");
+		return -1;
+	}
 	mach_port_t port = jailbreakdClientPort();
 	if (!MACH_PORT_VALID(port)) return -1;
 	*portOut = xpc_mach_send_create(port);
@@ -160,7 +168,10 @@ static int roothide_jailbreakd_checkin(audit_token_t *callerToken, xpc_object_t 
 	pid_t pid = audit_token_to_pid(*callerToken);
 	uid_t uid = audit_token_to_euid(*callerToken);
 
-	if(uid != 0 || !portOut || !jailbreakd_is_ready()) return -1;
+	if(uid != 0 || !portOut || !jailbreakd_is_ready()) {
+		rh3_bootlog("RootHide jailbreakd checkin refused: identity or bootstrap unavailable");
+		return -1;
+	}
 	char executablePath[PATH_MAX] = {0};
 	const char *expectedPath = JBROOT_PATH("/basebin/jailbreakd");
 	char expectedRealPath[PATH_MAX] = {0};
@@ -169,6 +180,7 @@ static int roothide_jailbreakd_checkin(audit_token_t *callerToken, xpc_object_t 
 	    !realpath(expectedPath, expectedRealPath) ||
 	    !realpath(executablePath, executableRealPath) ||
 	    strcmp(executableRealPath, expectedRealPath) != 0) {
+		rh3_bootlog("RootHide jailbreakd checkin refused: executable identity mismatch");
 		return -1;
 	}
 
@@ -177,6 +189,8 @@ static int roothide_jailbreakd_checkin(audit_token_t *callerToken, xpc_object_t 
 	*portOut = xpc_mach_recv_create(port);
 	if (!*portOut) return -1;
 	setJailbreakdProcess(pid);
+	jailbreakd_mark_checked_in(pid);
+	rh3_bootlog("RootHide jailbreakd authenticated checkin completed");
 	return 0;
 }
 

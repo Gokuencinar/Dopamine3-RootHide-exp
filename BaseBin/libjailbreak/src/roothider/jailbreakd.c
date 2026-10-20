@@ -2,6 +2,7 @@
 #include <unistd.h>
 #include <assert.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <xpc/xpc.h>
 #include <mach/mach.h>
 #include <bsm/libbsm.h>
@@ -32,6 +33,7 @@ int posix_spawnattr_set_registered_ports_np(posix_spawnattr_t * __restrict attr,
 
 static bool __firstLoad = false;
 static bool __jailbreakd_initialized = false;
+static _Atomic(pid_t) __jailbreakd_checked_in_pid = 0;
 static struct jbserver_impl *gJailbreakdBootstrapServer = NULL;
 mach_port_t gJailbreakdPort = MACH_PORT_NULL;
 
@@ -40,11 +42,25 @@ bool jailbreakd_is_ready(void)
 	return getpid() == 1 && __jailbreakd_initialized && MACH_PORT_VALID(gJailbreakdPort);
 }
 
+bool jailbreakd_has_checked_in(void)
+{
+	return jailbreakd_is_ready() && __jailbreakd_checked_in_pid > 1;
+}
+
+void jailbreakd_mark_checked_in(pid_t pid)
+{
+	if (getpid() == 1 && __jailbreakd_initialized && pid > 1)
+		__jailbreakd_checked_in_pid = pid;
+}
+
 #define JAILBREAKD_CLIENT_PORT_FAST_GET
 
 int registerServerPort()
 {
 	assert(getpid() == 1);
+	// The new receive right cannot be used until the new daemon actually
+	// checks in. Old checkins belong to a different generation.
+	__jailbreakd_checked_in_pid = 0;
 
 	// Remove both the send and receive rights when replacing the old port.
 	if(MACH_PORT_VALID(gJailbreakdPort)) {
@@ -93,15 +109,16 @@ mach_port_t jailbreakdClientPortFastGet()
 
 void setJailbreakdProcess(pid_t pid)
 {
-	//Reclaim the previous jailbreakd zombie process
+	// Never block launchd's XPC reply path waiting for an older daemon.
+	// It might still be alive after a userspace re-exec. In that case leave
+	// the process alone; the new daemon owns the new receive right.
 	const char *pidenv = getenv("JAILBREAKD_PID");
 	if (pidenv)
 	{
 		pid_t oldpid = atoi(pidenv);
-		if(oldpid != pid)
+		if(oldpid > 1 && oldpid != pid)
 		{
-			waitpid(oldpid, NULL, 0);
-			unsetenv("JAILBREAKD_PID");
+			(void)waitpid(oldpid, NULL, WNOHANG);
 		}
 	}
 

@@ -27,6 +27,7 @@ class InternalSpawnTests(unittest.TestCase):
         source = (ROOT/'BaseBin/libjailbreak/src/roothider/common.m').read_text()
         function = source[source.index('int exec_cmd_roothide_spawn_traced('):source.index('\nint ensure_dyld_trustcache(')]
         self.assertIn('jbclient_roothide_patch_child(pid, should_resume)', function)
+        self.assertIn('jbclient_roothide_patch_child_traced(pid, should_resume, callback, context)', function)
         self.assertNotIn('jbdSpawnPatchChild(', function)
         self.assertIn('callback("posix_spawn entering"', function)
         self.assertIn('callback("posix_spawn returned"', function)
@@ -83,6 +84,15 @@ static int posix_spawn(pid_t *pid, const char *path, const void *fa, const posix
     state.spawn++; state.seen_flags=(*a)->flags; if(!state.spawn_error) *pid=42; return state.spawn_error;
 }
 static int jbclient_roothide_patch_child(pid_t p, bool resume) { state.patch++; state.should_resume=resume; return state.patch_error; }
+static int jbclient_roothide_patch_child_traced(pid_t p, bool resume,
+        void (*checkpoint)(const char *, pid_t, int, void *), void *context) {
+    checkpoint("jailbreakd lookup entering",p,0,context);
+    checkpoint("jailbreakd lookup returned",p,0,context);
+    checkpoint("jailbreakd request entering",p,0,context);
+    int result=jbclient_roothide_patch_child(p,resume);
+    checkpoint("jailbreakd request returned",p,result,context);
+    return result;
+}
 static int kill(pid_t p, int s) { if(s==SIGKILL) state.killed++; else if(s==SIGCONT) { state.resume++; if(state.resume_error) { errno=EPERM; return -1; } } return 0; }
 static pid_t waitpid(pid_t p, int *s, int options) { state.waited++; return p; }
 static int usleep(unsigned x) { return 0; }
@@ -94,11 +104,15 @@ int main(void) {
     struct attrs external={0}; posix_spawnattr_t attr=&external;
     reset(); stage_count=0;
     CHECK(exec_cmd_roothide_spawn_traced(&pid,"/tool",NULL,&attr,args,NULL,capture,NULL)==0);
-    CHECK(stage_count==4);
+    CHECK(stage_count==8);
     CHECK(strcmp(stages[0],"posix_spawn entering")==0);
     CHECK(strcmp(stages[1],"posix_spawn returned")==0);
     CHECK(strcmp(stages[2],"patch child XPC entering")==0);
-    CHECK(strcmp(stages[3],"patch child XPC returned")==0);
+    CHECK(strcmp(stages[3],"jailbreakd lookup entering")==0);
+    CHECK(strcmp(stages[4],"jailbreakd lookup returned")==0);
+    CHECK(strcmp(stages[5],"jailbreakd request entering")==0);
+    CHECK(strcmp(stages[6],"jailbreakd request returned")==0);
+    CHECK(strcmp(stages[7],"patch child XPC returned")==0);
     reset(); exec_patch_enabled=false;
     CHECK(exec_cmd_roothide_spawn(&pid,"/tool",NULL,&attr,args,NULL)==0);
     CHECK(pid==42 && state.patch==0 && state.trust_calls==0 && state.resume==1);

@@ -206,7 +206,7 @@ __attribute__((constructor)) static void initializer(void)
 	    access(JBROOT_PATH("/basebin/jailbreakd"), X_OK) == 0) {
 		rh3_bootlog("RootHide daemon starting");
 		int rootHideInitStatus = initJailbreakd(firstLoad, &gGlobalServer);
-		rh3_bootlog(rootHideInitStatus ? "RootHide daemon FAILED" : "RootHide daemon ready");
+			rh3_bootlog(rootHideInitStatus ? "RootHide daemon FAILED" : "RootHide daemon spawned; authenticated checkin pending");
 		if (rootHideInitStatus != 0) {
 			JBLogError("RootHide jailbreakd initialization failed: %d", rootHideInitStatus);
 		}

@@ -10,9 +10,13 @@
 // Use the existing private daemon and its audit-token/parent checks. Never
 // translate these requests into a privileged launchd action or cache a port
 // across fork. This C client is linked into the standalone systemhook too.
-static int roothide_lifecycle_request(uint64_t action, pid_t pid, const char *path, bool resume)
+static int roothide_lifecycle_request_traced(uint64_t action, pid_t pid, const char *path, bool resume,
+    void (*checkpoint)(const char *, pid_t, int, void *), void *context)
 {
+	if (checkpoint) checkpoint("jailbreakd lookup entering", pid, 0, context);
 	mach_port_t port = jbclient_jailbreakd_lookup();
+	if (checkpoint) checkpoint("jailbreakd lookup returned", pid,
+		MACH_PORT_VALID(port) ? 0 : -1, context);
 	if (!MACH_PORT_VALID(port)) return -1;
 	xpc_object_t pipe = xpc_pipe_create_from_port(port, 0);
 	if (!pipe) { mach_port_deallocate(mach_task_self(), port); return -1; }
@@ -22,7 +26,9 @@ static int roothide_lifecycle_request(uint64_t action, pid_t pid, const char *pa
 	if (path) xpc_dictionary_set_string(request, "execfile", path);
 	xpc_dictionary_set_bool(request, "resume", resume);
 	xpc_object_t reply = NULL;
+	if (checkpoint) checkpoint("jailbreakd request entering", pid, 0, context);
 	int error = xpc_pipe_routine(pipe, request, &reply);
+	if (checkpoint) checkpoint("jailbreakd request returned", pid, error, context);
 	xpc_release(request);
 	xpc_release(pipe);
 	mach_port_deallocate(mach_task_self(), port);
@@ -36,10 +42,22 @@ static int roothide_lifecycle_request(uint64_t action, pid_t pid, const char *pa
 	return result;
 }
 
+static int roothide_lifecycle_request(uint64_t action, pid_t pid, const char *path, bool resume)
+{
+	return roothide_lifecycle_request_traced(action, pid, path, resume, NULL, NULL);
+}
+
 int jbclient_roothide_patch_child(pid_t pid, bool resume)
 {
 	if (pid <= 0) return -1;
 	return roothide_lifecycle_request(JBD_MSG_SPAWN_PATCH_CHILD, pid, NULL, resume);
+}
+
+int jbclient_roothide_patch_child_traced(pid_t pid, bool resume,
+    void (*checkpoint)(const char *, pid_t, int, void *), void *context)
+{
+	if (pid <= 0) return -1;
+	return roothide_lifecycle_request_traced(JBD_MSG_SPAWN_PATCH_CHILD, pid, NULL, resume, checkpoint, context);
 }
 
 int jbclient_roothide_exec_start(const char *path, bool resume)

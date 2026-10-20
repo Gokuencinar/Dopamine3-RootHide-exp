@@ -787,7 +787,9 @@ int exec_cmd_roothide_spawn_traced(pid_t* pidp, const char* path, const posix_sp
             // Use the same launchd-based daemon lookup as systemhook. The
             // legacy RootHide 2 host special port is not the 3.x client route.
             if (callback) callback("patch child XPC entering", pid, 0, context);
-            int patched = jbclient_roothide_patch_child(pid, should_resume);
+            int patched = callback
+                ? jbclient_roothide_patch_child_traced(pid, should_resume, callback, context)
+                : jbclient_roothide_patch_child(pid, should_resume);
             if (callback) callback("patch child XPC returned", pid, patched, context);
             if(patched != 0) {
                 JBLogError("Failed to patch spawned process (%d) %s", pid, path);
