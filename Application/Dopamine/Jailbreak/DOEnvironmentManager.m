@@ -728,21 +728,49 @@ static void RH3LogCommandSpawnStage(const char *stage, pid_t pid, int result, vo
         }
         BOOL sshd = lstat([root stringByAppendingPathComponent:@"usr/sbin/sshd"].fileSystemRepresentation,
                           &statInfo) == 0 && S_ISREG(statInfo.st_mode);
+        BOOL sshdExecutable = sshd &&
+            access([root stringByAppendingPathComponent:@"usr/sbin/sshd"].fileSystemRepresentation, X_OK) == 0;
+        BOOL sshConfig = lstat([root stringByAppendingPathComponent:@"etc/ssh/sshd_config"].fileSystemRepresentation,
+                               &statInfo) == 0 && S_ISREG(statInfo.st_mode);
+        NSUInteger hostKeys = 0;
+        for (NSString *key in @[@"ssh_host_ed25519_key", @"ssh_host_ecdsa_key", @"ssh_host_rsa_key"]) {
+            NSString *path = [[root stringByAppendingPathComponent:@"etc/ssh"] stringByAppendingPathComponent:key];
+            if (lstat(path.fileSystemRepresentation, &statInfo) == 0 &&
+                S_ISREG(statInfo.st_mode) && statInfo.st_size > 0) hostKeys++;
+        }
         NSError *listingError = nil;
         NSArray<NSString *> *daemons = [NSFileManager.defaultManager contentsOfDirectoryAtPath:
             [root stringByAppendingPathComponent:@"Library/LaunchDaemons"] error:&listingError];
         NSUInteger sshPlists = 0;
+        NSUInteger sshPlistProgramRooted = 0, sshPlistProgramAccessible = 0;
         for (NSString *name in daemons) {
             NSString *lower = name.lowercaseString;
             // The donor contains us.diatr.shshd.plist (SHSH blobs daemon),
             // which is NOT OpenSSH and must not count as an SSH server.
             if ([[lower pathExtension] isEqualToString:@"plist"] &&
-                [lower containsString:@"ssh"] && ![lower containsString:@"shsh"])
+                [lower containsString:@"ssh"] && ![lower containsString:@"shsh"]) {
                 sshPlists++;
+                NSString *plistPath = [[root stringByAppendingPathComponent:@"Library/LaunchDaemons"]
+                                       stringByAppendingPathComponent:name];
+                NSDictionary *plist = [NSDictionary dictionaryWithContentsOfFile:plistPath];
+                NSString *program = [plist[@"Program"] isKindOfClass:[NSString class]] ? plist[@"Program"] : nil;
+                if (!program) {
+                    NSArray *arguments = [plist[@"ProgramArguments"] isKindOfClass:[NSArray class]] ? plist[@"ProgramArguments"] : nil;
+                    if (arguments.count && [arguments[0] isKindOfClass:[NSString class]]) program = arguments[0];
+                }
+                if (program.length && [program hasPrefix:[root stringByAppendingString:@"/"]])
+                    sshPlistProgramRooted++;
+                if (program.length && access(program.fileSystemRepresentation, X_OK) == 0)
+                    sshPlistProgramAccessible++;
+            }
         }
         [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
             [NSString stringWithFormat:@"runtime: tweak_safe_mode=%d tweak_loader_present=%d newterm_bundle_present=%d sshd_binary_present=%d ssh_plists=%lu daemon_listing_ok=%d; presence is not running state",
              marker, loader, newTerm, sshd, (unsigned long)sshPlists, daemons != nil && listingError == nil]];
+        [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
+            [NSString stringWithFormat:@"runtime: sshd_executable=%d ssh_config_present=%d ssh_host_key_files=%lu ssh_launch_program_rooted=%lu ssh_launch_program_accessible=%lu; no server started",
+             sshdExecutable, sshConfig, (unsigned long)hostKeys,
+             (unsigned long)sshPlistProgramRooted, (unsigned long)sshPlistProgramAccessible]];
         return 0;
     }];
     return [self rh3ActionStage:@"read-only tweak/terminal/SSH diagnosis" result:result];
@@ -857,6 +885,37 @@ static void RH3LogCommandSpawnStage(const char *stage, pid_t pid, int result, vo
 
 - (BOOL)isTweakInjectionEnabled
 {
+    if ([DOBootstrapper rootHidePortEnabled] && self.isJailbroken) {
+        // A sandboxed fileExistsAtPath can report NO even while the hidden
+        // RootHide marker exists. That made Settings appear ON while
+        // systemhook correctly stayed in safe mode. Read the verified root
+        // using the same temporary credentials as the runtime diagnosis.
+        __block BOOL markerPresent = YES; // Fail closed on an unreadable root.
+        int result = [self rh3PerformPrivilegedAction:^int {
+            NSError *rootError = nil;
+            NSString *root = [DOBootstrapper rootHideExistingRootWithError:&rootError];
+            const char *serverRoot = jbclient_get_jbroot();
+            if (rootError || !root || !serverRoot ||
+                ![RH3CanonicalAppPath(root) isEqualToString:
+                  RH3CanonicalAppPath([NSString stringWithUTF8String:serverRoot])])
+                return EPERM;
+            NSString *marker = [root stringByAppendingPathComponent:@"basebin/.safe_mode"];
+            struct stat info = {0};
+            if (lstat(marker.fileSystemRepresentation, &info) == 0) {
+                if (!S_ISREG(info.st_mode) || info.st_uid != 0) return EPERM;
+                markerPresent = YES;
+                return 0;
+            }
+            if (errno != ENOENT) return errno;
+            markerPresent = NO;
+            return 0;
+        }];
+        if (result) {
+            [self rh3ActionStage:@"read tweak injection state" result:result];
+            return NO;
+        }
+        return !markerPresent;
+    }
     return ![[NSFileManager defaultManager] fileExistsAtPath:JBROOT_PATH(@"/basebin/.safe_mode")];
 }
 

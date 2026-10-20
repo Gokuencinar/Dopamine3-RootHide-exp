@@ -10,6 +10,18 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class RuntimeTweakSwitch(unittest.TestCase):
+    def test_runtime_switch_reads_real_marker_with_root_privileges(self):
+        env = (ROOT / "Application/Dopamine/Jailbreak/DOEnvironmentManager.m").read_text(encoding="utf-8")
+        getter = env.split("- (BOOL)isTweakInjectionEnabled", 1)[1].split("- (int)setTweakInjectionEnabled", 1)[0]
+        self.assertIn("rh3PerformPrivilegedAction:", getter)
+        self.assertIn("rootHideExistingRootWithError:&rootError", getter)
+        self.assertIn("jbclient_get_jbroot()", getter)
+        self.assertIn("lstat(marker.fileSystemRepresentation, &info)", getter)
+        self.assertIn("markerPresent = YES;", getter)
+        self.assertIn("markerPresent = NO;", getter)
+        self.assertIn("if (result)", getter)
+        self.assertIn("return !markerPresent;", getter)
+
     def test_existing_bootstrap_no_longer_forces_safe_mode(self):
         source = (ROOT / "Application/Dopamine/Jailbreak/DOJailbreaker.m").read_text(encoding="utf-8")
         hook = source.split("- (NSError *)injectRootHideLaunchdHookSafely", 1)[1].split(
@@ -49,6 +61,9 @@ class RuntimeTweakSwitch(unittest.TestCase):
                      "sshd_binary_present", "ssh_plists", "daemon_listing_ok"):
             self.assertIn(name, body)
         self.assertIn('![lower containsString:@"shsh"]', body)
+        for name in ("sshd_executable=", "ssh_config_present=", "ssh_host_key_files=",
+                     "ssh_launch_program_rooted=", "ssh_launch_program_accessible="):
+            self.assertIn(name, body)
         for forbidden in ("launchctl", "kickstart", "uicache", "install_pkg",
                           "dpkg", "exec_cmd", "rebootUserspace", "writeToFile",
                           "password", "sshd -D"):

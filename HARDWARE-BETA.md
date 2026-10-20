@@ -27,6 +27,25 @@ El cierre de Zebra no se considera arreglado por esta reparación. Si continúa,
 
 En la prueba del iPhone X con r134, `pw usermod 501 -h 0` devolvió dos veces el código 67 tras completarse la autenticación y el parcheo del proceso. En `sysexits`, 67 corresponde a `EX_NOUSER`; los archivos `etc/master.passwd` de los dos bootstraps fijados sí contienen `mobile` con UID 501. La corrección del código utiliza el nombre `mobile` y `pw -V <hidden-root>/etc` para apuntar explícitamente a la base privada; verifica su ubicación, propietario, estado anterior y cambio real del hash. No se ha validado todavía el cambio en hardware.
 
+## SSH y visualización del interruptor de tweaks en r140
+
+La comprobación de Windows establece conexión TCP con el puerto 22 pero recibe
+`Connection reset` **antes del banner SSH**, sin enviar contraseña. La
+existencia de un listener puede corresponder a un socket de `launchd` aun si
+el daemon que debe atender la conexión no consigue ejecutarse. No se considera
+comprobado que `sshd` esté activo ni que haya un problema de contraseña.
+
+El registro de hardware r140 tenía `tweak_safe_mode=1` y
+`tweak_loader_present=1`, pero el usuario indicó que la interfaz mostraba la
+inyección activada. La lectura anterior del interruptor consultaba
+`fileExistsAtPath` desde el sandbox de la app, con posible falso negativo.
+Ahora consulta **como root temporal** el marcador de su bootstrap verificado y
+muestra desactivado si no consigue leerlo de forma fiable. La comprobación
+pasiva de SSH incorpora presencia de configuración, número de claves de host
+y si el ejecutable declarado por el plist está accesible y vive dentro del
+bootstrap oculto, sin revelar rutas ni contenido de claves. No cambia el
+estado de `sshd`, las claves, las cuentas ni la instalación.
+
 **Nunca introduzcas tu contraseña en un log, issue o mensaje de diagnóstico.** Si una prueba devuelve error, no reintentes el cambio repetidamente ni edites a mano `master.passwd`/`spwd.db`. Comparte únicamente las etapas y códigos numéricos del diagnóstico.
 
 ## Inyección después de repetir Jailbreak, NewTerm y SSH
