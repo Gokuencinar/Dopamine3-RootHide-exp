@@ -37,7 +37,7 @@ static void rh3_prepare_openssh_socket_job(xpc_object_t job)
         xpc_array_set_string(args, XPC_ARRAY_APPEND, part.fileSystemRepresentation);
     xpc_dictionary_set_string(job, "Program", program.fileSystemRepresentation);
     xpc_dictionary_set_value(job, "ProgramArguments", args);
-    xpc_release(args);
+    // XPC objects bridge to Objective-C here and are ARC-managed.
 }
 
 void xpc_dictionary_add_launch_daemon_plist_at_path(xpc_object_t xdict, const char *path)
@@ -56,7 +56,6 @@ void xpc_dictionary_add_launch_daemon_plist_at_path(xpc_object_t xdict, const ch
 			if (daemonXdict) {
 				rh3_prepare_openssh_socket_job(daemonXdict);
 				xpc_dictionary_set_value(xdict, path, daemonXdict);
-				xpc_release(daemonXdict);
 			}
 			munmap(addr, len);
 		}
