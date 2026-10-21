@@ -81,19 +81,27 @@ int spawnExecPatchAdd(int pid, bool resume)
 {
     initExecPatch();
 
+    // Publish the record BEFORE the one-shot NOTE_EXEC/NOTE_EXIT watch is
+    // armed. Otherwise an immediate exec can wake event_handler while the
+    // async registration is still queued, permanently losing NOTE_EXEC and
+    // leaving the replacement process suspended without its code-sign fix.
+    __block bool alreadyRegistered = false;
+    dispatch_sync(gExecPatchDataQueue, ^{
+        if ([gExecPatchArray objectForKey:@(pid)] != nil) alreadyRegistered = true;
+        else [gExecPatchArray setObject:@(resume) forKey:@(pid)];
+    });
+    if (alreadyRegistered) return -1;
+
     struct kevent kev;
     EV_SET(&kev, pid, EVFILT_PROC, EV_ADD | EV_ENABLE | EV_ONESHOT, NOTE_EXEC|NOTE_EXIT, 0, NULL);
     if (kevent(kq, &kev, 1, NULL, 0, NULL) == -1) {
         JBLogError("add kevent failed for pid: %d", pid);
+        // A failed watch must not leave a stale registration for a reused PID.
+        dispatch_sync(gExecPatchDataQueue, ^{
+            [gExecPatchArray removeObjectForKey:@(pid)];
+        });
         return -1;
     }
-
-    dispatch_async(gExecPatchDataQueue, ^{
-        if([gExecPatchArray objectForKey:@(pid)] != nil) {
-            JBLogError("[spawnExecPatchAdd] already has record for process: %d", pid);
-        }
-        [gExecPatchArray setObject:@(resume) forKey:@(pid)];
-    });
     return 0;
 }
 

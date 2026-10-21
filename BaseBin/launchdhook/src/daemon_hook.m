@@ -7,6 +7,7 @@
 #import <substrate.h>
 #import <mach-o/dyld.h>
 #import <libjailbreak/libjailbreak.h>
+#import <libjailbreak/roothide_bootlog.h>
 #import <Foundation/Foundation.h>
 #import <litehook.h>
 
@@ -19,24 +20,40 @@ static void rh3_prepare_openssh_socket_job(xpc_object_t job)
     const char *label = xpc_dictionary_get_string(job, "Label");
     if (!label || strcmp(label, "com.openssh.sshd")) return;
     xpc_object_t sockets = xpc_dictionary_get_value(job, "Sockets");
-    if (!sockets || xpc_get_type(sockets) != XPC_TYPE_DICTIONARY) return;
+    if (!sockets || xpc_get_type(sockets) != XPC_TYPE_DICTIONARY) {
+        rh3_bootlog("OpenSSH import: socket dictionary missing; XPC job unchanged");
+        return;
+    }
     NSString *program = JBROOT_PATH(@"/usr/sbin/sshd");
     NSString *config = JBROOT_PATH(@"/etc/ssh/sshd_config");
     NSString *key = JBROOT_PATH(@"/etc/ssh/ssh_host_ed25519_key");
     struct stat st = {0};
     if (lstat(program.fileSystemRepresentation, &st) ||
-        !S_ISREG(st.st_mode) || st.st_uid != 0 || !(st.st_mode & S_IXUSR)) return;
+        !S_ISREG(st.st_mode) || st.st_uid != 0 || !(st.st_mode & S_IXUSR)) {
+        rh3_bootlog("OpenSSH import: verified sshd unavailable; XPC job unchanged");
+        return;
+    }
     if (lstat(config.fileSystemRepresentation, &st) ||
-        !S_ISREG(st.st_mode) || st.st_uid != 0) return;
+        !S_ISREG(st.st_mode) || st.st_uid != 0) {
+        rh3_bootlog("OpenSSH import: verified config unavailable; XPC job unchanged");
+        return;
+    }
     if (lstat(key.fileSystemRepresentation, &st) ||
         !S_ISREG(st.st_mode) || st.st_uid != 0 || (st.st_mode & 077) ||
-        st.st_size < 32) return;
+        st.st_size < 32) {
+        rh3_bootlog("OpenSSH import: ED25519 host key missing or unsafe; XPC job unchanged");
+        return;
+    }
     xpc_object_t args = xpc_array_create(NULL, 0);
-    if (!args) return;
+    if (!args) {
+        rh3_bootlog("OpenSSH import: XPC argument allocation failed");
+        return;
+    }
     for (NSString *part in @[program, @"-i", @"-f", config, @"-h", key])
         xpc_array_set_string(args, XPC_ARRAY_APPEND, part.fileSystemRepresentation);
     xpc_dictionary_set_string(job, "Program", program.fileSystemRepresentation);
     xpc_dictionary_set_value(job, "ProgramArguments", args);
+    rh3_bootlog("OpenSSH import: socket XPC program arguments rebased to active hidden root");
     // XPC objects bridge to Objective-C here and are ARC-managed.
 }
 

@@ -648,11 +648,17 @@ NSURL* new_LSGetInboxURLForBundleIdentifier(NSString* bundleIdentifier)
 }
 
 int (*orig_LSServer_RebuildApplicationDatabases)()=NULL;
+// An explicit uicache registration may rebuild LaunchServices again. Do not
+// recursively fan out uicache -a children while the previous refresh is still
+// executing (or stuck). A future lsd restart clears this in-memory guard.
+static volatile int rh3AutoUICacheInFlight = 0;
 int new_LSServer_RebuildApplicationDatabases()
 {
 	int r = orig_LSServer_RebuildApplicationDatabases();
 
 	if(access(jbroot("/.disable_auto_uicache"), F_OK) == 0) return r;
+
+    if (!__sync_bool_compare_and_swap(&rh3AutoUICacheInFlight, 0, 1)) return r;
 
 	dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
 		// Ensure jailbreak apps are readded to icon cache after the system reloads it
@@ -666,6 +672,7 @@ int new_LSServer_RebuildApplicationDatabases()
 				wait_for_exit(pid);
 			}
 		}
+            __sync_lock_release(&rh3AutoUICacheInFlight);
 	});
 
 	return r;
