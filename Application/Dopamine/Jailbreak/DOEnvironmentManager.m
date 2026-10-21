@@ -16,6 +16,8 @@
 #include <errno.h>
 #include <fcntl.h>
 #import <mach-o/dyld.h>
+#import <mach-o/loader.h>
+#import <uuid/uuid.h>
 #import <libgrabkernel2/libgrabkernel2.h>
 #import <libjailbreak/info.h>
 #import <libjailbreak/codesign.h>
@@ -53,6 +55,55 @@ static void RH3LogCommandSpawnStage(const char *stage, pid_t pid, int result, vo
     [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
         [NSString stringWithFormat:@"RootHide command %@: %s pid=%d result=%d",
          name, stage, pid, result]];
+}
+
+// Read a jailed app's on-disk Mach-O identity, not the UUID of a process that
+// may have stayed alive across a dpkg upgrade. Never execute or map the file.
+// A strict size bound keeps corrupt load commands out of the diagnostic.
+static NSString *RH3MachOUUIDForExecutable(NSString *path)
+{
+    if (!path.length) return nil;
+    int fd = open(path.fileSystemRepresentation, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) return nil;
+    struct stat info = {0};
+    struct mach_header_64 header = {0};
+    if (fstat(fd, &info) || !S_ISREG(info.st_mode) ||
+        info.st_size < (off_t)sizeof(header) ||
+        pread(fd, &header, sizeof(header), 0) != sizeof(header) ||
+        header.magic != MH_MAGIC_64 || header.ncmds == 0 ||
+        header.ncmds > 4096 || header.sizeofcmds < sizeof(struct load_command) ||
+        header.sizeofcmds > 65536 ||
+        (uint64_t)header.sizeofcmds + sizeof(header) > (uint64_t)info.st_size) {
+        close(fd);
+        return nil;
+    }
+    uint8_t *commands = malloc(header.sizeofcmds);
+    if (!commands) { close(fd); return nil; }
+    ssize_t bytes = pread(fd, commands, header.sizeofcmds, sizeof(header));
+    close(fd);
+    NSString *identity = nil;
+    if (bytes == (ssize_t)header.sizeofcmds) {
+        size_t offset = 0;
+        for (uint32_t index = 0; index < header.ncmds; ++index) {
+            if (offset > header.sizeofcmds ||
+                header.sizeofcmds - offset < sizeof(struct load_command)) break;
+            struct load_command command = {0};
+            memcpy(&command, commands + offset, sizeof(command));
+            if (command.cmdsize < sizeof(command) ||
+                command.cmdsize > header.sizeofcmds - offset) break;
+            if (command.cmd == LC_UUID && command.cmdsize >= sizeof(struct uuid_command)) {
+                struct uuid_command uuidCommand = {0};
+                memcpy(&uuidCommand, commands + offset, sizeof(uuidCommand));
+                char uuidString[37] = {0};
+                uuid_unparse_lower(uuidCommand.uuid, uuidString);
+                identity = [NSString stringWithUTF8String:uuidString];
+                break;
+            }
+            offset += command.cmdsize;
+        }
+    }
+    free(commands);
+    return identity;
 }
 
 @implementation DOEnvironmentManager
@@ -746,6 +797,31 @@ static void RH3LogCommandSpawnStage(const char *stage, pid_t pid, int result, vo
                 break;
             }
         }
+        // NewTerm may have an old process still alive under a temporary name
+        // during a package replacement. Compare the *installed* file UUID with
+        // the CI build rather than attributing that stale crash to the update.
+        NSString *newTermBundle = [root stringByAppendingPathComponent:@"Applications/NewTerm.app"];
+        NSDictionary *newTermInfo = [NSDictionary dictionaryWithContentsOfFile:
+            [newTermBundle stringByAppendingPathComponent:@"Info.plist"]];
+        BOOL expectedNewTerm = [newTermInfo[@"CFBundleIdentifier"] isEqual:@"ws.hbang.Terminal"];
+        NSString *newTermExecutable = [newTermBundle stringByAppendingPathComponent:@"NewTerm"];
+        NSString *newTermHelper = [newTermBundle stringByAppendingPathComponent:@"NewTermLoginHelper"];
+        struct stat executableInfo = {0};
+        BOOL newTermExecutablePresent = expectedNewTerm &&
+            lstat(newTermExecutable.fileSystemRepresentation, &executableInfo) == 0 &&
+            S_ISREG(executableInfo.st_mode) && access(newTermExecutable.fileSystemRepresentation, X_OK) == 0;
+        BOOL newTermHelperPresent = expectedNewTerm &&
+            lstat(newTermHelper.fileSystemRepresentation, &executableInfo) == 0 &&
+            S_ISREG(executableInfo.st_mode) && access(newTermHelper.fileSystemRepresentation, X_OK) == 0;
+        NSString *newTermUUID = newTermExecutablePresent ? RH3MachOUUIDForExecutable(newTermExecutable) : nil;
+        NSString *loginPath = [root stringByAppendingPathComponent:@"usr/bin/login"];
+        // Login may be a package-managed symlink; follow it only to test the
+        // executable's availability, without modifying any target.
+        BOOL loginPresent = stat(loginPath.fileSystemRepresentation, &executableInfo) == 0 &&
+            S_ISREG(executableInfo.st_mode) && access(loginPath.fileSystemRepresentation, X_OK) == 0;
+        [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
+            [NSString stringWithFormat:@"runtime: newterm_executable=%d newterm_helper_executable=%d login_executable=%d newterm_macho_uuid=%@; read-only on-disk metadata",
+             newTermExecutablePresent, newTermHelperPresent, loginPresent, newTermUUID ?: @"unavailable"]];
         BOOL sshd = lstat([root stringByAppendingPathComponent:@"usr/sbin/sshd"].fileSystemRepresentation,
                           &statInfo) == 0 && S_ISREG(statInfo.st_mode);
         BOOL sshdExecutable = sshd &&
