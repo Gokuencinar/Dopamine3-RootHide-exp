@@ -19,6 +19,17 @@
 #include "roothide_manager_spawn.h"
 extern char **environ;
 
+// This deliberately stays OFF in shipping builds. Patching a child while
+// launchd waits for a synchronous jailbreakd reply can deadlock PID 1 if the
+// daemon takes a path back through launchd. Enable only in a separately
+// validated recovery-capable hardware experiment, never by a runtime setting.
+#ifndef RH3_EXPERIMENTAL_NEWTERM_LAUNCHD_PATCH_CHILD
+#define RH3_EXPERIMENTAL_NEWTERM_LAUNCHD_PATCH_CHILD 0
+#endif
+#if RH3_EXPERIMENTAL_NEWTERM_LAUNCHD_PATCH_CHILD != 0 && RH3_EXPERIMENTAL_NEWTERM_LAUNCHD_PATCH_CHILD != 1
+#error RH3_EXPERIMENTAL_NEWTERM_LAUNCHD_PATCH_CHILD must be 0 or 1
+#endif
+
 void abort_with_reason(uint32_t reason_namespace, uint64_t reason_code, const char *reason_string, uint64_t reason_flags);
 
 extern int systemwide_trust_file_by_path(const char *path);
@@ -166,6 +177,59 @@ static bool roothide_blacklisted_uikit_proxy(const char *path,
 	memcpy(bundleId, identifier, length);
 	bundleId[length] = '\0';
 	return isBlacklistedApp(bundleId);
+}
+
+// A narrowly scoped parity candidate: NewTerm is launched by launchd as
+// xpcproxy, so comparing path with /Applications/NewTerm.app/NewTerm misses it.
+// Require the exact UIKit bundle label boundary, never substring matching.
+static bool rh3_newterm_uikit_proxy(const char *path, char *const argv[restrict])
+{
+	static const char label[] = "UIKitApplication:ws.hbang.Terminal[";
+	return path && !strcmp(path, "/usr/libexec/xpcproxy") &&
+	       argv && argv[0] && argv[1] &&
+	       !strncmp(argv[1], label, sizeof(label) - 1);
+}
+
+// Do not use jbclient_roothide_patch_child() from PID 1: that client first
+// consults the XPC server hosted by PID 1 itself. RootHide2 instead talks
+// straight to jailbreakd. This posthook is used only after authenticated
+// jailbreakd check-in, and only for NewTerm's UIKit xpcproxy launch.
+static int rh3_newterm_launchd_posthook(pid_t *pid, const char *path,
+                                       struct _posix_spawn_args_desc *desc,
+                                       char *const argv[restrict], char *const envp[restrict])
+{
+	// Do not manufacture the private spawn descriptor or alter SETEXEC,
+	// DriverKit, or an existing suspended caller; preserve their contracts.
+	if (!desc || !desc->attrp)
+		return __posix_spawn_orig_wrapper(pid, path, desc, argv, envp);
+	posix_spawnattr_t attributes = desc->attrp;
+	short flags = 0;
+	if (posix_spawnattr_getflags(&attributes, &flags) != 0)
+		return __posix_spawn_orig_wrapper(pid, path, desc, argv, envp);
+	int type = 0;
+	if ((flags & POSIX_SPAWN_SETEXEC) ||
+	    (posix_spawnattr_getprocesstype_np(&attributes, &type) == 0 &&
+	     type == POSIX_SPAWN_PROC_TYPE_DRIVER))
+		return __posix_spawn_orig_wrapper(pid, path, desc, argv, envp);
+	const bool resume = (flags & POSIX_SPAWN_START_SUSPENDED) == 0;
+	int error = posix_spawnattr_setflags(&attributes, flags | POSIX_SPAWN_START_SUSPENDED);
+	if (error) return error;
+	pid_t temporaryPid = 0;
+	pid_t *childPid = pid ? pid : &temporaryPid;
+	int result = __posix_spawn_orig_wrapper(childPid, path, desc, argv, envp);
+	int restore = posix_spawnattr_setflags(&attributes, flags);
+	if (result != 0) return result;
+	if (*childPid <= 0) return EIO;
+	if (restore != 0 || jbdSpawnPatchChild(*childPid, resume) != 0) {
+		// Never let a half-patched suspended child execute. Avoid a blocking
+		// child-reaping wait here; launchd retains its normal process lifecycle.
+		kill(*childPid, SIGKILL);
+		if (pid) *pid = 0;
+		rh3_bootlog("NewTerm launchd child patch failed; child terminated");
+		return EIO;
+	}
+	rh3_bootlog("NewTerm launchd child patched before resume");
+	return 0;
 }
 
 int __posix_spawn_hook(pid_t *restrict pid, const char *restrict path,
@@ -342,6 +406,18 @@ int __posix_spawn_hook(pid_t *restrict pid, const char *restrict path,
 		commitBlacklistProcessId(trackedPid);
 		return result;
 	}
+		// Experimental PID 1 parity is opt-in at COMPILE TIME only. The default
+		// branch keeps the current Dopamine3 spawn policy. Preserve the
+		// first-load / early-boot / blacklist bypasses above, and never patch
+		// unless jailbreakd has authenticated its receive port with launchd.
+		if (RH3_EXPERIMENTAL_NEWTERM_LAUNCHD_PATCH_CHILD &&
+		    !gInEarlyBoot && !launchdhookFirstLoad &&
+		    roothide_launchdhook_origin_verified() && roothide_is_active() &&
+		    jailbreakd_has_checked_in() && rh3_newterm_uikit_proxy(path, argv)) {
+			return posix_spawn_hook_shared(pid, path, desc, argv, envp,
+			    rh3_newterm_launchd_posthook, systemwide_trust_file_by_path,
+			    platform_set_process_debugged, jbsetting(jetsamMultiplier));
+		}
 	return posix_spawn_hook_shared(pid, path, desc, argv, envp, __posix_spawn_orig_wrapper, systemwide_trust_file_by_path, platform_set_process_debugged, jbsetting(jetsamMultiplier));
 }
 
