@@ -813,23 +813,46 @@ static void RH3LogCommandSpawnStage(const char *stage, pid_t pid, int result, vo
         const char *activeRoot = jbclient_get_jbroot();
         if (error || !root || !activeRoot ||
             ![RH3CanonicalAppPath(root) isEqualToString:
-              RH3CanonicalAppPath([NSString stringWithUTF8String:activeRoot])]) return EPERM;
+              RH3CanonicalAppPath([NSString stringWithUTF8String:activeRoot])]) {
+            [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:@"SSH preflight: active hidden root identity not verified"];
+            return EPERM;
+        }
         // Reject symlinks or writable directories along paths where an
         // attacker could redirect ssh-keygen or the root-owned host key.
         for (NSString *suffix in @[@"etc", @"etc/ssh", @"Library", @"Library/LaunchDaemons"]) {
             NSString *directory = [root stringByAppendingPathComponent:suffix];
             int fd = open(directory.fileSystemRepresentation, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
-            if (fd < 0) return errno;
+            if (fd < 0) {
+                int saved = errno;
+                [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
+                    [NSString stringWithFormat:@"SSH preflight: directory %@ cannot be opened safely (errno=%d)", suffix, saved]];
+                return saved;
+            }
             struct stat st = {0};
-            int check = fstat(fd, &st) ? errno :
-                (!S_ISDIR(st.st_mode) || st.st_uid != 0 ||
-                 (st.st_mode & (S_IWGRP | S_IWOTH)) ? EPERM : 0);
+            // Both pinned RootHide donors ship Library/ as 0775 root:wheel.
+            // The wheel group is privileged; rejecting this exact layout
+            // prevents SSH setup before key generation. Keep every other
+            // ancestor non-group-writable and all ancestors non-world-writable.
+            int statError = fstat(fd, &st) ? errno : 0;
+            BOOL trustedLibrary = [suffix isEqualToString:@"Library"] &&
+                st.st_gid == 0 && (st.st_mode & 0777) == 0775;
+            BOOL unsafeMode = (st.st_mode & S_IWOTH) ||
+                ((st.st_mode & S_IWGRP) && !trustedLibrary);
+            int check = statError ? statError :
+                (!S_ISDIR(st.st_mode) || st.st_uid != 0 || unsafeMode ? EPERM : 0);
             close(fd);
-            if (check) return check;
+            if (check) {
+                [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
+                    [NSString stringWithFormat:@"SSH preflight: directory %@ is not safely owned or writable (result=%d)", suffix, check]];
+                return check;
+            }
         }
         NSString *daemonsDir = [root stringByAppendingPathComponent:@"Library/LaunchDaemons"];
         NSArray<NSString *> *names = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:daemonsDir error:&error];
-        if (!names || error) return EIO;
+        if (!names || error) {
+            [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:@"SSH preflight: LaunchDaemons directory listing failed"];
+            return EIO;
+        }
         for (NSString *name in names) {
             if (![name.pathExtension.lowercaseString isEqualToString:@"plist"] ||
                 [name.lowercaseString containsString:@"shsh"]) continue;
@@ -840,11 +863,20 @@ static void RH3LogCommandSpawnStage(const char *stage, pid_t pid, int result, vo
                 continue;
             NSDictionary *dict = [NSDictionary dictionaryWithContentsOfFile:candidate];
             if (![dict[@"Label"] isEqual:@"com.openssh.sshd"]) continue;
-            if (plistPath) return EEXIST; // Ambiguous OpenSSH service: don't guess.
-            if (![dict[@"Sockets"] isKindOfClass:[NSDictionary class]]) return ENOTSUP;
+            if (plistPath) {
+                [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:@"SSH preflight: duplicate OpenSSH socket job"];
+                return EEXIST; // Ambiguous OpenSSH service: don't guess.
+            }
+            if (![dict[@"Sockets"] isKindOfClass:[NSDictionary class]]) {
+                [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:@"SSH preflight: OpenSSH socket job invalid"];
+                return ENOTSUP;
+            }
             plistPath = candidate;
         }
-        if (!plistPath) return ENOENT;
+        if (!plistPath) {
+            [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:@"SSH preflight: verified OpenSSH socket job not found"];
+            return ENOENT;
+        }
         sshdPath = [root stringByAppendingPathComponent:@"usr/sbin/sshd"];
         keygenPath = [root stringByAppendingPathComponent:@"usr/bin/ssh-keygen"];
         configPath = [root stringByAppendingPathComponent:@"etc/ssh/sshd_config"];
@@ -853,25 +885,39 @@ static void RH3LogCommandSpawnStage(const char *stage, pid_t pid, int result, vo
         for (NSString *binary in @[sshdPath, keygenPath]) {
             struct stat st = {0};
             if (lstat(binary.fileSystemRepresentation, &st) != 0 ||
-                !S_ISREG(st.st_mode) || st.st_uid != 0 || !(st.st_mode & S_IXUSR)) return ENOENT;
+                !S_ISREG(st.st_mode) || st.st_uid != 0 || !(st.st_mode & S_IXUSR)) {
+                [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
+                    [NSString stringWithFormat:@"SSH preflight: %@ missing, non-executable, or not root-owned", binary.lastPathComponent]];
+                return ENOENT;
+            }
         }
         struct stat cfg = {0};
         if (lstat(configPath.fileSystemRepresentation, &cfg) != 0 ||
-            !S_ISREG(cfg.st_mode) || cfg.st_uid != 0) return ENOENT;
+            !S_ISREG(cfg.st_mode) || cfg.st_uid != 0) {
+            [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:@"SSH preflight: sshd_config missing or untrusted"];
+            return ENOENT;
+        }
         struct stat keyInfo = {0};
         if (lstat(keyPath.fileSystemRepresentation, &keyInfo) == 0) {
             if (!S_ISREG(keyInfo.st_mode) || keyInfo.st_uid != 0 ||
-                (keyInfo.st_mode & 077) != 0 || keyInfo.st_size < 32) return EPERM;
+                (keyInfo.st_mode & 077) != 0 || keyInfo.st_size < 32) {
+                [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:@"SSH preflight: existing ED25519 host key rejected; unchanged"];
+                return EPERM;
+            }
         } else if (errno == ENOENT) {
             // ssh-keygen creates both files. Refuse any pre-existing public
             // key path (including symlinks) rather than risk overwriting it.
             struct stat publicInfo = {0};
-            if (lstat(publicKeyPath.fileSystemRepresentation, &publicInfo) == 0)
+            if (lstat(publicKeyPath.fileSystemRepresentation, &publicInfo) == 0) {
+                [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:@"SSH preflight: public host key exists but private key missing; unchanged"];
                 return EEXIST;
+            }
             if (errno != ENOENT) return errno;
             needsKey = YES;
         }
         else return errno;
+        [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
+            [NSString stringWithFormat:@"SSH preflight: verified; key_generation_needed=%d", needsKey]];
         return 0;
     }];
     if (result) return [self rh3ActionStage:@"SSH repair preflight" result:result];
@@ -1018,10 +1064,37 @@ static void RH3LogCommandSpawnStage(const char *stage, pid_t pid, int result, vo
             close(directory);
             if (check) return check;
             before = [self rh3MobilePasswordHash];
+            // Source of the on-device error is still unknown: pw returned
+            // exit code 1 AFTER spawn/patch. Record only boolean file state,
+            // never password hashes, password input or raw account records.
+            struct stat fileInfo = {0};
+            BOOL masterSafe = lstat([hiddenEtc stringByAppendingPathComponent:@"master.passwd"].fileSystemRepresentation,
+                                    &fileInfo) == 0 && S_ISREG(fileInfo.st_mode) && fileInfo.st_uid == 0;
+            BOOL passwdPresent = lstat([hiddenEtc stringByAppendingPathComponent:@"passwd"].fileSystemRepresentation,
+                                      &fileInfo) == 0 && S_ISREG(fileInfo.st_mode);
+            BOOL pwdDbPresent = lstat([hiddenEtc stringByAppendingPathComponent:@"pwd.db"].fileSystemRepresentation,
+                                     &fileInfo) == 0 && S_ISREG(fileInfo.st_mode);
+            BOOL spwdDbPresent = lstat([hiddenEtc stringByAppendingPathComponent:@"spwd.db"].fileSystemRepresentation,
+                                      &fileInfo) == 0 && S_ISREG(fileInfo.st_mode);
+            BOOL mkdbExecutable = access(JBROOT_PATH("/usr/sbin/pwd_mkdb"), X_OK) == 0;
+            [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
+                [NSString stringWithFormat:@"mobile password preflight: master_safe=%d passwd_present=%d pwd_db_present=%d spwd_db_present=%d pwd_mkdb_executable=%d mobile_record_present=%d",
+                 masterSafe, passwdPresent, pwdDbPresent, spwdDbPresent, mkdbExecutable, before != nil]];
             return before ? 0 : EIO;
         }];
         if (!result) result = [self rh3RunCommand:JBROOT_PATH(@"/usr/sbin/pw") arguments:@[@"-V", hiddenEtc, @"usermod", @"mobile", @"-h", @"0"]
                                           input:[[newPassword stringByAppendingString:@"\n"] dataUsingEncoding:NSUTF8StringEncoding] timeout:20];
+        if (result) {
+            // A command reporting failure could still have modified its DB.
+            // Do not assume the old password remained valid or retry blindly.
+            (void)[self rh3PerformPrivilegedAction:^int{
+                NSString *after = [self rh3MobilePasswordHash];
+                [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
+                    [NSString stringWithFormat:@"mobile password failed-command verification: record_readable=%d hash_changed=%d; no automatic retry",
+                     after != nil, before != nil && after != nil && ![after isEqualToString:before]]];
+                return 0;
+            }];
+        }
         if (!result) result = [self rh3PerformPrivilegedAction:^int{
             NSString *after = [self rh3MobilePasswordHash];
             return after.length > 1 && ![after hasPrefix:@"!"] && ![after hasPrefix:@"*"] && ![after isEqualToString:before] ? 0 : EIO;
