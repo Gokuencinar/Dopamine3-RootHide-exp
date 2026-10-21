@@ -353,6 +353,12 @@ static BOOL gRootHideProviderRepairInFlight = NO;
                         [repairSSH setProperty:@"key.horizontal" forKey:@"image"];
                         [repairSSH setProperty:@"repairRootHideSSHPressed" forKey:@"action"];
                         [specifiers addObject:repairSSH];
+                        PSSpecifier *sshSocket = [PSSpecifier preferenceSpecifierNamed:@"Diagnosticar arranque de OpenSSH (solo lectura)" target:self set:defSetter get:defGetter detail:nil cell:PSStaticTextCell edit:nil];
+                        [sshSocket setProperty:[DOButtonCell class] forKey:@"cellClass"];
+                        [sshSocket setProperty:buttonHeight forKey:@"height"];
+                        [sshSocket setProperty:@"waveform.path.ecg" forKey:@"image"];
+                        [sshSocket setProperty:@"diagnoseRootHideOpenSSHSocketPressed" forKey:@"action"];
+                        [specifiers addObject:sshSocket];
                     }
                 }
 
@@ -764,6 +770,24 @@ static BOOL gRootHideProviderRepairInFlight = NO;
                 result ? @"Diagnóstico incompleto" : @"Diagnóstico guardado"
                 message:result ? [NSString stringWithFormat:@"No se pudo verificar el entorno (código %d). Comparte el registro de RootHide.", result] :
                     @"Se han comprobado en modo de solo lectura el estado seguro y la presencia de TweakLoader, NewTerm y SSH. Comparte el registro de diagnóstico para analizar los resultados; esta acción no inicia servicios."
+                preferredStyle:UIAlertControllerStyleAlert];
+            [alert addAction:[UIAlertAction actionWithTitle:@"Aceptar" style:UIAlertActionStyleCancel handler:nil]];
+            [self presentViewController:alert animated:YES completion:nil];
+        });
+    });
+}
+
+- (void)diagnoseRootHideOpenSSHSocketPressed
+{
+    // Never bootstrap, kickstart, enable or stop OpenSSH from this UI.
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        int result = [[DOEnvironmentManager sharedManager] diagnoseRootHideOpenSSHSocket];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            UIAlertController *alert = [UIAlertController alertControllerWithTitle:
+                result ? @"Consulta de OpenSSH incompleta" : @"Estado de OpenSSH registrado"
+                message:result
+                    ? [NSString stringWithFormat:@"La consulta devolvió el código %d. Comparte el diagnóstico de RootHide. No se ha cambiado ningún servicio.", result]
+                    : @"Se han consultado el plist y el estado real de launchd para com.openssh.sshd. Comparte el diagnóstico de RootHide para comparar los indicadores; no se ha iniciado SSH ni se han cambiado claves."
                 preferredStyle:UIAlertControllerStyleAlert];
             [alert addAction:[UIAlertAction actionWithTitle:@"Aceptar" style:UIAlertActionStyleCancel handler:nil]];
             [self presentViewController:alert animated:YES completion:nil];

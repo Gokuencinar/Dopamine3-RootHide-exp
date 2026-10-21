@@ -1,0 +1,66 @@
+"""Safety contracts for the isolated, opt-in OpenSSH socket-state diagnosis."""
+from pathlib import Path
+import unittest
+
+ROOT = Path(__file__).resolve().parents[2]
+ENV = (ROOT / "Application/Dopamine/Jailbreak/DOEnvironmentManager.m").read_text(encoding="utf-8")
+UI = (ROOT / "Application/Dopamine/UI/Settings/DOSettingsController.m").read_text(encoding="utf-8")
+HEADER = (ROOT / "Application/Dopamine/Jailbreak/DOEnvironmentManager.h").read_text(encoding="utf-8")
+
+
+class SSHSocketDiagnosisR161(unittest.TestCase):
+    def setUp(self):
+        self.diagnostic = ENV.split("- (int)diagnoseRootHideOpenSSHSocket", 1)[1].split(
+            "// Never treat presence of TweakLoader", 1
+        )[0]
+
+    def test_ui_is_separate_explicit_action(self):
+        self.assertIn('@"Diagnosticar arranque de OpenSSH (solo lectura)"', UI)
+        self.assertIn('@"diagnoseRootHideOpenSSHSocketPressed"', UI)
+        self.assertIn("diagnoseRootHideOpenSSHSocket;", HEADER)
+        self.assertIn("diagnoseRootHideOpenSSHSocket]", UI)
+
+    def test_only_readonly_fixed_launchctl_print(self):
+        body = self.diagnostic
+        self.assertIn('@"usr/bin/launchctl"', body)
+        self.assertIn('"print", "system/com.openssh.sshd", NULL', body)
+        self.assertIn("char *const cleanEnv[] = {NULL}", body)
+        self.assertIn("posix_spawn(&pid, argv[0], &actions, NULL, argv, cleanEnv)", body)
+        for banned in ("kickstart", "bootstrap system", "bootout", "ssh-keygen", "sshd -D",
+                       "jbclient_trust_executable_recurse", "exec_cmd_roothide_spawn_traced",
+                       "jbdSpawnPatchChild", "chmod(", "chown(", "writeToFile:",
+                       "rebootUserspace", "exec_cmd(", '"/bin/launchctl"'):
+            self.assertNotIn(banned, body)
+
+    def test_safe_root_and_plist_ownership_and_no_raw_logs(self):
+        body = self.diagnostic
+        self.assertIn("rootHideExistingRootWithError:&error", body)
+        self.assertIn("jbclient_get_jbroot()", body)
+        self.assertIn("file.st_uid != 0", body)
+        self.assertIn('isEqual:@"com.openssh.sshd"', body)
+        self.assertIn('@"inetdCompatibility"', body)
+        self.assertIn('@"Wait"', body)
+        self.assertIn('sockets[@"Listeners"]', body)
+        self.assertIn('RH3SSHPrintScalar(output, @"last exit code", YES)', body)
+        self.assertIn('RH3SSHPrintScalar(output, @"last terminating signal", YES)', body)
+        self.assertIn('RH3SSHPrintScalar(output, @"pid", YES)', body)
+        self.assertIn('RH3SSHPrintScalar(output, @"state", NO)', body)
+        self.assertNotIn("rh3RecordDiagnosticStage:output", body)
+        self.assertNotIn("sendLog:output", body)
+
+    def test_child_only_bounded_capture(self):
+        body = self.diagnostic
+        self.assertIn("O_NONBLOCK", body)
+        self.assertIn("CLOCK_MONOTONIC", body)
+        self.assertIn("const NSUInteger maximum = 16384", body)
+        self.assertIn("drainedBytes > 128 * 1024", body)
+        self.assertIn("now.tv_sec - start.tv_sec >= 10", body)
+        self.assertIn("kill(pid, SIGKILL)", body)
+        self.assertIn("waitpid(pid, &childStatus, WNOHANG)", body)
+        self.assertIn("exitCode", body)
+        self.assertIn("lastExit", body)
+        self.assertIn("outputLimit ? EOVERFLOW", body)
+
+
+if __name__ == "__main__":
+    unittest.main()

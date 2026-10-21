@@ -109,6 +109,29 @@ el bootstrap ni cambies permisos de `/etc` o `/usr` del sistema.
 
 ## Si falla
 
+### Diagnóstico puntual de activación OpenSSH (r161)
+
+Si «Preparar OpenSSH» termina bien y el registro contiene
+`BOOT pid=1 OpenSSH import: socket XPC program arguments rebased to active hidden root`,
+pero el puerto 22 sigue cerrando la conexión antes de `SSH-2.0`, usa
+**Ajustes → Diagnosticar arranque de OpenSSH (solo lectura)**. Esta acción
+consulta el `com.openssh.sshd` real mediante el `launchctl print` del
+bootstrap oculto y revisa, sin modificarlos, los campos `Sockets` e
+`inetdCompatibility.Wait` del plist.
+
+Solo se guardan en el diagnóstico los estados normalizados, códigos y
+contadores. Se descarta la salida íntegra de `launchctl`: nunca se
+comparten rutas privadas, variables de entorno ni contenido de claves.
+La captura tiene límite de tamaño y plazo, y solo puede terminar su propio
+proceso de consulta. No conecta al puerto 22, no habilita, reinicia ni
+detiene SSH y no necesita un reinicio de espacio de usuario. Una respuesta
+`state=waiting` puede ser normal en servicios activados por socket.
+
+Comparte el registro de RootHide después de ejecutar la opción una sola
+vez; distingue el código del comando `launchctl` del último código de
+salida registrado por `launchd` para `sshd`. No reinstales OpenSSH ni
+repitas «Preparar OpenSSH» mientras se investiga el arranque.
+
 Guarda el mensaje de error, los logs, el modelo, la versión exacta de iOS y la revisión de la app. No repitas el proceso sin revisar el fallo: puede haber quedado un bootstrap a medias. No se borra automáticamente una instalación de RootHide 2, y reiniciar no garantiza resolver cualquier estado parcial.
 
 ## Compilar esta variante

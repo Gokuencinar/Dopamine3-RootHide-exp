@@ -15,6 +15,8 @@
 #import <unistd.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <signal.h>
+#include <time.h>
 #import <mach-o/dyld.h>
 #import <libgrabkernel2/libgrabkernel2.h>
 #import <libjailbreak/info.h>
@@ -53,6 +55,35 @@ static void RH3LogCommandSpawnStage(const char *stage, pid_t pid, int result, vo
     [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
         [NSString stringWithFormat:@"RootHide command %@: %s pid=%d result=%d",
          name, stage, pid, result]];
+}
+
+// launchctl print is a diagnostic format, not a stable API. Extract only
+// tightly bounded scalar values from a single service; NEVER log raw output,
+// paths, environment, sockets, usernames or configuration contents.
+static NSString *RH3SSHPrintScalar(NSString *text, NSString *field, BOOL numeric)
+{
+    NSString *prefix = [field stringByAppendingString:@" = "];
+    for (NSString *line in [text componentsSeparatedByCharactersInSet:NSCharacterSet.newlineCharacterSet]) {
+        NSString *trimmed = [line stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
+        if (![trimmed hasPrefix:prefix]) continue;
+        NSString *value = [[trimmed substringFromIndex:prefix.length]
+            stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
+        if (!value.length || value.length > 32) return @"unknown";
+        if (numeric) {
+            NSString *digits = [value hasPrefix:@"-"] ? [value substringFromIndex:1] : value;
+            if (digits.length && [digits rangeOfCharacterFromSet:
+                  [NSCharacterSet.decimalDigitCharacterSet invertedSet]].location == NSNotFound)
+                return value;
+            return @"unknown";
+        }
+        NSString *lower = value.lowercaseString;
+        for (NSString *allowed in @[@"waiting", @"running", @"stopped", @"inactive",
+                                     @"active", @"spawn scheduled", @"not running"]) {
+            if ([lower isEqualToString:allowed]) return [allowed stringByReplacingOccurrencesOfString:@" " withString:@"_"];
+        }
+        return @"other";
+    }
+    return @"unknown";
 }
 
 @implementation DOEnvironmentManager
@@ -963,6 +994,171 @@ static void RH3LogCommandSpawnStage(const char *stage, pid_t pid, int result, vo
         return 0;
     }];
     return [self rh3ActionStage:@"SSH repair (no server started)" result:result];
+}
+
+// User-triggered, read-only diagnosis of the *live* launchd socket job.
+// Only use the already-installed Procursus launchctl from the active hidden
+// root. No shell, service-control operations or TCP connection.
+// The child may generate a verbose report: drain continuously, bound capture,
+// discard untrusted text and log only whitelisted scalar fields.
+- (int)diagnoseRootHideOpenSSHSocket
+{
+    if (![DOBootstrapper rootHidePortEnabled]) return ENOTSUP;
+    [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:@"SSH socket diagnosis: read-only launchctl print requested"];
+    __block NSString *root = nil;
+    __block int onDiskWait = -1;
+    __block NSUInteger socketCount = 0;
+    __block BOOL listeners = NO;
+    int preflight = [self rh3PerformPrivilegedAction:^int {
+        NSError *error = nil;
+        root = [DOBootstrapper rootHideExistingRootWithError:&error];
+        const char *serverRoot = jbclient_get_jbroot();
+        if (error || !root || !serverRoot ||
+            ![RH3CanonicalAppPath(root) isEqualToString:
+              RH3CanonicalAppPath([NSString stringWithUTF8String:serverRoot])]) return EPERM;
+        NSString *directory = [root stringByAppendingPathComponent:@"Library/LaunchDaemons"];
+        NSArray *names = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:directory error:&error];
+        if (!names || error) return EIO;
+        NSUInteger matches = 0;
+        for (NSString *name in names) {
+            if (![name.pathExtension.lowercaseString isEqualToString:@"plist"] ||
+                [name.lowercaseString containsString:@"shsh"]) continue;
+            NSString *candidate = [directory stringByAppendingPathComponent:name];
+            struct stat file = {0};
+            if (lstat(candidate.fileSystemRepresentation, &file) ||
+                !S_ISREG(file.st_mode) || file.st_uid != 0 ||
+                file.st_size < 32 || file.st_size > 65536) continue;
+            NSDictionary *plist = [NSDictionary dictionaryWithContentsOfFile:candidate];
+            if (![plist[@"Label"] isEqual:@"com.openssh.sshd"]) continue;
+            matches++;
+            if (matches > 1) return EEXIST;
+            NSDictionary *sockets = [plist[@"Sockets"] isKindOfClass:NSDictionary.class] ? plist[@"Sockets"] : nil;
+            socketCount = sockets.count;
+            listeners = sockets[@"Listeners"] != nil;
+            NSDictionary *inetd = [plist[@"inetdCompatibility"] isKindOfClass:NSDictionary.class] ? plist[@"inetdCompatibility"] : nil;
+            if ([inetd[@"Wait"] isKindOfClass:NSNumber.class]) onDiskWait = [inetd[@"Wait"] boolValue] ? 1 : 0;
+        }
+        if (matches != 1) return ENOENT;
+        return 0;
+    }];
+    [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
+        [NSString stringWithFormat:@"SSH socket plist: result=%d sockets=%lu listeners=%d inetd_wait=%d (minus one=unknown)",
+         preflight, (unsigned long)socketCount, listeners, onDiskWait]];
+    if (preflight) return [self rh3ActionStage:@"SSH socket plist diagnosis" result:preflight];
+
+    NSString *binary = [root stringByAppendingPathComponent:@"usr/bin/launchctl"];
+    int channel[2] = {-1, -1};
+    if (pipe(channel) != 0) return [self rh3ActionStage:@"SSH socket diagnostic pipe" result:errno];
+    posix_spawn_file_actions_t actions;
+    int result = posix_spawn_file_actions_init(&actions);
+    BOOL actionsReady = result == 0;
+    if (!result) result = posix_spawn_file_actions_addopen(&actions, STDIN_FILENO, "/dev/null", O_RDONLY, 0);
+    if (!result) result = posix_spawn_file_actions_adddup2(&actions, channel[1], STDOUT_FILENO);
+    if (!result) result = posix_spawn_file_actions_adddup2(&actions, channel[1], STDERR_FILENO);
+    if (!result) result = posix_spawn_file_actions_addclose(&actions, channel[0]);
+    if (!result) result = posix_spawn_file_actions_addclose(&actions, channel[1]);
+
+    __block pid_t pid = -1;
+    if (!result) result = [self rh3PerformPrivilegedAction:^int {
+        // Do not fall back to a PATH lookup or a stock-rootfs executable.
+        struct stat executable = {0};
+        if (lstat(binary.fileSystemRepresentation, &executable) ||
+            !S_ISREG(executable.st_mode) || executable.st_uid != 0 ||
+            !(executable.st_mode & S_IXUSR)) return ENOENT;
+        // Never trustcache or patch a process for a passive diagnostic.
+        // If the installed launchctl cannot execute directly, report its
+        // spawn failure instead of changing jailbreak process state.
+        char *const argv[] = {(char *)binary.fileSystemRepresentation,
+                              "print", "system/com.openssh.sshd", NULL};
+        char *const cleanEnv[] = {NULL}; // No injected libraries or private environment.
+        return posix_spawn(&pid, argv[0], &actions, NULL, argv, cleanEnv);
+    }];
+    if (actionsReady) posix_spawn_file_actions_destroy(&actions);
+    close(channel[1]);
+    if (result || pid <= 1) {
+        close(channel[0]);
+        return [self rh3ActionStage:@"SSH socket launchctl spawn" result:result ?: ECHILD];
+    }
+
+    int flags = fcntl(channel[0], F_GETFL);
+    if (flags < 0 || fcntl(channel[0], F_SETFL, flags | O_NONBLOCK) < 0) {
+        int saved = errno;
+        // Only terminate our own diagnostic child, never a launchd service.
+        kill(pid, SIGKILL);
+        (void)RH3WaitForBootstrapChildStatus(pid, 2, NULL);
+        close(channel[0]);
+        return [self rh3ActionStage:@"SSH socket nonblocking capture" result:saved];
+    }
+    NSMutableData *capture = [NSMutableData dataWithCapacity:4096];
+    const NSUInteger maximum = 16384;
+    BOOL capped = NO, eof = NO, reaped = NO, timedOut = NO, outputLimit = NO;
+    NSUInteger drainedBytes = 0;
+    int childStatus = -1, readError = 0;
+    struct timespec start = {0}, now = {0};
+    if (clock_gettime(CLOCK_MONOTONIC, &start) != 0) {
+        readError = errno;
+        timedOut = YES;
+    }
+    while (!timedOut && !outputLimit && !(eof && reaped)) {
+        char buffer[2048];
+        for (;;) {
+            ssize_t amount = read(channel[0], buffer, sizeof(buffer));
+            if (amount > 0) {
+                drainedBytes += (NSUInteger)amount;
+                if (drainedBytes > 128 * 1024) { outputLimit = YES; capped = YES; break; }
+                NSUInteger available = maximum - capture.length;
+                NSUInteger keep = MIN((NSUInteger)amount, available);
+                if (keep) [capture appendBytes:buffer length:keep];
+                if (keep < (NSUInteger)amount) capped = YES;
+            } else if (amount == 0) {
+                eof = YES;
+                break;
+            } else if (errno == EINTR) continue;
+            else if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+            else { readError = errno; eof = YES; break; }
+        }
+        if (!reaped) {
+            pid_t waited = waitpid(pid, &childStatus, WNOHANG);
+            if (waited == pid) reaped = YES;
+            else if (waited < 0 && errno != EINTR) { readError = errno; reaped = YES; }
+        }
+        if (clock_gettime(CLOCK_MONOTONIC, &now) != 0 ||
+            now.tv_sec - start.tv_sec >= 10) timedOut = YES;
+        if (!eof || !reaped) usleep(40000);
+    }
+    if (!reaped) {
+        // Time-bounded diagnostic only; never signal launchd or sshd.
+        kill(pid, SIGKILL);
+        (void)RH3WaitForBootstrapChildStatus(pid, 2, &childStatus);
+    }
+    close(channel[0]);
+    int exitCode = reaped && WIFEXITED(childStatus) ? WEXITSTATUS(childStatus) : -1;
+    NSString *output = [[NSString alloc] initWithData:capture encoding:NSUTF8StringEncoding] ?: @"";
+    NSString *state = RH3SSHPrintScalar(output, @"state", NO);
+    NSString *runs = RH3SSHPrintScalar(output, @"runs", YES);
+    NSString *lastExit = RH3SSHPrintScalar(output, @"last exit code", YES);
+    NSString *lastSignal = RH3SSHPrintScalar(output, @"last terminating signal", YES);
+    NSString *servicePID = RH3SSHPrintScalar(output, @"pid", YES);
+    BOOL programSeen = NO, programMatchesRoot = NO;
+    NSString *programPrefix = @"program = ";
+    for (NSString *line in [output componentsSeparatedByCharactersInSet:NSCharacterSet.newlineCharacterSet]) {
+        NSString *trimmed = [line stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
+        if ([trimmed hasPrefix:programPrefix]) {
+            programSeen = YES;
+            programMatchesRoot = [[trimmed substringFromIndex:programPrefix.length]
+                isEqualToString:[root stringByAppendingPathComponent:@"usr/sbin/sshd"]];
+            break;
+        }
+    }
+    [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
+        [NSString stringWithFormat:@"SSH socket launchctl: spawn=0 exit=%d timed_out=%d read_errno=%d bytes=%lu truncated=%d output_limit=%d state=%@ runs=%@ last_exit=%@ last_signal=%@ pid_present=%d program_seen=%d program_rooted=%d sockets_mentioned=%d (read-only)",
+         exitCode, timedOut, readError, (unsigned long)capture.length, capped,
+         outputLimit, state, runs, lastExit, lastSignal,
+         ![servicePID isEqualToString:@"unknown"], programSeen, programMatchesRoot,
+         [output containsString:@"sockets ="] || [output containsString:@"Sockets ="]]];
+    // Preserve command failure separately from the *service's* last exit.
+    int code = timedOut ? ETIMEDOUT : outputLimit ? EOVERFLOW : readError ? readError : exitCode < 0 ? ECHILD : exitCode;
+    return [self rh3ActionStage:@"SSH socket live launchctl print" result:code];
 }
 
 // Never treat presence of TweakLoader as proof of injection. A throwaway
