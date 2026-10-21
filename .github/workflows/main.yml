@@ -25,9 +25,10 @@ on:
         required: true
         default: false
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+# Different runs may compile simultaneously. The former branch-wide
+# concurrency group cancelled an unfinished manual CI run whenever a new push
+# arrived. Each upload is scoped to its unique run number/attempt. Cache keys
+# below are immutable, and cache publication is best-effort, not a build gate.
 
 jobs:
   ui-preview:
@@ -127,7 +128,9 @@ jobs:
       # Object-only compilation cache. Keep this separate from the immutable
       # SDK/bootstrap download caches: an entry is a compiler result, never a
       # signed executable, BaseBin trustcache, packaged tweak or IPA.
-      # Read/write only on the port branch (never on untrusted PR code).
+      # Read/write only on trusted pushes/dispatches, including diagnostic
+      # roothide-* branches. Feature-branch caches are scoped by GitHub and do
+      # not poison or overwrite the default-branch cache.
       - name: Identify incremental compiler cache
         if: steps.roothide_port.outputs.is_port == 'true'
         id: ccache_identity
@@ -136,21 +139,23 @@ jobs:
           set -euo pipefail
           xcode_id="$(xcodebuild -version | shasum -a 256 | cut -c 1-16)"
           echo "xcode_id=$xcode_id" >> "$GITHUB_OUTPUT"
+          echo "cache_day=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
 
       - name: Restore RootHide object cache
-        if: steps.roothide_port.outputs.is_port == 'true' && github.event_name != 'pull_request' && github.ref == 'refs/heads/roothide-dopamine3-integration'
+        if: steps.roothide_port.outputs.is_port == 'true' && github.event_name != 'pull_request' && startsWith(github.ref, 'refs/heads/roothide-')
         id: rh3_object_cache
         uses: actions/cache/restore@v4
         with:
           path: ~/.cache/ccache-roothide3
-          # Each run writes an immutable entry; later runs restore the latest
-          # compatible one via the Xcode- and build-mode-scoped prefix.
-          key: rh3-objects-macos15-xcode-${{ steps.ccache_identity.outputs.xcode_id }}-${{ env.ROOTHIDE_HARDWARE_TEST }}-v1-${{ github.run_id }}-${{ github.run_attempt }}
+          # One immutable cache per UTC day and branch (max 512 MiB) avoids
+          # exhausting GitHub cache quota with one entry per every run.
+          key: rh3-objects-macos15-xcode-${{ steps.ccache_identity.outputs.xcode_id }}-${{ env.ROOTHIDE_HARDWARE_TEST }}-v2-${{ steps.ccache_identity.outputs.cache_day }}
           restore-keys: |
-            rh3-objects-macos15-xcode-${{ steps.ccache_identity.outputs.xcode_id }}-${{ env.ROOTHIDE_HARDWARE_TEST }}-v1-
+            rh3-objects-macos15-xcode-${{ steps.ccache_identity.outputs.xcode_id }}-${{ env.ROOTHIDE_HARDWARE_TEST }}-v2-
 
       - name: Configure incremental C and Objective-C cache
         if: steps.roothide_port.outputs.is_port == 'true'
+        id: ccache_setup
         shell: bash
         run: |
           set -euo pipefail
@@ -182,6 +187,19 @@ jobs:
           path: .ci-cache/theos/iPhoneOS16.5.sdk.tar.xz
           key: rh3-macos15-theos-sdk-16.5-5e0fd3f01266cce4-v1
 
+      # Save the pinned git checkout separately from the SDK archive. A hit
+      # is always reset to the exact commit/submodule tree before building;
+      # never execute cached untracked files or reuse a mutable Theos HEAD.
+      - name: Restore pinned RootHide Theos source checkout
+        if: steps.roothide_port.outputs.is_port == 'true' && github.event_name != 'pull_request' && startsWith(github.ref, 'refs/heads/roothide-')
+        id: rh3_theos_source_cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            theos
+            !theos/sdks
+          key: rh3-macos15-roothide-theos-cfba89a53a05b4a1b822121158acc3669c20602f-v1
+
       - name: Install THEOS
         env:
           RH3_PORT: ${{ steps.roothide_port.outputs.is_port }}
@@ -199,10 +217,31 @@ jobs:
             THEOS_REPO=roothide/theos
             THEOS_REV=cfba89a53a05b4a1b822121158acc3669c20602f
           fi
-          git clone --recursive "https://github.com/${THEOS_REPO}.git" "$THEOS"
+          # The source cache is a performance hint, not an authority. Verify
+          # origin and commit, and discard any incompatible/corrupt checkout.
+          if [[ -d "$THEOS/.git" ]]; then
+            cached_origin="$(git -C "$THEOS" remote get-url origin 2>/dev/null || true)"
+            cached_sha="$(git -C "$THEOS" rev-parse HEAD 2>/dev/null || true)"
+            if [[ "$cached_origin" != "https://github.com/${THEOS_REPO}.git" ||
+                  "$cached_sha" != "$THEOS_REV" ]]; then
+              rm -rf "$THEOS"
+            fi
+          fi
+          if [[ ! -d "$THEOS/.git" ]]; then
+            rm -rf "$THEOS"
+            git clone --recursive "https://github.com/${THEOS_REPO}.git" "$THEOS"
+          fi
           git -C "$THEOS" checkout --detach "$THEOS_REV"
-          git -C "$THEOS" submodule update --init --recursive
+          git -C "$THEOS" reset --hard "$THEOS_REV"
+          git -C "$THEOS" clean -ffdx
+          git -C "$THEOS" submodule sync --recursive
+          git -C "$THEOS" submodule update --init --recursive --force
+          git -C "$THEOS" submodule foreach --recursive 'git reset --hard && git clean -ffdx'
           test "$(git -C "$THEOS" rev-parse HEAD)" = "$THEOS_REV"
+          if git -C "$THEOS" submodule status --recursive | grep -Eq '^[-+U]'; then
+            echo 'Theos submodule did not match its pinned superproject' >&2
+            exit 1
+          fi
           mkdir -p "$THEOS/sdks"
           SDK_ARCHIVE="$BASEDIR/.ci-cache/theos/iPhoneOS16.5.sdk.tar.xz"
           SDK_SHA256=5e0fd3f01266cce4ce012d4a99b38eb56578fca40d09edc81cd83dee958202fb
@@ -224,10 +263,21 @@ jobs:
           test -n "$(find "$THEOS/sdks" -type d -name '*.sdk' -print -quit)"
           cd $BASEDIR
 
+      - name: Save pinned RootHide Theos source checkout
+        if: steps.roothide_port.outputs.is_port == 'true' && steps.rh3_theos_source_cache.outcome == 'success' && steps.rh3_theos_source_cache.outputs.cache-hit != 'true' && github.event_name != 'pull_request' && startsWith(github.ref, 'refs/heads/roothide-')
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            theos
+            !theos/sdks
+          key: rh3-macos15-roothide-theos-cfba89a53a05b4a1b822121158acc3669c20602f-v1
+
       # Later strict readiness deliberately fails when only 7/9 gates pass.
       # Save before that gate instead of relying on actions/cache post-job save.
       - name: Save verified Theos SDK download
-        if: steps.theos_sdk_cache.outputs.cache-hit != 'true' && github.event_name != 'pull_request' && github.ref == 'refs/heads/roothide-dopamine3-integration'
+        if: steps.theos_sdk_cache.outputs.cache-hit != 'true' && github.event_name != 'pull_request' && startsWith(github.ref, 'refs/heads/roothide-')
+        continue-on-error: true # A cache quota/race must not fail a verified SDK build.
         uses: actions/cache/save@v4
         with:
           path: .ci-cache/theos/iPhoneOS16.5.sdk.tar.xz
@@ -275,7 +325,8 @@ jobs:
             bash ./download_bootstraps.sh
 
       - name: Save verified Procursus bootstrap downloads
-        if: steps.bootstrap_cache.outputs.cache-hit != 'true' && github.event_name != 'pull_request' && github.ref == 'refs/heads/roothide-dopamine3-integration'
+        if: steps.bootstrap_cache.outputs.cache-hit != 'true' && github.event_name != 'pull_request' && startsWith(github.ref, 'refs/heads/roothide-')
+        continue-on-error: true
         uses: actions/cache/save@v4
         with:
           path: |
@@ -319,6 +370,59 @@ jobs:
             gmake -j$(sysctl -n hw.logicalcpu) NIGHTLY=1
           fi
 
+      # These three Debian packages are already produced by Packages/Makefile
+      # and consumed by the IPA/Standalone builds. They are NOT a RootHide3
+      # installer, nor a safe way to update launchdhook or a running PID 1.
+      # Verify each actual output before making it downloadable for analysis.
+      - name: Verify compiled internal dependency DEBs
+        if: steps.roothide_port.outputs.is_port == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p rh3-package-audit
+          : > rh3-package-audit/SHA256SUMS
+          for entry in \
+            'Packages/libkrw-provider/libkrw-dopamine.deb:libkrw0-dopamine' \
+            'Packages/libroot/libroot.deb:libroot-dopamine' \
+            'Packages/basebin-link/basebin-link.deb:dopamine-basebin-link'; do
+            deb="${entry%%:*}"
+            expected="${entry#*:}"
+            test -s "$deb" || { echo "Missing or empty compiled package: $deb" >&2; exit 1; }
+            test ! -L "$deb" || { echo "Refusing symlink package: $deb" >&2; exit 1; }
+            actual="$(dpkg-deb --field "$deb" Package)"
+            arch="$(dpkg-deb --field "$deb" Architecture)"
+            [[ "$actual" == "$expected" && "$arch" == iphoneos-arm64 ]] || {
+              echo "Unexpected package identity: $deb ($actual / $arch)" >&2; exit 1;
+            }
+            dpkg-deb --info "$deb" > "rh3-package-audit/${expected}.control.txt"
+            dpkg-deb --contents "$deb" > "rh3-package-audit/${expected}.contents.txt"
+            shasum -a 256 "$deb" >> rh3-package-audit/SHA256SUMS
+          done
+          printf '%s\n' \
+            'Internal Dopamine dependency DEBs for build inspection only.' \
+            'NOT a NewTerm fix, RootHide3 jailbreak installer, or PID 1 hook update.' \
+            'Original packages contain /var/jb references, which may be incompatible with the hidden RootHide bootstrap.' \
+            'Do not install on a working jailbroken device. Use the verified source commit to reproduce.' \
+            "Source revision: ${GITHUB_SHA}" > rh3-package-audit/DO_NOT_INSTALL.txt
+          {
+            echo '### Internal dependency DEBs (NOT FOR INSTALL)'
+            echo 'Three individual .deb packages are included in the inspection-only artifact.'
+            cat rh3-package-audit/SHA256SUMS
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload verified internal dependency DEBs
+        if: steps.roothide_port.outputs.is_port == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: RootHide3-INTERNAL-DEBS-NOT-FOR-INSTALL-r${{ github.run_number }}-a${{ github.run_attempt }}
+          if-no-files-found: error
+          retention-days: 7
+          path: |
+            ${{ github.workspace }}/Packages/libkrw-provider/libkrw-dopamine.deb
+            ${{ github.workspace }}/Packages/libroot/libroot.deb
+            ${{ github.workspace }}/Packages/basebin-link/basebin-link.deb
+            ${{ github.workspace }}/rh3-package-audit/
+
       - name: Report incremental compilation cache statistics
         if: always() && steps.roothide_port.outputs.is_port == 'true'
         shell: bash
@@ -333,14 +437,16 @@ jobs:
             } >> "$GITHUB_STEP_SUMMARY"
           fi
 
-      # This must happen BEFORE the deliberately failing strict-readiness
-      # gate. Upload no binaries; save only ccache's compiler objects.
+      # Save even after a C/Objective-C compile failure so the next CI retry
+      # can reuse successfully compiled objects. No IPA/dylibs/ldid output is
+      # ever included. Cache publication itself is non-critical.
       - name: Save RootHide object cache
-        if: success() && steps.roothide_port.outputs.is_port == 'true' && github.event_name != 'pull_request' && github.ref == 'refs/heads/roothide-dopamine3-integration'
+        if: always() && steps.ccache_setup.outcome == 'success' && steps.rh3_object_cache.outcome == 'success' && steps.rh3_object_cache.outputs.cache-hit != 'true' && github.event_name != 'pull_request' && startsWith(github.ref, 'refs/heads/roothide-')
+        continue-on-error: true
         uses: actions/cache/save@v4
         with:
           path: ~/.cache/ccache-roothide3
-          key: rh3-objects-macos15-xcode-${{ steps.ccache_identity.outputs.xcode_id }}-${{ env.ROOTHIDE_HARDWARE_TEST }}-v1-${{ github.run_id }}-${{ github.run_attempt }}
+          key: rh3-objects-macos15-xcode-${{ steps.ccache_identity.outputs.xcode_id }}-${{ env.ROOTHIDE_HARDWARE_TEST }}-v2-${{ steps.ccache_identity.outputs.cache_day }}
 
       - name: Check RootHide binary architecture slices
         if: steps.roothide_port.outputs.is_port == 'true'

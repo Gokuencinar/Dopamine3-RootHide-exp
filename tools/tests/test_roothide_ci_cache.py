@@ -1,4 +1,4 @@
-"""Regression checks for untrusted GitHub Actions download caches."""
+"""Regression checks for GitHub Actions download, source, and object caches."""
 import hashlib
 import os
 from pathlib import Path
@@ -15,13 +15,17 @@ BOOTSTRAPS = ROOT / 'Application/Dopamine/Resources/download_bootstraps.sh'
 
 
 class RootHideCICache(unittest.TestCase):
-    def test_restores_downloads_only_and_saves_before_strict_failure(self):
+    def test_restores_pinned_dependencies_and_saves_before_strict_failure(self):
         workflow = WORKFLOW.read_text(encoding='utf-8')
-        self.assertEqual(workflow.count('uses: actions/cache/restore@v4'), 3)
-        self.assertEqual(workflow.count('uses: actions/cache/save@v4'), 3)
+        self.assertEqual(workflow.count('uses: actions/cache/restore@v4'), 4)
+        self.assertEqual(workflow.count('uses: actions/cache/save@v4'), 4)
         self.assertLess(workflow.index('Restore pinned Theos SDK download'),
                         workflow.index('- name: Install THEOS'))
         self.assertLess(workflow.index('Save verified Theos SDK download'),
+                        workflow.index('- name: Build and Install trustcache'))
+        self.assertLess(workflow.index('Restore pinned RootHide Theos source checkout'),
+                        workflow.index('- name: Install THEOS'))
+        self.assertLess(workflow.index('Save pinned RootHide Theos source checkout'),
                         workflow.index('- name: Build and Install trustcache'))
         self.assertLess(workflow.index('Restore verified Procursus bootstrap downloads'),
                         workflow.index('- name: Download Bootstraps'))
@@ -32,20 +36,36 @@ class RootHideCICache(unittest.TestCase):
         self.assertLess(workflow.index('Save RootHide object cache'),
                         workflow.index('- name: Check RootHide port prerequisites before upload'))
         for label in ('Save verified Theos SDK download',
-                      'Save verified Procursus bootstrap downloads'):
+                      'Save verified Procursus bootstrap downloads',
+                      'Save pinned RootHide Theos source checkout'):
             block = workflow.split(f'- name: {label}\n', 1)[1].split('\n      - name:', 1)[0]
             self.assertIn("github.event_name != 'pull_request'", block)
-            self.assertIn("github.ref == 'refs/heads/roothide-dopamine3-integration'", block)
+            self.assertIn("startsWith(github.ref, 'refs/heads/roothide-')", block)
             self.assertIn("cache-hit != 'true'", block)
         keys = re.findall(r'^\s+key: (rh3-macos15-[^\s]+)', workflow, flags=re.M)
-        self.assertEqual(len(keys), 4)
-        self.assertEqual(keys[0], keys[1])
-        self.assertEqual(keys[2], keys[3])
+        self.assertEqual(len(keys), 6)
+        self.assertEqual(keys[0], keys[3])
+        self.assertEqual(keys[1], keys[2])
+        self.assertEqual(keys[4], keys[5])
         for unsafe in ('Application/build/', 'BaseBin/.build/', 'basebin.tar',
                        'basebin.tc', 'Dopamine.ipa', 'DerivedData', 'trustcache'):
             for section in re.findall(r'uses: actions/cache/(?:restore|save)@v4\n\s+with:\n(.*?)(?=\n\s+- name:|\Z)',
                                       workflow, flags=re.S):
                 self.assertNotIn(unsafe, section)
+
+    def test_roothide_theos_source_cache_is_cleaned_and_pinned(self):
+        workflow = WORKFLOW.read_text(encoding='utf-8')
+        cache = workflow.split('- name: Restore pinned RootHide Theos source checkout\n', 1)[1].split('\n      - name:', 1)[0]
+        self.assertIn("github.event_name != 'pull_request'", cache)
+        self.assertIn("startsWith(github.ref, 'refs/heads/roothide-')", cache)
+        self.assertIn('!theos/sdks', cache)
+        self.assertIn('cfba89a53a05b4a1b822121158acc3669c20602f', cache)
+        install = workflow.split('- name: Install THEOS\n', 1)[1].split('\n      - name:', 1)[0]
+        for guard in ('cached_origin', 'cached_sha', 'checkout --detach "$THEOS_REV"',
+                      'reset --hard "$THEOS_REV"', 'clean -ffdx',
+                      'submodule update --init --recursive --force',
+                      "grep -Eq '^[-+U]'"):
+            self.assertIn(guard, install)
 
     def test_checksum_pins_are_unchanged_and_checked_on_hits(self):
         workflow = WORKFLOW.read_text(encoding='utf-8')
@@ -79,7 +99,7 @@ class RootHideCICache(unittest.TestCase):
         self.assertIn('uses: actions/cache/save@v4', save)
         for block in (restore, save):
             self.assertIn('github.event_name != \'pull_request\'', block)
-            self.assertIn("github.ref == 'refs/heads/roothide-dopamine3-integration'", block)
+            self.assertIn("startsWith(github.ref, 'refs/heads/roothide-')", block)
             self.assertIn('path: ~/.cache/ccache-roothide3', block)
             self.assertNotIn('BaseBin/.build', block)
             self.assertNotIn('DerivedData', block)
@@ -89,7 +109,9 @@ class RootHideCICache(unittest.TestCase):
                          re.search(r'key: (rh3-objects-[^\n]+)', save).group(1))
         self.assertIn('steps.ccache_identity.outputs.xcode_id', restore)
         self.assertIn('env.ROOTHIDE_HARDWARE_TEST', restore)
-        self.assertIn('github.run_id', save)
+        self.assertIn('steps.ccache_identity.outputs.cache_day', save)
+        self.assertIn("steps.rh3_object_cache.outputs.cache-hit != 'true'", save)
+        self.assertIn('continue-on-error: true', save)
         self.assertIn('CCACHE_MAXSIZE=512M', configure)
         self.assertIn('CMAKE_C_COMPILER_LAUNCHER=', configure)
         self.assertIn('CMAKE_CXX_COMPILER_LAUNCHER=', configure)

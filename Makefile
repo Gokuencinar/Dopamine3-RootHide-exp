@@ -10,10 +10,22 @@ ifeq ($(BUILD_STANDALONE), 1)
 export BUILD_STANDALONE = 1
 endif
 
-all:
+# The IPA bundles BaseBin and the three generated dependency packages.
+# Keep those producer/consumer edges explicit, but build the independent
+# Application and Standalone artifacts concurrently with GNU Make's jobserver.
+# A recipe with four sequential $(MAKE) calls would ignore the outer -j.
+all: application standalone
+
+basebin:
 	@$(MAKE) -C BaseBin
+
+packages: basebin
 	@$(MAKE) -C Packages
+
+application: packages
 	@$(MAKE) -C Application
+
+standalone: packages
 	@$(MAKE) -C Standalone
 
 clean:
@@ -32,4 +44,4 @@ update-basebin: all
 	scp -C ./BaseBin/basebin.tar "$(DEVICE):/var/mobile/Documents/basebin.tar"
 	ssh $(DEVICE) "/var/jb/basebin/jbctl update basebin /var/mobile/Documents/basebin.tar"
 
-.PHONY: update clean
+.PHONY: all basebin packages application standalone update clean
