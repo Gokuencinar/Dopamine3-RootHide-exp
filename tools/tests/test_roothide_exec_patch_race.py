@@ -43,6 +43,19 @@ class RootHideExecPatchRaceTests(unittest.TestCase):
         self.assertLess(hook.index("wait_for_exit(pid)"),
                         hook.index("__sync_lock_release(&rh3AutoUICacheInFlight)"))
 
+    def test_refresh_skips_verifiably_registered_active_root_apps(self):
+        src = (ROOT / "Application/Dopamine/Jailbreak/DOEnvironmentManager.m").read_text()
+        refresh = src.split("- (int)refreshJailbreakApps", 1)[1].split(
+            "- (int)diagnoseRootHideRuntime", 1
+        )[0]
+        self.assertIn("LSApplicationProxy applicationProxyForIdentifier:bundleID", refresh)
+        self.assertIn("registered.installed", refresh)
+        self.assertIn("RH3CanonicalAppPath(registered.bundleURL.path)", refresh)
+        self.assertIn("isEqualToString:RH3CanonicalAppPath(path)", refresh)
+        self.assertLess(refresh.index("registration already points to active root"),
+                        refresh.index('arguments:@[@"-p", path]'))
+        self.assertIn("registration summary already_present=", refresh)
+
 
 if __name__ == "__main__":
     unittest.main()

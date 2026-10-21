@@ -31,6 +31,7 @@
 #import "DOPreferenceManager.h"
 #import "RootHideAppRegistration.h"
 #import "RootHideScriptWait.h"
+#import <CoreServices/LSApplicationProxy.h>
 #import <libjailbreak/roothider.h>
 #import "NSData+Hex.h"
 #import <LocalAuthentication/LocalAuthentication.h>
@@ -684,13 +685,32 @@ static void RH3LogCommandSpawnStage(const char *stage, pid_t pid, int result, vo
             return apps ? 0 : EIO;
         }];
         // Refresh only the jailbreak's own bundles, not every system app.
+        NSUInteger alreadyRegistered = 0, refreshed = 0;
         for (NSString *app in apps) {
             if (result) break;
             if (![app.pathExtension isEqualToString:@"app"] || ![app.lastPathComponent isEqualToString:app]) continue;
             NSString *path = [JBROOT_PATH(@"/Applications") stringByAppendingPathComponent:app];
+            NSDictionary *bundleInfo = [NSDictionary dictionaryWithContentsOfFile:
+                [path stringByAppendingPathComponent:@"Info.plist"]];
+            NSString *bundleID = [bundleInfo[@"CFBundleIdentifier"] isKindOfClass:NSString.class]
+                ? bundleInfo[@"CFBundleIdentifier"] : nil;
+            if (bundleID.length) {
+                LSApplicationProxy *registered = [LSApplicationProxy applicationProxyForIdentifier:bundleID];
+                if (registered.installed &&
+                    [RH3CanonicalAppPath(registered.bundleURL.path) isEqualToString:RH3CanonicalAppPath(path)]) {
+                    alreadyRegistered++;
+                    [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
+                        [NSString stringWithFormat:@"apps: %@ registration already points to active root; skipping uicache", app]];
+                    continue;
+                }
+            }
             [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:[NSString stringWithFormat:@"apps: registration starting for %@", app]];
             result = [self rh3RunCommand:JBROOT_PATH(@"/usr/bin/uicache") arguments:@[@"-p", path] input:nil timeout:30];
+            if (!result) refreshed++;
         }
+        [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
+            [NSString stringWithFormat:@"apps: registration summary already_present=%lu refreshed=%lu result=%d",
+             (unsigned long)alreadyRegistered, (unsigned long)refreshed, result]];
         return [self rh3ActionStage:@"refresh apps" result:result];
     }
     [self runAsRoot:^{
