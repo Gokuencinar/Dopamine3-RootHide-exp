@@ -1386,6 +1386,12 @@ static void RH3SSHCountSocketPorts(id entry, NSUInteger *port22, NSUInteger *por
     // 2=present but unexpected metadata, -1=unreadable. No paths are logged.
     __block int directoryTrusted = -1, originalGroupTrusted = -1;
     __block int originalModeTrusted = -1, originalLinksTrusted = -1, backupState = -1;
+    // CS_INSTALLER may be present during the initial exploit but absent from
+    // the app after its next launch. UID 0 and an unsandboxed label do not
+    // establish installer rights in the protected AppBundle container.
+    // All probes below are read-only; -1 means no trustworthy observation.
+    __block int installerPresent = -1, platformPresent = -1, csopsResult = -1;
+    __block int directoryOwnerWritable = -1, directoryImmutable = -1, mountWritable = -1;
     int preflight = [self rh3PerformPrivilegedAction:^int {
         NSError *error = nil;
         root = [DOBootstrapper rootHideExistingRootWithError:&error];
@@ -1393,13 +1399,26 @@ static void RH3SSHCountSocketPorts(id entry, NSUInteger *port22, NSUInteger *por
         if (error || !root || !serverRoot ||
             ![RH3CanonicalAppPath(root) isEqualToString:
               RH3CanonicalAppPath([NSString stringWithUTF8String:serverRoot])]) return EPERM;
+        uint32_t processFlags = 0;
+        csopsResult = csops(getpid(), CS_OPS_STATUS, &processFlags, sizeof(processFlags));
+        if (csopsResult == 0) {
+            installerPresent = !!(processFlags & CS_INSTALLER);
+            platformPresent = !!(processFlags & CS_PLATFORM_BINARY);
+        }
         NSString *directory = [root stringByAppendingPathComponent:@"Library/LaunchDaemons"];
         NSArray *names = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:directory error:&error];
         if (!names || error) return EIO;
         struct stat folder = {0}, backupInfo = {0};
-        if (lstat(directory.fileSystemRepresentation, &folder) == 0)
+        if (lstat(directory.fileSystemRepresentation, &folder) == 0) {
             directoryTrusted = S_ISDIR(folder.st_mode) && folder.st_uid == 0 &&
                                (folder.st_mode & 022) == 0;
+            directoryOwnerWritable = !!(folder.st_mode & S_IWUSR);
+            directoryImmutable = !!(folder.st_flags &
+                (UF_IMMUTABLE | SF_IMMUTABLE | UF_APPEND | SF_APPEND));
+        }
+        struct statfs filesystem = {0};
+        if (statfs(directory.fileSystemRepresentation, &filesystem) == 0)
+            mountWritable = !(filesystem.f_flags & MNT_RDONLY);
         NSString *backupPath = [directory stringByAppendingPathComponent:@".com.openssh.sshd.rh3-original"];
         if (lstat(backupPath.fileSystemRepresentation, &backupInfo) == 0)
             backupState = S_ISREG(backupInfo.st_mode) && backupInfo.st_uid == 0 &&
@@ -1443,6 +1462,10 @@ static void RH3SSHCountSocketPorts(id entry, NSUInteger *port22, NSUInteger *por
     [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
         [NSString stringWithFormat:@"SSH socket plist metadata: directory_trusted=%d original_group_trusted=%d original_mode_trusted=%d original_links_trusted=%d backup_state=%d (read-only)",
          directoryTrusted, originalGroupTrusted, originalModeTrusted, originalLinksTrusted, backupState]];
+    [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
+        [NSString stringWithFormat:@"SSH socket creation policy: csops_ok=%d app_installer=%d app_platform=%d directory_owner_write=%d directory_immutable=%d mount_writable=%d (read-only)",
+         csopsResult == 0, installerPresent, platformPresent,
+         directoryOwnerWritable, directoryImmutable, mountWritable]];
     if (preflight) return [self rh3ActionStage:@"SSH socket plist diagnosis" result:preflight];
 
     NSString *binary = [root stringByAppendingPathComponent:@"usr/bin/launchctl"];

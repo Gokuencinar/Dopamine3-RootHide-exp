@@ -241,6 +241,30 @@ a ejecutar el jailbreak, no cambiar permisos de SSH manualmente ni repetir
 la reparación a ciegas. `changed=0` no demuestra que no exista algún
 respaldo parcial de un intento previo; `backup_state` ayudará a comprobarlo.
 
+### r167: `create_backup` denegado — comprobación r168 de acceso instalador
+
+En el log del 22/10/2026 a las 18:34:45 UTC la comprobación
+`atomic rebase result=1 changed=0 stage=create_backup` identifica el
+`openat(O_CREAT|O_EXCL|O_NOFOLLOW)` del respaldo en la carpeta de daemons.
+El análisis anterior del mismo dispositivo mostró directorio y plist
+correctamente poseídos, sin enlaces extraños y sin respaldo previo. No falló
+`fchown`, `fchmod` o `renameat`: esas operaciones nunca se alcanzaron.
+La raíz primaria está situada dentro de `/var/containers/Bundle/Application`,
+que tiene restricciones adicionales de escritura en iOS; UID 0 y quitar
+Seatbelt no garantizan acceso de instalación.
+
+El método de arranque del jailbreak activa `CS_INSTALLER` durante la
+explotación; la llamada privilegiada posterior desde la app no verifica
+ese flag. La revisión r168 añade **solo lectura** a la misma acción de
+diagnóstico: `SSH socket creation policy: csops_ok=... app_installer=...
+app_platform=... directory_owner_write=... directory_immutable=...
+mount_writable=...`. Son campos numéricos, sin rutas, ID de procesos o
+secretos. Si `app_installer=0`, el permiso instalador ausente será la
+hipótesis principal; no se elevará el flag automáticamente. Si vale 1,
+se seguirá investigando el control de acceso del contenedor. No mover
+el respaldo a AppGroup como arreglo aislado: el destino y el rename
+siguen estando protegidos. No repetir la reparación a ciegas.
+
 Guarda el mensaje de error, los logs, el modelo, la versión exacta de iOS y la revisión de la app. No repitas el proceso sin revisar el fallo: puede haber quedado un bootstrap a medias. No se borra automáticamente una instalación de RootHide 2, y reiniciar no garantiza resolver cualquier estado parcial.
 
 ## Compilar esta variante

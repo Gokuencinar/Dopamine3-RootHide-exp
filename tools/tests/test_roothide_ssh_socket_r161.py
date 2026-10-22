@@ -67,6 +67,21 @@ class SSHSocketDiagnosisR161(unittest.TestCase):
         self.assertNotIn('rh3RecordDiagnosticStage:backupPath', body)
         self.assertNotIn('rh3RecordDiagnosticStage:directory', body)
 
+    def test_r168_checks_installer_and_destination_write_policy_read_only(self):
+        body = self.diagnostic
+        self.assertIn('csops(getpid(), CS_OPS_STATUS, &processFlags, sizeof(processFlags))', body)
+        self.assertIn('installerPresent = !!(processFlags & CS_INSTALLER)', body)
+        self.assertIn('platformPresent = !!(processFlags & CS_PLATFORM_BINARY)', body)
+        self.assertIn('directoryOwnerWritable = !!(folder.st_mode & S_IWUSR)', body)
+        self.assertIn('folder.st_flags &', body)
+        self.assertIn('statfs(directory.fileSystemRepresentation, &filesystem)', body)
+        self.assertIn('filesystem.f_flags & MNT_RDONLY', body)
+        self.assertIn('SSH socket creation policy: csops_ok=%d app_installer=%d app_platform=%d', body)
+        self.assertIn('directory_owner_write=%d directory_immutable=%d mount_writable=%d (read-only)', body)
+        for forbidden in ('proc_csflags_set', 'proc_csflags_clear',
+                          'O_WRONLY | O_CREAT', 'chflags(', 'chmod(', 'chown('):
+            self.assertNotIn(forbidden, body)
+
     def test_r162_classifies_without_disclosing_live_paths(self):
         helpers = ENV.split("// launchctl print is a diagnostic format", 1)[1].split(
             "@implementation DOEnvironmentManager", 1
