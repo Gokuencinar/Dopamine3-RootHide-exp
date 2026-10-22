@@ -12,9 +12,12 @@
 #import <sys/mount.h>
 #import <sys/utsname.h>
 #import <sys/stat.h>
+#import <sys/xattr.h>
+#import <sys/acl.h>
 #import <unistd.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <stdio.h>
 #include <signal.h>
 #include <time.h>
 #import <mach-o/dyld.h>
@@ -26,6 +29,7 @@
 #import <libjailbreak/machine_info.h>
 #import <libjailbreak/carboncopy.h>
 #import <libjailbreak/roothider/common.h>
+#import <libjailbreak/jbserver_domains.h>
 
 #import <IOKit/IOKitLib.h>
 #import "DOUIManager.h"
@@ -187,6 +191,39 @@ static NSData *RH3SSHReadBounded(int fd, off_t length)
     return data;
 }
 
+// jbclient_get_jbroot() uses dispatch_once and can retain the OLD brand if
+// called before a RootHide re-randomization. Ask the existing read-only
+// systemwide server action afresh for this specific SSH write transaction.
+// No new XPC capability or process privilege is introduced.
+static NSString *RH3SSHCurrentServerRoot(void)
+{
+    xpc_object_t reply = jbserver_xpc_send(JBS_DOMAIN_SYSTEMWIDE,
+                                           JBS_SYSTEMWIDE_GET_JBROOT, NULL);
+    if (!reply) return nil;
+    if (xpc_get_type(reply) != XPC_TYPE_DICTIONARY) {
+        xpc_release(reply);
+        return nil;
+    }
+    const char *path = xpc_dictionary_get_string(reply, "root-path");
+    NSString *root = path ? [NSString stringWithUTF8String:path] : nil;
+    xpc_release(reply);
+    return root;
+}
+
+// In the initial exploit phase gSystemInfo has already been updated AFTER
+// re-randomization (DOBootstrapper.m), and the parent is platform+installer.
+// Avoid waiting on PID 1's synchronous XPC server during an optional boot
+// preparation. After the jailbreak, query the server fresh instead of using
+// jbclient_get_jbroot()'s stale dispatch_once cache.
+static NSString *RH3SSHRootForPhase(BOOL installerPhase)
+{
+    if (!installerPhase) return RH3SSHCurrentServerRoot();
+    const char *root = gSystemInfo.jailbreakInfo.rootPath;
+    return root ? [NSString stringWithUTF8String:root] : nil;
+}
+
+static void RH3SSHCountSocketPorts(id entry, NSUInteger *port22, NSUInteger *port2222);
+
 static int RH3SSHRebaseInstalledPlist(NSString *plistPath, NSString *sshd,
                                      NSString *config, NSString *key, BOOL *changed,
                                      const char **stageOut)
@@ -197,16 +234,29 @@ static int RH3SSHRebaseInstalledPlist(NSString *plistPath, NSString *sshd,
         return ENOTSUP;
     const char *jobName = "com.openssh.sshd.plist";
     const char *backupName = ".com.openssh.sshd.rh3-original";
-    const char *nextName = ".com.openssh.sshd.rh3-next";
+    // An unexpected interruption must not permanently poison the next run
+    // via a fixed O_EXCL temporary name. Use a unique, non-.plist path for
+    // this transaction; never reclaim another attempt's unknown temp inode.
+    char nextName[80] = {0};
+    int nextLen = snprintf(nextName, sizeof(nextName),
+                           ".com.openssh.sshd.rh3-next-%08x%08x",
+                           arc4random(), arc4random());
+    if (nextLen <= 0 || (size_t)nextLen >= sizeof(nextName)) return EOVERFLOW;
+    char backupTempName[88] = {0};
+    int backupLen = snprintf(backupTempName, sizeof(backupTempName),
+                             ".com.openssh.sshd.rh3-original-next-%08x%08x",
+                             arc4random(), arc4random());
+    if (backupLen <= 0 || (size_t)backupLen >= sizeof(backupTempName)) return EOVERFLOW;
+    const char *rollbackName = ".com.openssh.sshd.rh3-rollback";
     if (stageOut) *stageOut = "open_directory";
     int dir = open(plistPath.stringByDeletingLastPathComponent.fileSystemRepresentation,
                    O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
     if (dir < 0) return errno;
     int result = 0;
     const char *stage = "directory_stat";
-    int original = -1, backup = -1, next = -1;
-    BOOL madeBackup = NO, madeNext = NO, renamedJob = NO;
-    struct stat directory = {0}, before = {0}, current = {0};
+    int original = -1, backup = -1, next = -1, replacementRead = -1;
+    BOOL madeBackupTemp = NO, madeNext = NO, madeRollback = NO, renamedJob = NO;
+    struct stat directory = {0}, before = {0}, current = {0}, replacement = {0};
     NSData *originalData = nil, *nextData = nil;
     do {
         if (fstat(dir, &directory)) { result = errno; break; }
@@ -228,9 +278,90 @@ static int RH3SSHRebaseInstalledPlist(NSString *plistPath, NSString *sshd,
         stage = "original_group";
         if (before.st_gid != 0) { result = EPERM; break; }
         stage = "original_permissions";
-        if (before.st_mode & 022) { result = EPERM; break; }
+        if ((before.st_mode & 022) || (before.st_mode & 07000)) {
+            result = EPERM; break;
+        }
+        // An interrupted prior run may have left our exact-inode rollback
+        // link. Recover ONLY two provable states: same inode before rename,
+        // or an already-verified replacement whose other plist keys equal
+        // the old hardlink. Otherwise keep the journal untouched for manual
+        // recovery, never overwrite a possible dpkg update.
+        stage = "pending_rollback_check";
+        struct stat pendingInfo = {0};
+        if (!fstatat(dir, rollbackName, &pendingInfo, AT_SYMLINK_NOFOLLOW)) {
+            int pending = openat(dir, rollbackName, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+            if (pending < 0) { result = errno; break; }
+            struct stat pendingOpened = {0};
+            BOOL pendingSafe = !fstat(pending, &pendingOpened) &&
+                S_ISREG(pendingOpened.st_mode) && pendingOpened.st_uid == 0 &&
+                pendingOpened.st_gid == 0 && !(pendingOpened.st_mode & 022) &&
+                pendingOpened.st_flags == 0 &&
+                pendingOpened.st_dev == pendingInfo.st_dev &&
+                pendingOpened.st_ino == pendingInfo.st_ino;
+            BOOL sameInode = pendingSafe && before.st_dev == pendingOpened.st_dev &&
+                before.st_ino == pendingOpened.st_ino && before.st_nlink == 2 &&
+                pendingOpened.st_nlink == 2;
+            BOOL committed = NO;
+            if (pendingSafe && !sameInode && before.st_nlink == 1 &&
+                pendingOpened.st_nlink == 1) {
+                NSData *liveBytes = RH3SSHReadBounded(original, before.st_size);
+                NSData *pendingBytes = RH3SSHReadBounded(pending, pendingOpened.st_size);
+                id live = liveBytes ? [NSPropertyListSerialization propertyListWithData:liveBytes
+                               options:NSPropertyListImmutable format:NULL error:NULL] : nil;
+                id previous = pendingBytes ? [NSPropertyListSerialization propertyListWithData:pendingBytes
+                                   options:NSPropertyListImmutable format:NULL error:NULL] : nil;
+                NSString *liveProgram = [live isKindOfClass:NSDictionary.class] &&
+                    [live[@"Program"] isKindOfClass:NSString.class] ? live[@"Program"] : nil;
+                // A committed change can refer to LAST boot's brand. The
+                // new boot rotates before recovery. Recognize only an exact
+                // branded RootHide sshd with matching arguments.
+                NSString *oldRoot = [[[liveProgram stringByDeletingLastPathComponent]
+                    stringByDeletingLastPathComponent] stringByDeletingLastPathComponent];
+                BOOL brandedSSH = oldRoot.length &&
+                    [DOBootstrapper rootHideBrandForPath:oldRoot] &&
+                    [liveProgram isEqual:[oldRoot stringByAppendingPathComponent:@"usr/sbin/sshd"]] &&
+                    [live[@"ProgramArguments"] isEqual:@[liveProgram, @"-i", @"-f",
+                        [oldRoot stringByAppendingPathComponent:@"etc/ssh/sshd_config"], @"-h",
+                        [oldRoot stringByAppendingPathComponent:@"etc/ssh/ssh_host_ed25519_key"]]];
+                if ([live isKindOfClass:NSDictionary.class] &&
+                    [previous isKindOfClass:NSDictionary.class] &&
+                    [live[@"Label"] isEqual:@"com.openssh.sshd"] &&
+                    [previous[@"Label"] isEqual:@"com.openssh.sshd"] &&
+                    brandedSSH) {
+                    NSMutableDictionary *liveOther = [live mutableCopy];
+                    NSMutableDictionary *oldOther = [previous mutableCopy];
+                    [liveOther removeObjectsForKeys:@[@"Program", @"ProgramArguments"]];
+                    [oldOther removeObjectsForKeys:@[@"Program", @"ProgramArguments"]];
+                    committed = [liveOther isEqual:oldOther];
+                }
+            }
+            close(pending);
+            if (!sameInode && !committed) { result = EBUSY; break; }
+            stage = "pending_rollback_cleanup";
+            if (unlinkat(dir, rollbackName, 0) || fsync(dir) ||
+                fstat(original, &before)) { result = errno; break; }
+        } else if (errno != ENOENT) { result = errno; break; }
         stage = "original_links";
         if (before.st_nlink != 1) { result = EPERM; break; }
+        // The replacement is a fresh inode. Do not silently discard ACLs,
+        // extended attributes or BSD flags on a package-managed original.
+        // Refuse these uncommon layouts until metadata-preserving replacement
+        // is explicitly supported and native-tested.
+        stage = "original_flags";
+        if (before.st_flags != 0) { result = ENOTSUP; break; }
+        stage = "original_xattrs";
+        ssize_t xattrBytes = flistxattr(original, NULL, 0, 0);
+        if (xattrBytes != 0) { result = xattrBytes < 0 ? errno : ENOTSUP; break; }
+        stage = "original_acl";
+        errno = 0;
+        // Darwin/APFS uses EXTENDED ACLs. acl_get_fd() queries the legacy
+        // POSIX access ACL and can return EINVAL on a healthy iOS file.
+        acl_t originalACL = acl_get_fd_np(original, ACL_TYPE_EXTENDED);
+        if (originalACL) {
+            acl_free(originalACL);
+            result = ENOTSUP; break;
+        }
+        if (errno != ENOENT) { result = errno ? errno : ENOTSUP; break; }
         stage = "read_original";
         originalData = RH3SSHReadBounded(original, before.st_size);
         if (!originalData) { result = EIO; break; }
@@ -243,7 +374,24 @@ static int RH3SSHRebaseInstalledPlist(NSString *plistPath, NSString *sshd,
         NSDictionary *inetd = [job[@"inetdCompatibility"] isKindOfClass:NSDictionary.class] ?
                               job[@"inetdCompatibility"] : nil;
         stage = "socket_contract";
-        if (![job[@"Label"] isEqual:@"com.openssh.sshd"] || sockets.count != 2 ||
+        NSUInteger port22 = 0, port2222 = 0;
+        // Sockets itself is keyed by SSHListener/SSHListener2; the service
+        // names live inside each value, not at the dictionary top level.
+        // Each listener must have exactly ONE recognized port; an array
+        // smuggling both ports under one listener must not let an unrelated
+        // second socket pass the aggregate counter.
+        BOOL socketEntriesTrusted = sockets.count == 2;
+        for (id socketEntry in sockets.allValues) {
+            NSUInteger entry22 = 0, entry2222 = 0;
+            if (![socketEntry isKindOfClass:NSDictionary.class])
+                socketEntriesTrusted = NO;
+            RH3SSHCountSocketPorts(socketEntry, &entry22, &entry2222);
+            if (entry22 + entry2222 != 1) socketEntriesTrusted = NO;
+            port22 += entry22;
+            port2222 += entry2222;
+        }
+        if (![job[@"Label"] isEqual:@"com.openssh.sshd"] || !socketEntriesTrusted ||
+            port22 != 1 || port2222 != 1 ||
             ![inetd[@"Wait"] isKindOfClass:NSNumber.class] || [inetd[@"Wait"] boolValue]) {
             result = ENOTSUP; break;
         }
@@ -259,10 +407,23 @@ static int RH3SSHRebaseInstalledPlist(NSString *plistPath, NSString *sshd,
             result = EOVERFLOW; break;
         }
 
+        stage = "backup_lookup_existing";
+        struct stat backupExisting = {0};
+        BOOL backupWasPresent = fstatat(dir, backupName, &backupExisting,
+                                        AT_SYMLINK_NOFOLLOW) == 0;
+        if (!backupWasPresent && errno != ENOENT) { result = errno; break; }
         stage = "create_backup";
-        backup = openat(dir, backupName, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
-        if (backup >= 0) {
-            madeBackup = YES;
+        // Construct and verify the backup under a private unique name. Darwin
+        // renameatx_np(RENAME_EXCL) atomically publishes the completed file
+        // with NO overwrite and no nlink==2 crash window. If unsupported,
+        // refuse the optional repair rather than weaken exclusive semantics.
+        // A crash during write leaves an ignorable staging file, not a
+        // poisoned well-known backup that prevents future safe attempts.
+        if (!backupWasPresent) {
+            backup = openat(dir, backupTempName,
+                            O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+            if (backup < 0) { result = errno; break; }
+            madeBackupTemp = YES;
             stage = "backup_owner";
             if (fchown(backup, 0, 0)) { result = errno; break; }
             stage = "backup_permissions";
@@ -271,9 +432,47 @@ static int RH3SSHRebaseInstalledPlist(NSString *plistPath, NSString *sshd,
             result = RH3SSHWriteAll(backup, originalData);
             if (result) break;
             close(backup); backup = -1;
-            stage = "backup_directory_sync";
+            stage = "backup_readback";
+            backup = openat(dir, backupTempName, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+            struct stat created = {0};
+            if (backup < 0) { result = errno; break; }
+            if (fstat(backup, &created) || !S_ISREG(created.st_mode) ||
+                created.st_uid != 0 || created.st_gid != 0 ||
+                (created.st_mode & 0777) != 0600 || created.st_nlink != 1 ||
+                created.st_flags != 0 ||
+                ![RH3SSHReadBounded(backup, created.st_size) isEqual:originalData]) {
+                result = EIO; break;
+            }
+            stage = "backup_created_xattrs";
+            ssize_t createdXattrs = flistxattr(backup, NULL, 0, 0);
+            if (createdXattrs != 0) {
+                result = createdXattrs < 0 ? errno : ENOTSUP; break;
+            }
+            stage = "backup_created_acl";
+            errno = 0;
+            acl_t createdACL = acl_get_fd_np(backup, ACL_TYPE_EXTENDED);
+            if (createdACL) { acl_free(createdACL); result = ENOTSUP; break; }
+            if (errno != ENOENT) { result = errno ? errno : ENOTSUP; break; }
+            close(backup); backup = -1;
+            stage = "backup_publish_exclusive";
+            if (renameatx_np(dir, backupTempName, dir, backupName, RENAME_EXCL)) {
+                result = errno; break;
+            }
+            madeBackupTemp = NO;
+            stage = "backup_publish_sync";
             if (fsync(dir)) { result = errno; break; }
-        } else if (errno == EEXIST) {
+            stage = "backup_published_readback";
+            backup = openat(dir, backupName, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+            if (backup < 0) { result = errno; break; }
+            struct stat published = {0};
+            if (fstat(backup, &published) || !S_ISREG(published.st_mode) ||
+                published.st_uid != 0 || published.st_gid != 0 ||
+                (published.st_mode & 0777) != 0600 || published.st_nlink != 1 ||
+                ![RH3SSHReadBounded(backup, published.st_size) isEqual:originalData]) {
+                result = EIO; break;
+            }
+            close(backup); backup = -1;
+        } else {
             // Preserve the very first package original across repeated repairs.
             // Refuse a symlink, foreign owner, malformed or writable backup.
             stage = "backup_open_existing";
@@ -284,9 +483,20 @@ static int RH3SSHRebaseInstalledPlist(NSString *plistPath, NSString *sshd,
             if (fstat(backup, &bs)) { result = errno; break; }
             stage = "backup_metadata";
             if (!S_ISREG(bs.st_mode) || bs.st_uid != 0 || bs.st_gid != 0 ||
-                (bs.st_mode & 0777) != 0600 || bs.st_nlink != 1) {
+                (bs.st_mode & 0777) != 0600 || bs.st_nlink != 1 ||
+                bs.st_flags != 0) {
                 result = EPERM; break;
             }
+            stage = "backup_xattrs";
+            ssize_t backupXattrs = flistxattr(backup, NULL, 0, 0);
+            if (backupXattrs != 0) {
+                result = backupXattrs < 0 ? errno : ENOTSUP; break;
+            }
+            stage = "backup_acl";
+            errno = 0;
+            acl_t backupACL = acl_get_fd_np(backup, ACL_TYPE_EXTENDED);
+            if (backupACL) { acl_free(backupACL); result = ENOTSUP; break; }
+            if (errno != ENOENT) { result = errno ? errno : ENOTSUP; break; }
             stage = "backup_read";
             NSData *saved = RH3SSHReadBounded(backup, bs.st_size);
             id savedJob = saved ? [NSPropertyListSerialization propertyListWithData:saved
@@ -298,7 +508,7 @@ static int RH3SSHRebaseInstalledPlist(NSString *plistPath, NSString *sshd,
                 result = EPERM; break;
             }
             close(backup); backup = -1;
-        } else { result = errno; break; }
+        }
 
         stage = "create_replacement";
         next = openat(dir, nextName, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
@@ -312,11 +522,66 @@ static int RH3SSHRebaseInstalledPlist(NSString *plistPath, NSString *sshd,
         result = RH3SSHWriteAll(next, nextData);
         if (result) break;
         close(next); next = -1;
+        // Check attributes of the actual new inode after construction. A
+        // default/inherited ACL can appear on freshly created files even
+        // when the package original had none.
+        stage = "replacement_open_readback";
+        replacementRead = openat(dir, nextName, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+        if (replacementRead < 0) { result = errno; break; }
+        stage = "replacement_stat";
+        if (fstat(replacementRead, &replacement)) { result = errno; break; }
+        if (!S_ISREG(replacement.st_mode) || replacement.st_uid != before.st_uid ||
+            replacement.st_gid != before.st_gid ||
+            (replacement.st_mode & 0777) != (before.st_mode & 0777) ||
+            replacement.st_flags != 0 || replacement.st_nlink != 1 ||
+            ![RH3SSHReadBounded(replacementRead, replacement.st_size) isEqual:nextData]) {
+            result = EIO; break;
+        }
+        stage = "replacement_xattrs";
+        ssize_t replacementXattrs = flistxattr(replacementRead, NULL, 0, 0);
+        if (replacementXattrs != 0) {
+            result = replacementXattrs < 0 ? errno : ENOTSUP; break;
+        }
+        stage = "replacement_acl";
+        errno = 0;
+        acl_t replacementACL = acl_get_fd_np(replacementRead, ACL_TYPE_EXTENDED);
+        if (replacementACL) { acl_free(replacementACL); result = ENOTSUP; break; }
+        if (errno != ENOENT) { result = errno ? errno : ENOTSUP; break; }
+        close(replacementRead); replacementRead = -1;
         stage = "original_revalidate";
         if (fstatat(dir, jobName, &current, AT_SYMLINK_NOFOLLOW) ||
             current.st_dev != before.st_dev || current.st_ino != before.st_ino ||
-            current.st_size != before.st_size || current.st_mtime != before.st_mtime) {
+            current.st_size != before.st_size ||
+            current.st_mtimespec.tv_sec != before.st_mtimespec.tv_sec ||
+            current.st_mtimespec.tv_nsec != before.st_mtimespec.tv_nsec ||
+            current.st_ctimespec.tv_sec != before.st_ctimespec.tv_sec ||
+            current.st_ctimespec.tv_nsec != before.st_ctimespec.tv_nsec ||
+            current.st_uid != before.st_uid || current.st_gid != before.st_gid ||
+            current.st_mode != before.st_mode || current.st_flags != before.st_flags ||
+            current.st_nlink != before.st_nlink ||
+            ![RH3SSHReadBounded(original, before.st_size) isEqual:originalData]) {
             result = EBUSY; break; // A package manager or other process changed it.
+        }
+        // An atomic hard link retains the exact previous inode, including
+        // its metadata. Keep it durably present through rename and readback:
+        // any post-rename failure can restore without reserializing a plist.
+        // EEXIST (e.g. interrupted previous attempt) is fail-closed.
+        stage = "create_rollback_link";
+        if (linkat(dir, jobName, dir, rollbackName, 0)) { result = errno; break; }
+        madeRollback = YES;
+        stage = "rollback_link_sync";
+        if (fsync(dir)) { result = errno; break; }
+        stage = "original_revalidate_after_link";
+        struct stat linked = {0};
+        if (fstatat(dir, jobName, &current, AT_SYMLINK_NOFOLLOW) ||
+            fstatat(dir, rollbackName, &linked, AT_SYMLINK_NOFOLLOW) ||
+            current.st_dev != before.st_dev || current.st_ino != before.st_ino ||
+            linked.st_dev != before.st_dev || linked.st_ino != before.st_ino ||
+            !S_ISREG(linked.st_mode) ||
+            current.st_nlink != before.st_nlink + 1 ||
+            linked.st_nlink != before.st_nlink + 1 ||
+            ![RH3SSHReadBounded(original, before.st_size) isEqual:originalData]) {
+            result = EBUSY; break;
         }
         stage = "replace_atomic";
         if (renameat(dir, nextName, dir, jobName)) { result = errno; break; }
@@ -352,12 +617,50 @@ static int RH3SSHRebaseInstalledPlist(NSString *plistPath, NSString *sshd,
             result = EIO; break; // Original is still recoverable from the backup.
         }
     } while (0);
+    if (renamedJob && result && madeRollback) {
+        // Do not clobber a concurrent package manager update. Only replace
+        // our own candidate inode and bytes with the exact original hard link.
+        // This narrows, but cannot eliminate, races with an independent dpkg
+        // writer because Darwin has no renameat compare-and-swap contract.
+        struct stat live = {0};
+        int liveFD = openat(dir, jobName, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+        BOOL unchangedReplacement = liveFD >= 0 && !fstat(liveFD, &live) &&
+            S_ISREG(live.st_mode) &&
+            live.st_dev == replacement.st_dev && live.st_ino == replacement.st_ino &&
+            live.st_uid == replacement.st_uid && live.st_gid == replacement.st_gid &&
+            live.st_mode == replacement.st_mode && live.st_flags == replacement.st_flags &&
+            [RH3SSHReadBounded(liveFD, live.st_size) isEqual:nextData];
+        if (liveFD >= 0) close(liveFD);
+        struct stat nameAgain = {0};
+        if (unchangedReplacement &&
+            !fstatat(dir, jobName, &nameAgain, AT_SYMLINK_NOFOLLOW) &&
+            nameAgain.st_dev == live.st_dev && nameAgain.st_ino == live.st_ino &&
+            !renameat(dir, rollbackName, dir, jobName)) {
+            madeRollback = NO;
+            if (!fsync(dir)) {
+                if (changed) *changed = NO;
+                stage = "post_replace_rolled_back";
+            } else stage = "rollback_sync_failed";
+        } else stage = "rollback_failed_preserved";
+    }
     if (backup >= 0) close(backup);
+    if (madeBackupTemp) (void)unlinkat(dir, backupTempName, 0);
     if (next >= 0) close(next);
+    if (replacementRead >= 0) close(replacementRead);
     if (original >= 0) close(original);
     if (madeNext) (void)unlinkat(dir, nextName, 0);
-    if (madeBackup && result && !renamedJob)
-        (void)unlinkat(dir, backupName, 0); // Original job was not replaced.
+    if (madeRollback && !renamedJob) {
+        (void)unlinkat(dir, rollbackName, 0);
+        (void)fsync(dir);
+    } else if (madeRollback && !result) {
+        if (unlinkat(dir, rollbackName, 0) || fsync(dir)) {
+            result = errno;
+            stage = "rollback_link_cleanup";
+        }
+    }
+    // Never discard a completely published first backup on a later error.
+    // It may be the only durable recovery copy if an interrupted operation
+    // crossed the commit boundary, and future attempts validate it read-only.
     if (stageOut) *stageOut = result ? stage : (changed && *changed ? "replaced_verified" : "already_current");
     close(dir);
     return result;
@@ -1127,17 +1430,41 @@ static void RH3SSHCountSocketPorts(id entry, NSUInteger *port22, NSUInteger *por
 // r165; opt-in recovery persists ONLY Program/ProgramArguments with a backup.
 - (int)repairRootHideSSH
 {
+    // The interactive, separately confirmed repair retains its original
+    // capability to provision a missing ED25519 host key.
+    return [self rh3RepairRootHideSSHAllowKeyGeneration:YES installerPhase:NO];
+}
+
+- (int)rh3RepairRootHideSSHAllowKeyGeneration:(BOOL)allowKeyGeneration
+                                  installerPhase:(BOOL)installerPhase
+{
     if (![DOBootstrapper rootHidePortEnabled]) return ENOTSUP;
+    // Never attempt writes under protected Bundle/Application merely because
+    // GET_ROOT and Seatbelt removal succeeded. r167 proved create_backup
+    // fails EPERM in precisely this state after a normal app relaunch.
+    uint32_t installerFlags = 0;
+    int installerStatus = csops(getpid(), CS_OPS_STATUS, &installerFlags, sizeof(installerFlags));
+    if (installerStatus != 0 || !(installerFlags & CS_INSTALLER)) {
+        [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
+            @"SSH repair: installer right unavailable; no plist write attempted. Use opt-in pre-import preparation.";
+        return EPERM;
+    }
+    // During jailbreak startup the app is ALREADY uid 0 / unsandboxed by
+    // elevatePrivileges. Do not issue more sandbox-label or get-root RPCs.
+    // Outside that phase, keep the existing explicit privileged-action path.
+    if (installerPhase && (geteuid() != 0 || getegid() != 0 ||
+        !(installerFlags & CS_PLATFORM_BINARY) || !roothide_is_active()))
+        return EPERM;
     __block NSString *root = nil, *plistPath = nil, *configPath = nil;
     __block NSString *keyPath = nil, *publicKeyPath = nil, *sshdPath = nil, *keygenPath = nil;
     __block BOOL needsKey = NO;
-    int result = [self rh3PerformPrivilegedAction:^int {
+    int (^sshPreflight)(void) = ^int {
         NSError *error = nil;
         root = [DOBootstrapper rootHideExistingRootWithError:&error];
-        const char *activeRoot = jbclient_get_jbroot();
+        NSString *activeRoot = RH3SSHRootForPhase(installerPhase);
         if (error || !root || !activeRoot ||
             ![RH3CanonicalAppPath(root) isEqualToString:
-              RH3CanonicalAppPath([NSString stringWithUTF8String:activeRoot])]) {
+              RH3CanonicalAppPath(activeRoot)]) {
             [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:@"SSH preflight: active hidden root identity not verified"];
             return EPERM;
         }
@@ -1209,7 +1536,8 @@ static void RH3SSHCountSocketPorts(id entry, NSUInteger *port22, NSUInteger *por
         for (NSString *binary in @[sshdPath, keygenPath]) {
             struct stat st = {0};
             if (lstat(binary.fileSystemRepresentation, &st) != 0 ||
-                !S_ISREG(st.st_mode) || st.st_uid != 0 || !(st.st_mode & S_IXUSR)) {
+                !S_ISREG(st.st_mode) || st.st_uid != 0 || !(st.st_mode & S_IXUSR) ||
+                (st.st_mode & (S_IWGRP | S_IWOTH))) {
                 [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
                     [NSString stringWithFormat:@"SSH preflight: %@ missing, non-executable, or not root-owned", binary.lastPathComponent]];
                 return ENOENT;
@@ -1217,7 +1545,8 @@ static void RH3SSHCountSocketPorts(id entry, NSUInteger *port22, NSUInteger *por
         }
         struct stat cfg = {0};
         if (lstat(configPath.fileSystemRepresentation, &cfg) != 0 ||
-            !S_ISREG(cfg.st_mode) || cfg.st_uid != 0) {
+            !S_ISREG(cfg.st_mode) || cfg.st_uid != 0 ||
+            (cfg.st_mode & (S_IWGRP | S_IWOTH))) {
             [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:@"SSH preflight: sshd_config missing or untrusted"];
             return ENOENT;
         }
@@ -1243,8 +1572,14 @@ static void RH3SSHCountSocketPorts(id entry, NSUInteger *port22, NSUInteger *por
         [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
             [NSString stringWithFormat:@"SSH preflight: verified; key_generation_needed=%d", needsKey]];
         return 0;
-    }];
+    };
+    int result = installerPhase ? sshPreflight() : [self rh3PerformPrivilegedAction:sshPreflight];
     if (result) return [self rh3ActionStage:@"SSH repair preflight" result:result];
+    if (needsKey && !allowKeyGeneration) {
+        [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
+            @"SSH pre-import: host key missing; automatic preparation will not create keys"];
+        return ENOENT;
+    }
     if (needsKey) {
         // Never use ssh-keygen -A: it writes the stock /etc/ssh directory.
         // -f pins output to the verified, root-owned hidden bootstrap.
@@ -1252,23 +1587,40 @@ static void RH3SSHCountSocketPorts(id entry, NSUInteger *port22, NSUInteger *por
             @[@"-q", @"-t", @"ed25519", @"-N", @"", @"-f", keyPath] input:nil timeout:30];
         if (result) return [self rh3ActionStage:@"SSH host key generation" result:result];
     }
-    result = [self rh3RunCommand:sshdPath arguments:
-        @[@"-t", @"-f", configPath, @"-h", keyPath] input:nil timeout:20];
-    if (result) return [self rh3ActionStage:@"SSH configuration validation" result:result];
+    if (!installerPhase) {
+        result = [self rh3RunCommand:sshdPath arguments:
+            @[@"-t", @"-f", configPath, @"-h", keyPath] input:nil timeout:20];
+        if (result) return [self rh3ActionStage:@"SSH configuration validation" result:result];
+    } else {
+        // The spawn + patch-child XPC are synchronous and have NO true
+        // deadline. Do not risk hanging the entire jailbreak for optional
+        // SSH. The prior physical r166/r167 sshd -t passed, while this phase
+        // rechecks ownership/modes without executing any child process.
+        [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
+            @"SSH pre-import: static config/key ownership checked; executable sshd -t deferred to avoid a bootstrap-stage stall"];
+    }
 
-    result = [self rh3PerformPrivilegedAction:^int {
+    int (^sshCommit)(void) = ^int {
         NSError *error = nil;
         NSString *active = [DOBootstrapper rootHideExistingRootWithError:&error];
-        const char *serverRoot = jbclient_get_jbroot();
+        NSString *serverRoot = RH3SSHRootForPhase(installerPhase);
         if (error || !active || !serverRoot ||
             ![RH3CanonicalAppPath(active) isEqualToString:RH3CanonicalAppPath(root)] ||
             ![RH3CanonicalAppPath(active) isEqualToString:
-              RH3CanonicalAppPath([NSString stringWithUTF8String:serverRoot])])
+              RH3CanonicalAppPath(serverRoot)])
             return EPERM;
         struct stat keyInfo = {0};
         if (lstat(keyPath.fileSystemRepresentation, &keyInfo) != 0 ||
             !S_ISREG(keyInfo.st_mode) || keyInfo.st_uid != 0 ||
             (keyInfo.st_mode & 077) || keyInfo.st_size < 32) return EPERM;
+        struct stat configInfo = {0}, binaryInfo = {0};
+        if (lstat(configPath.fileSystemRepresentation, &configInfo) ||
+            !S_ISREG(configInfo.st_mode) || configInfo.st_uid != 0 ||
+            (configInfo.st_mode & (S_IWGRP | S_IWOTH)) ||
+            lstat(sshdPath.fileSystemRepresentation, &binaryInfo) ||
+            !S_ISREG(binaryInfo.st_mode) || binaryInfo.st_uid != 0 ||
+            !(binaryInfo.st_mode & S_IXUSR) ||
+            (binaryInfo.st_mode & (S_IWGRP | S_IWOTH))) return EPERM;
         if (needsKey) {
             struct stat publicInfo = {0};
             if (lstat(publicKeyPath.fileSystemRepresentation, &publicInfo) != 0 ||
@@ -1284,13 +1636,68 @@ static void RH3SSHCountSocketPorts(id entry, NSUInteger *port22, NSUInteger *por
         }
         BOOL changed = NO;
         const char *failedAt = "unknown";
-        int writeResult = RH3SSHRebaseInstalledPlist(plistPath, sshdPath, configPath, keyPath, &changed, &failedAt);
+        int writeResult;
+        // The interactive repair and the installer-phase preparation can
+        // share this manager. Serialize all of the journal/rename protocol,
+        // including recovery, within this process. Dpkg is independent and
+        // still requires its own native concurrency validation.
+        @synchronized (self) {
+            writeResult = RH3SSHRebaseInstalledPlist(plistPath, sshdPath, configPath,
+                                                     keyPath, &changed, &failedAt);
+        }
+        NSString *validation = installerPhase
+            ? @"SSH pre-import: static config/key ownership checked"
+            : @"SSH repair: config/key validated";
         [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
-            [NSString stringWithFormat:@"SSH repair: config/key validated; socket job atomic rebase result=%d changed=%d stage=%s; no service started",
-             writeResult, changed, failedAt]];
+            [NSString stringWithFormat:@"%@; socket job atomic rebase result=%d changed=%d stage=%s; no service started",
+             validation, writeResult, changed, failedAt]];
         return writeResult;
-    }];
+    };
+    result = installerPhase ? sshCommit() : [self rh3PerformPrivilegedAction:sshCommit];
     return [self rh3ActionStage:@"SSH socket plist repair (no server started)" result:result];
+}
+
+// Candidate privilege window for the protected primary jbroot: after root
+// re-randomization and package finalization, before the userspace reboot.
+// Launchd's effective import order remains hardware-unverified.
+// RootHide's exploit phase has already installed CS_INSTALLER on this process.
+// Never turn installer privileges on here; avoid inventing a new XPC bypass.
+// An OpenSSH failure is non-fatal to the jailbreak, which preserves recovery.
+- (int)prepareRootHideOpenSSHBeforeUserspaceReboot
+{
+    if (![DOBootstrapper rootHidePortEnabled]) return ENOTSUP;
+    if (![[DOPreferenceManager sharedManager] boolPreferenceValueForKey:
+          @"rh3SSHInstallerRepairOptIn" fallback:NO]) {
+        [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
+            @"SSH pre-import: not requested; no job changed"];
+        return ECANCELED;
+    }
+    uint32_t flags = 0;
+    int status = csops(getpid(), CS_OPS_STATUS, &flags, sizeof(flags));
+    if (status != 0 || geteuid() != 0 || getegid() != 0 ||
+        !(flags & CS_INSTALLER) || !(flags & CS_PLATFORM_BINARY)) {
+        [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
+            [NSString stringWithFormat:@"SSH pre-import: installer privilege unavailable csops_ok=%d uid0=%d installer=%d platform=%d; job unchanged",
+             status == 0, geteuid() == 0 && getegid() == 0,
+             status == 0 && !!(flags & CS_INSTALLER),
+             status == 0 && !!(flags & CS_PLATFORM_BINARY)]];
+        return EPERM;
+    }
+    // Guard against applying a stale absolute program after a root rotation:
+    // the SSH repair queries the server and the verified active root afresh,
+    // validates sshd -t/key ownership and persists only the single SSH job.
+    [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
+        @"SSH pre-import: verified installer phase, repairing selected service"];
+    // The persistent opt-in is for plist rebasing ONLY. It must never
+    // generate, rotate or replace a host key without a separate explicit
+    // interactive action.
+    int result = [self rh3RepairRootHideSSHAllowKeyGeneration:NO installerPhase:YES];
+    [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
+        [NSString stringWithFormat:@"SSH pre-import: result=%d; optional service only, no boot interruption", result]];
+    // The opt-in persists: every subsequent jailbreak re-randomizes the root
+    // and must refresh Program/-f/-h to that new root before launchd import.
+    // The user can disable this independently in Settings at any time.
+    return result;
 }
 
 // Read the effective launchd disabled override without changing the service.

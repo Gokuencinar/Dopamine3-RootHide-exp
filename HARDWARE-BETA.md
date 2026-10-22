@@ -269,6 +269,94 @@ Guarda el mensaje de error, los logs, el modelo, la versión exacta de iOS y la 
 
 ## Compilar esta variante
 
+### Propuesta integrada de recuperación SSH (rama `fix/roothide3-ssh-preboot-installer-rc`)
+
+Esta rama surge del análisis del error físico r167 `stage=create_backup,
+result=1, changed=0`. La operación fallaba creando un fichero dentro del
+bootstrap primario, situado bajo el contenedor protegido
+`Bundle/Application`. Los metadatos del directorio y del plist eran
+correctos, la clave de host ya existía y `sshd -t` terminó con código 0.
+No se ha demostrado en hardware que la nueva estrategia recupere SSH.
+
+En RootHide 2 (pin `e8de6e5`) el proceso instalador recibe autorización
+especial durante el exploit y la aplicación puede volver a disponer de
+ella al arrancar. El nuevo enfoque **no** otorga esa autorización a la
+aplicación de forma permanente ni introduce endpoints XPC para cambiar
+los permisos de otros procesos. Únicamente utiliza la autorización ya
+comprobada durante la propia fase de jailbreak:
+
+- El usuario habilita voluntariamente **Preparar OpenSSH al iniciar jailbreak
+  (optativo)** tras cambiar sus contraseñas. Es una preferencia persistente
+  y reversible; pulsarla no modifica ficheros ni arranca servicios.
+- Tras re-aleatorizar la raíz e instalar los paquetes del bootstrap,
+  pero antes del siguiente reboot de espacio de usuario, la app verifica
+  `CS_INSTALLER`, `CS_PLATFORM_BINARY`, UID/GID 0 y la identidad de RootHide
+  comparando la raíz instalada con `gSystemInfo.jailbreakInfo.rootPath`,
+  que se actualiza tras su rotación. No realiza consultas XPC adicionales a
+  PID 1 en la fase crítica. La reparación manual sí obtiene la ruta actual
+  por XPC, en vez de usar la caché `jbclient_get_jbroot()`.
+- La preparación automática **exige una clave ED25519 existente**; no genera,
+  rota ni sobrescribe claves. Comprueba tipos, propiedad, permisos, rutas y
+  contenido estructural del único job; no ejecuta `sshd -t` en la fase crítica,
+  ya que su `posix_spawn`/patch-child XPC no tienen plazo síncrono real y
+  podrían bloquear todo el jailbreak. `sshd -t` sí continúa en la acción
+  manual, y pasó físicamente en r166/r167; esto **no prueba** una futura
+  configuración distinta. La reparación manual conserva su opción confirmada
+  para generar una clave faltante.
+- La transacción construye primero un respaldo en nombre aleatorio y lo
+  publica por `renameatx_np(RENAME_EXCL)` tras validarlo, sin pisar jamás uno
+  preexistente. Si esa primitiva no se admite, falla sin sustituir el plist.
+  Después crea un enlace temporal al inode original antes de `renameat` y comprueba de
+  nuevo datos, permisos, ctime/mtime e inode para detectar cambios del gestor
+  de paquetes. Si falla tras sustituir el plist, intenta restaurar el inode
+  original **solo si el plist vivo todavía es el reemplazo propio**. Los
+  errores de recuperación quedan registrados. Si un corte deja un hardlink de
+  recuperación, se elimina únicamente si está demostrado que apunta al mismo
+  inode original o que el nuevo job coincide exactamente en las propiedades
+  no modificadas. Si no puede demostrarse, se conserva y el cambio se rechaza.
+  No se afirma rollback absoluto frente a cortes de energía o una escritura
+  simultánea de dpkg.
+- En lugar de descartar ACL, atributos extendidos o flags del plist, la RC
+  rechaza el cambio con seguridad si encuentra metadatos especiales que no
+  puede preservar. Conserva los `Sockets`/`inetdCompatibility`, valores de
+  servicio y demás claves, modificando únicamente `Program` y
+  `ProgramArguments`.
+- Un error de OpenSSH se registra como opcional y **no aborta** el arranque
+  del jailbreak. La reparación inmediata desde una app reabierta se niega
+  sin escribir si ya no existe la autorización instalador.
+- La preferencia permanece activa para actualizar las tres rutas
+  absolutas cada vez que se re-aleatorice la raíz en una nueva sesión.
+
+La configuración cargada de `launchd` no cambia hasta una importación
+posterior: actualizar el plist no demuestra que el servicio arranque. Además,
+RootHide3 hoy ofrece **dos rutas** de importación de `/Library/LaunchDaemons`
+(diccionario XPC y `Paths` en disco); r165 demostró que la primera reescritura
+XPC no gobernó el job efectivo. Escribir antes de un userspace reboot debería
+alinear ambas, pero **todavía no se ha probado en hardware** ni se conoce la
+fuente definitiva de importación del job.
+La aceptación física de esta RC exige `atomic rebase result=0`, un
+`launchctl print system/com.openssh.sshd` con la ruta activa y los
+argumentos esperados, y una conexión real que devuelva `SSH-2.0`
+en el puerto previsto (sin autenticar). También deben seguir funcionando
+Sileo, Zebra, el marcador de modo seguro, NewTerm según su diagnóstico
+independiente y el reinicio de espacio de usuario.
+
+**Limitaciones y condición de bloqueo:** `CS_INSTALLER` comprobado no garantiza
+que el kernel permita `openat`, `renameatx_np`, `linkat` y `renameat` en el directorio Bundle
+protegido. Para reducir la posibilidad de bloqueo la nueva ruta automática no
+invoca `rh3RunCommand`, `sshd -t`, consultas XPC nuevas ni el helper general
+de escalada. La
+ejecución del servidor SSH y la sintaxis de una configuración alterada después
+de los ensayos r166/r167 siguen pendientes de validación. Los nombres de
+`.rh3-next-*` y `.rh3-original-next-*` abandonados llevan sufijo aleatorio,
+no son importables por launchd ni se eliminan a ciegas; el backup publicado
+conocido se valida estrictamente antes de reusarse.
+
+**Estado:** trabajo local sin IPA aprobada. La suite Python es mayoritariamente
+de contrato de fuente; no constituye compilación ObjC iOS, pruebas de fallos
+de filesystem ni validación física. No instalar ni ejecutar otro jailbreak
+basándose solamente en esta sección.
+
 Los builds normales mantienen el jailbreak desactivado. La variante habilitada se genera manualmente con `hardware_beta` en GitHub Actions o, en macOS con las dependencias del proyecto:
 
 ```sh

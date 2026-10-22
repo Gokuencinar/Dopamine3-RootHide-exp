@@ -1169,6 +1169,20 @@ static void *rh3_boomerang_server(void *opaque)
     }
     if ([DOBootstrapper rootHidePortEnabled])
         [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:@"phase: bootstrap finalization completed"];
+
+    // Run only when expressly requested in Settings. The re-randomized
+    // primary RootHide bootstrap has the initial exploit's CS_INSTALLER
+    // identity here. Actual import timing by launchd remains unverified;
+    // persist only the selected OpenSSH plist before userspace reboot.
+    // The service is NOT required for the jailbreak; an SSH error must never
+    // turn a successful bootstrap into another interrupted jailbreak.
+    if ([DOBootstrapper rootHidePortEnabled]) {
+        int sshResult = [[DOEnvironmentManager sharedManager]
+                         prepareRootHideOpenSSHBeforeUserspaceReboot];
+        if (sshResult != 0 && sshResult != ECANCELED)
+            [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
+                [NSString stringWithFormat:@"SSH pre-import: optional service preparation failed (%d); preserving jailbreak", sshResult]];
+    }
     
     [[DOEnvironmentManager sharedManager] setIDownloadEnabled:idownloadEnabled needsUnsandbox:NO];
     

@@ -60,6 +60,19 @@
     [self savePreferences];
 }
 
+- (BOOL)setVerifiedPreferenceValue:(NSObject *)obj forKey:(NSString *)key
+{
+    if (!obj || !key.length) return NO;
+    NSObject *oldValue = _preferences[key];
+    _preferences[key] = obj;
+    BOOL persisted = [_preferences writeToFile:_preferencesPath atomically:YES];
+    NSDictionary *onDisk = persisted ? [NSDictionary dictionaryWithContentsOfFile:_preferencesPath] : nil;
+    if (persisted && [onDisk[key] isEqual:obj]) return YES;
+    if (oldValue) _preferences[key] = oldValue;
+    else [_preferences removeObjectForKey:key];
+    return NO;
+}
+
 - (void)removePreferenceValueForKey:(NSString *)key
 {
     [_preferences removeObjectForKey:key];

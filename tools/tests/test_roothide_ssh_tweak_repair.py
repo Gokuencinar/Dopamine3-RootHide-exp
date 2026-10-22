@@ -26,7 +26,12 @@ class RootHideSSHTweakRepairTests(unittest.TestCase):
         repair = env.split("- (int)repairRootHideSSH", 1)[1].split(
             "// Read the effective launchd disabled override", 1)[0]
         self.assertIn('rootHideExistingRootWithError:&error', repair)
-        self.assertIn('jbclient_get_jbroot()', repair)
+        # SSH must query the current server root instead of trusting the
+        # dispatch_once cache, which can hold a pre-randomization brand.
+        self.assertIn('RH3SSHRootForPhase(installerPhase)', repair)
+        self.assertIn('RH3SSHCurrentServerRoot()', env)
+        self.assertIn('jbserver_xpc_send(JBS_DOMAIN_SYSTEMWIDE,', env)
+        self.assertIn('JBS_SYSTEMWIDE_GET_JBROOT, NULL)', env)
         self.assertIn('O_DIRECTORY | O_NOFOLLOW', repair)
         self.assertIn('if (plistPath) {', repair)
         self.assertIn('SSH preflight: duplicate OpenSSH socket job', repair)
@@ -38,8 +43,10 @@ class RootHideSSHTweakRepairTests(unittest.TestCase):
         self.assertIn('@"com.openssh.sshd"', repair)
         self.assertIn('@"-t", @"ed25519", @"-N", @"", @"-f", keyPath', repair)
         self.assertIn('@"-t", @"-f", configPath, @"-h", keyPath', repair)
-        self.assertIn('RH3SSHRebaseInstalledPlist(plistPath, sshdPath, configPath, keyPath, &changed, &failedAt)', repair)
-        self.assertIn('config/key validated; socket job atomic rebase', repair)
+        self.assertIn('RH3SSHRebaseInstalledPlist(plistPath, sshdPath, configPath,', repair)
+        self.assertIn('keyPath, &changed, &failedAt)', repair)
+        self.assertIn('@"SSH repair: config/key validated"', repair)
+        self.assertIn('socket job atomic rebase result=', repair)
         self.assertIn('stage=%s; no service started', repair)
         self.assertNotIn('@"-A"', repair)
         for name in ('launchctl', 'kickstart', 'writeToFile:plistPath', 'chmod(plistPath',
@@ -53,7 +60,8 @@ class RootHideSSHTweakRepairTests(unittest.TestCase):
         self.assertIn('@"com.openssh.sshd.plist"', repair)
         self.assertIn('const char *jobName = "com.openssh.sshd.plist"', repair)
         self.assertIn('const char *backupName = ".com.openssh.sshd.rh3-original"', repair)
-        self.assertIn('const char *nextName = ".com.openssh.sshd.rh3-next"', repair)
+        self.assertIn('char nextName[80] = {0}', repair)
+        self.assertIn('".com.openssh.sshd.rh3-next-%08x%08x"', repair)
         self.assertIn('job[@"Program"] = sshd;', repair)
         self.assertIn('job[@"ProgramArguments"] = args;', repair)
         self.assertIn('@[sshd, @"-i", @"-f", config, @"-h", key]', repair)
@@ -70,7 +78,8 @@ class RootHideSSHTweakRepairTests(unittest.TestCase):
         self.assertIn('renameat(dir, nextName, dir, jobName)', repair)
         self.assertIn('if (fsync(dir))', repair)
         self.assertIn('RH3SSHReadBounded(checked, checkedInfo.st_size)', repair)
-        self.assertIn('if (madeBackup && result && !renamedJob)', repair)
+        self.assertIn('Never discard a completely published first backup', repair)
+        self.assertIn('renameatx_np(dir, backupTempName, dir, backupName, RENAME_EXCL)', repair)
         self.assertIn('const char **stageOut', repair)
         for stage in ('directory_stat', 'directory_owner', 'directory_permissions',
                       'open_original', 'original_group', 'original_permissions',

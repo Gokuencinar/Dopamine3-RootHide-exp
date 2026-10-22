@@ -57,6 +57,7 @@ NS_ASSUME_NONNULL_BEGIN
 - (int)diagnoseRootHideRuntime;
 - (int)diagnoseRootHideOpenSSHSocket;
 - (int)repairRootHideSSH;
+- (int)prepareRootHideOpenSSHBeforeUserspaceReboot;
 - (int)verifyRootHideTweakInjection;
 - (void)reboot;
 - (int)changeMobilePassword:(NSString *)newPassword;

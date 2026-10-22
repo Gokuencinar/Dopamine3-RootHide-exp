@@ -296,6 +296,22 @@ static BOOL gRootHideProviderRepairInFlight = NO;
                 [specifiers addObject:removeJailbreakSwitchSpecifier];
             }
 
+            // This is a preference toggle, NOT a privileged repair. Keep it
+            // accessible after a full reboot when the hidden root exists but
+            // isJailbroken is still NO; otherwise users cannot opt in for
+            // their next jailbreak attempt.
+            if ([DOBootstrapper rootHidePortEnabled]) {
+                PSSpecifier *sshOptInGroup = [PSSpecifier emptyGroupSpecifier];
+                sshOptInGroup.name = @"OpenSSH (opción para el próximo jailbreak)";
+                [specifiers addObject:sshOptInGroup];
+                PSSpecifier *sshPreboot = [PSSpecifier preferenceSpecifierNamed:@"Preparar OpenSSH al iniciar jailbreak (optativo)" target:self set:defSetter get:defGetter detail:nil cell:PSStaticTextCell edit:nil];
+                [sshPreboot setProperty:[DOButtonCell class] forKey:@"cellClass"];
+                [sshPreboot setProperty:buttonHeight forKey:@"height"];
+                [sshPreboot setProperty:@"shield.checkered" forKey:@"image"];
+                [sshPreboot setProperty:@"toggleRootHideSSHPrebootRepairPressed" forKey:@"action"];
+                [specifiers addObject:sshPreboot];
+            }
+
             if (envManager.isBootstrapped) {
                 PSSpecifier *actionsGroupSpecifier = [PSSpecifier emptyGroupSpecifier];
                 actionsGroupSpecifier.name = DOLocalizedString(@"Section_Actions");
@@ -741,7 +757,7 @@ static BOOL gRootHideProviderRepairInFlight = NO;
 - (void)repairRootHideSSHPressed
 {
     UIAlertController *confirm = [UIAlertController alertControllerWithTitle:@"Reparar OpenSSH (cambio reversible)"
-        message:@"Solo si ya has cambiado las contraseñas de acceso. Se verificará OpenSSH y su configuración en la raíz oculta. Se conservará un respaldo privado del plist original y se actualizarán únicamente Program y ProgramArguments para apuntar a SSH en RootHide. No se activará ningún servicio ni se modificarán las claves existentes. Para aplicar el cambio hace falta un reinicio de espacio de usuario controlado; no se hará automáticamente."
+        message:@"Solo si ya has cambiado las contraseñas de acceso. La reparación inmediata exige permiso de instalador, que puede faltar tras volver a abrir RootHide: en ese caso se rechazará sin escribir. Si está autorizado, actualiza únicamente Program y ProgramArguments, conservando el respaldo y los sockets. No se activará ningún servicio ni se reiniciará el dispositivo. Para la solución persistente, usa 'Preparar OpenSSH al iniciar jailbreak (optativo)' durante una futura activación completa."
         preferredStyle:UIAlertControllerStyleAlert];
     [confirm addAction:[UIAlertAction actionWithTitle:@"Cancelar" style:UIAlertActionStyleCancel handler:nil]];
     [confirm addAction:[UIAlertAction actionWithTitle:@"Continuar" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
@@ -750,14 +766,48 @@ static BOOL gRootHideProviderRepairInFlight = NO;
             dispatch_async(dispatch_get_main_queue(), ^{
                 UIAlertController *done = [UIAlertController alertControllerWithTitle:
                     result ? @"Reparación de OpenSSH incompleta" : @"Rutas de OpenSSH preparadas"
-                    message:result ? [NSString stringWithFormat:@"Falló una comprobación (código %d). No se han iniciado servicios. No reinicies todavía; comparte el diagnóstico para comprobar el estado y el respaldo.", result] :
+                    message:result == EPERM ? @"No hay autorización de instalador para escribir en el bootstrap desde este proceso. No se ha iniciado SSH. Selecciona la preparación optativa durante una futura activación; no repitas la reparación aquí." :
+                        (result ? [NSString stringWithFormat:@"Falló una comprobación (código %d). No se han iniciado servicios. Comparte el diagnóstico para comprobar el estado y el respaldo.", result] :
                         @"El programa y sus argumentos apuntan al SSH verificado de RootHide; el plist original está respaldado si hubo cambios. El servicio activo aún no se ha recargado. Comparte el diagnóstico y acuerda un reinicio controlado de espacio de usuario antes de probar SSH."
+                        )
                     preferredStyle:UIAlertControllerStyleAlert];
                 [done addAction:[UIAlertAction actionWithTitle:@"Aceptar" style:UIAlertActionStyleCancel handler:nil]];
                 [self presentViewController:done animated:YES completion:nil];
             });
         });
     }]];
+    [self presentViewController:confirm animated:YES completion:nil];
+}
+
+- (void)toggleRootHideSSHPrebootRepairPressed
+{
+    BOOL enabled = [[DOPreferenceManager sharedManager]
+                    boolPreferenceValueForKey:@"rh3SSHInstallerRepairOptIn" fallback:NO];
+    UIAlertController *confirm = [UIAlertController alertControllerWithTitle:
+        enabled ? @"Desactivar preparación de OpenSSH" : @"Preparar OpenSSH durante el próximo jailbreak"
+        message:enabled ?
+            @"Se dejará de actualizar automáticamente el trabajo de OpenSSH en futuras activaciones. No se modificará el servidor ni el jailbreak que está ejecutándose." :
+            @"Activa esta opción solo si has cambiado las contraseñas de acceso. Durante una futura activación de RootHide, después de preparar el bootstrap, se comprobarán la clave existente y la configuración y se intentará corregir únicamente las rutas del plist de OpenSSH con respaldo y reversión ante fallos. Nunca se generarán ni reemplazarán claves automáticamente. La opción seguirá activa para adaptar las rutas si RootHide cambia de raíz. No se hará ningún reinicio ahora."
+        preferredStyle:UIAlertControllerStyleAlert];
+    [confirm addAction:[UIAlertAction actionWithTitle:@"Cancelar" style:UIAlertActionStyleCancel handler:nil]];
+    [confirm addAction:[UIAlertAction actionWithTitle:enabled ? @"Desactivar" : @"Activar para próximos jailbreaks"
+        style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
+            BOOL saved = [[DOPreferenceManager sharedManager]
+                setVerifiedPreferenceValue:@(!enabled) forKey:@"rh3SSHInstallerRepairOptIn"];
+            [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
+                !saved ? @"SSH pre-import opt-in save failed; consent NOT confirmed" :
+                (enabled ? @"SSH pre-import opt-in disabled" : @"SSH pre-import opt-in enabled")];
+            UIAlertController *done = [UIAlertController alertControllerWithTitle:
+                !saved ? @"No se pudo guardar la preferencia" :
+                (enabled ? @"Preparación desactivada" : @"Preparación programada")
+                message:!saved ? @"La preferencia no quedó verificada en disco. No se confirma ningún cambio; comprueba el almacenamiento antes de repetir esta opción." :
+                (enabled ? @"No se volverá a modificar automáticamente el plist de OpenSSH." :
+                    @"No se ha cambiado ningún archivo ni servicio. En la próxima activación completa de RootHide se intentará preparar el plist de SSH antes del reinicio del espacio de usuario; su importación efectiva debe comprobarse después. Un fallo opcional no impedirá arrancar el jailbreak."
+                )
+                preferredStyle:UIAlertControllerStyleAlert];
+            [done addAction:[UIAlertAction actionWithTitle:@"Aceptar" style:UIAlertActionStyleCancel handler:nil]];
+            [self presentViewController:done animated:YES completion:nil];
+        }]];
     [self presentViewController:confirm animated:YES completion:nil];
 }
 

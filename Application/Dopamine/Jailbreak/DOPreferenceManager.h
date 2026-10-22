@@ -21,6 +21,10 @@ NS_ASSUME_NONNULL_BEGIN
 - (BOOL)boolPreferenceValueForKey:(NSString *)key fallback:(BOOL)fallback;
 
 - (void)setPreferenceValue:(NSObject *)obj forKey:(NSString *)key;
+// Consent-critical settings must be verified on disk, not only updated in
+// _preferences. Returns NO without retaining the new in-memory value if save
+// or readback fails.
+- (BOOL)setVerifiedPreferenceValue:(NSObject *)obj forKey:(NSString *)key;
 - (void)removePreferenceValueForKey:(NSString *)key;
 
 @end
