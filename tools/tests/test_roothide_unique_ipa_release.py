@@ -42,6 +42,7 @@ class UniqueIPARelease(unittest.TestCase):
         self.assertIn('shasum -a 256 -c "$ASSET.sha256"', release)
         self.assertIn("github.event_name == 'workflow_dispatch'", release)
         self.assertIn("github.ref == 'refs/heads/roothide-dopamine3-integration'", release)
+        self.assertIn("github.ref == 'refs/heads/fix/roothide3-ssh-preboot-installer-rc'", release)
         self.assertIn("env.ROOTHIDE_HARDWARE_TEST == 'YES'", release)
         self.assertLess(MAIN.index('- name: Verify jailbreak-enabled RootHide hardware beta'),
                         MAIN.index('- name: Publish directly downloadable experimental IPA'))

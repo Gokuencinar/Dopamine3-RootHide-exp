@@ -60,7 +60,8 @@ class RootHideCICache(unittest.TestCase):
                          'bytes.fromhex("28b52ffd")'):
             self.assertIn(fragment, script)
         # Download caches must have an exact SHA-pinned key. Only compiled
-        # objects may use a restricted restore prefix (same Xcode and mode).
+        # objects may use a restricted restore prefix (same Xcode; ccache
+        # hashes compile options, so gate-specific objects cannot collide).
         for label in ('Restore pinned Theos SDK download',
                       'Restore verified Procursus bootstrap downloads'):
             block = workflow.split(f'- name: {label}\n', 1)[1].split('\n      - name:', 1)[0]
@@ -78,13 +79,14 @@ class RootHideCICache(unittest.TestCase):
         self.assertIn('uses: actions/cache/restore@v4', restore)
         self.assertIn('uses: actions/cache/save@v4', save)
         for block in (restore, save):
-            self.assertIn('github.event_name != \'pull_request\'', block)
-            self.assertIn("github.ref == 'refs/heads/roothide-dopamine3-integration'", block)
+            self.assertIn("github.event_name == 'workflow_dispatch'", block)
+            self.assertNotIn("github.event_name == 'pull_request'", block)
             self.assertIn('path: ~/.cache/ccache-roothide3', block)
             self.assertNotIn('BaseBin/.build', block)
             self.assertNotIn('DerivedData', block)
             self.assertNotIn('.ipa', block)
         self.assertIn('restore-keys:', restore)
+        self.assertIn('xcode-${{ steps.ccache_identity.outputs.xcode_id }}-NO-v1-', restore)
         self.assertEqual(re.search(r'key: (rh3-objects-[^\n]+)', restore).group(1),
                          re.search(r'key: (rh3-objects-[^\n]+)', save).group(1))
         self.assertIn('steps.ccache_identity.outputs.xcode_id', restore)
