@@ -40,13 +40,38 @@ class SSHSocketDiagnosisR161(unittest.TestCase):
         self.assertIn('isEqual:@"com.openssh.sshd"', body)
         self.assertIn('@"inetdCompatibility"', body)
         self.assertIn('@"Wait"', body)
-        self.assertIn('sockets[@"Listeners"]', body)
+        self.assertIn("RH3SSHCountSocketPorts(entry, &port22Count, &port2222Count)", body)
+        self.assertIn('plist[@"Disabled"]', body)
+        self.assertIn('programClass = RH3SSHPrintPathClass(output, @"program"', body)
+        self.assertIn('originClass = RH3SSHPrintPathClass(output, @"path"', body)
+        self.assertIn('configArgSeen', body)
+        self.assertIn('keyArgSeen', body)
         self.assertIn('RH3SSHPrintScalar(output, @"last exit code", YES)', body)
         self.assertIn('RH3SSHPrintScalar(output, @"last terminating signal", YES)', body)
         self.assertIn('RH3SSHPrintScalar(output, @"pid", YES)', body)
         self.assertIn('RH3SSHPrintScalar(output, @"state", NO)', body)
         self.assertNotIn("rh3RecordDiagnosticStage:output", body)
         self.assertNotIn("sendLog:output", body)
+        self.assertNotIn("program_rooted=", body)
+        self.assertNotIn("listeners=%d", body)
+
+    def test_r162_classifies_without_disclosing_live_paths(self):
+        helpers = ENV.split("// launchctl print is a diagnostic format", 1)[1].split(
+            "@implementation DOEnvironmentManager", 1
+        )[0]
+        self.assertIn("static NSString *RH3SSHPrintPathClass", helpers)
+        self.assertIn("RH3CanonicalAppPath(value)", helpers)
+        self.assertIn("RH3CanonicalAppPath(root)", helpers)
+        for classification in ('@"expected"', '@"active_other"', '@"stock_ssh"',
+                               '@"var_jb_alias"', '@"other_absolute"', '@"missing"'):
+            self.assertIn(classification, helpers)
+        self.assertIn('((NSDictionary *)entry)[@"SockServiceName"]', helpers)
+        self.assertIn('isEqualToString:@"ssh"', helpers)
+        self.assertIn('isEqualToString:@"2222"', helpers)
+        self.assertIn('port22=%lu port2222=%lu disabled=%d', self.diagnostic)
+        self.assertIn('program_class=%@ origin_class=%@', self.diagnostic)
+        self.assertNotIn('rh3RecordDiagnosticStage:[NSString stringWithFormat:@"%@", output]',
+                         self.diagnostic)
 
     def test_child_only_bounded_capture(self):
         body = self.diagnostic

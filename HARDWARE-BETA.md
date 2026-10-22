@@ -132,6 +132,30 @@ vez; distingue el código del comando `launchctl` del último código de
 salida registrado por `launchd` para `sshd`. No reinstales OpenSSH ni
 repitas «Preparar OpenSSH» mientras se investiga el arranque.
 
+### Precisión diagnóstica posterior a r161 (candidata r162)
+
+En la prueba r161, los puertos TCP 22 y 2222 aceptan la conexión desde
+Windows, pero ambos cierran sin banner y `launchctl print` aún indica
+`runs=0`. El plist de OpenSSH de Procursus puede nombrar los sockets
+`SSHListener` y `SSHListener2`, de modo que el antiguo indicador
+`listeners=0` no diagnosticaba su ausencia. El indicador anterior
+`program_rooted=0` era también una coincidencia textual estricta que
+podía confundir alias de ruta con un ejecutable fuera del bootstrap.
+
+La nueva consulta mantiene el comportamiento de **solo lectura**, pero
+cuenta los servicios de puerto 22 y 2222 presentes *en el plist en disco*,
+registra `Disabled` del plist como `-1/0/1` (`-1` significa ausente) y
+clasifica por categorías fijas las rutas `path` y `program` que reporta el
+servicio efectivo mediante `launchctl print`. También informa únicamente
+si la representación humana contiene los argumentos de configuración y
+clave del bootstrap activo. No imprime rutas, datos de sockets, salida
+cruda de `launchctl`, variables de entorno ni secretos. No demuestra por
+sí sola qué proceso acepta las conexiones entrantes.
+
+Con r162 instalada, basta ejecutar una sola vez **Diagnosticar arranque de
+OpenSSH (solo lectura)** y compartir el nuevo registro. No preparar SSH,
+alterar claves, forzar `launchctl kickstart` ni reiniciar.
+
 Guarda el mensaje de error, los logs, el modelo, la versión exacta de iOS y la revisión de la app. No repitas el proceso sin revisar el fallo: puede haber quedado un bootstrap a medias. No se borra automáticamente una instalación de RootHide 2, y reiniciar no garantiza resolver cualquier estado parcial.
 
 ## Compilar esta variante

@@ -86,6 +86,50 @@ static NSString *RH3SSHPrintScalar(NSString *text, NSString *field, BOOL numeric
     return @"unknown";
 }
 
+// Classify a *single* launchctl path without ever writing its contents to a
+// diagnostic log. /private/var and /var aliases are normalized in the same
+// way as the already-verified hidden root used for preflight.
+static NSString *RH3SSHPrintPathClass(NSString *text, NSString *field,
+                                    NSString *root, NSString *expectedSuffix)
+{
+    NSString *prefix = [field stringByAppendingString:@" = "];
+    for (NSString *line in [text componentsSeparatedByCharactersInSet:NSCharacterSet.newlineCharacterSet]) {
+        NSString *trimmed = [line stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
+        if (![trimmed hasPrefix:prefix]) continue;
+        NSString *value = [[trimmed substringFromIndex:prefix.length]
+            stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
+        if (!value.length || value.length > 4096) return @"invalid";
+        if (![value hasPrefix:@"/"]) return @"non_absolute";
+        NSString *actual = RH3CanonicalAppPath(value);
+        NSString *active = RH3CanonicalAppPath(root);
+        NSString *expected = RH3CanonicalAppPath([root stringByAppendingPathComponent:expectedSuffix]);
+        if ([actual isEqualToString:expected]) return @"expected";
+        if ([actual hasPrefix:[active stringByAppendingString:@"/"]]) return @"active_other";
+        if ([actual isEqualToString:@"/usr/sbin/sshd"] ||
+            [actual isEqualToString:@"/usr/libexec/sshd-keygen-wrapper"])
+            return @"stock_ssh";
+        if ([actual hasPrefix:@"/var/jb/"]) return @"var_jb_alias";
+        return @"other_absolute";
+    }
+    return @"missing";
+}
+
+// Procursus names the entries SSHListener and SSHListener2 rather than the
+// Apple example's Listeners. Count their actual service names, not key names.
+static void RH3SSHCountSocketPorts(id entry, NSUInteger *port22, NSUInteger *port2222)
+{
+    if ([entry isKindOfClass:NSArray.class]) {
+        for (id member in (NSArray *)entry) RH3SSHCountSocketPorts(member, port22, port2222);
+        return;
+    }
+    if (![entry isKindOfClass:NSDictionary.class]) return;
+    id service = ((NSDictionary *)entry)[@"SockServiceName"];
+    NSString *name = [service isKindOfClass:NSString.class] ? service :
+        ([service isKindOfClass:NSNumber.class] ? [service stringValue] : nil);
+    if ([name isEqualToString:@"ssh"] || [name isEqualToString:@"22"]) ++*port22;
+    if ([name isEqualToString:@"2222"]) ++*port2222;
+}
+
 @implementation DOEnvironmentManager
 
 + (instancetype)sharedManager
@@ -1007,8 +1051,9 @@ static NSString *RH3SSHPrintScalar(NSString *text, NSString *field, BOOL numeric
     [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:@"SSH socket diagnosis: read-only launchctl print requested"];
     __block NSString *root = nil;
     __block int onDiskWait = -1;
+    __block int onDiskDisabled = -1;
     __block NSUInteger socketCount = 0;
-    __block BOOL listeners = NO;
+    __block NSUInteger port22Count = 0, port2222Count = 0;
     int preflight = [self rh3PerformPrivilegedAction:^int {
         NSError *error = nil;
         root = [DOBootstrapper rootHideExistingRootWithError:&error];
@@ -1034,16 +1079,20 @@ static NSString *RH3SSHPrintScalar(NSString *text, NSString *field, BOOL numeric
             if (matches > 1) return EEXIST;
             NSDictionary *sockets = [plist[@"Sockets"] isKindOfClass:NSDictionary.class] ? plist[@"Sockets"] : nil;
             socketCount = sockets.count;
-            listeners = sockets[@"Listeners"] != nil;
+            for (id entry in sockets.allValues)
+                RH3SSHCountSocketPorts(entry, &port22Count, &port2222Count);
             NSDictionary *inetd = [plist[@"inetdCompatibility"] isKindOfClass:NSDictionary.class] ? plist[@"inetdCompatibility"] : nil;
             if ([inetd[@"Wait"] isKindOfClass:NSNumber.class]) onDiskWait = [inetd[@"Wait"] boolValue] ? 1 : 0;
+            if ([plist[@"Disabled"] isKindOfClass:NSNumber.class])
+                onDiskDisabled = [plist[@"Disabled"] boolValue] ? 1 : 0;
         }
         if (matches != 1) return ENOENT;
         return 0;
     }];
     [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
-        [NSString stringWithFormat:@"SSH socket plist: result=%d sockets=%lu listeners=%d inetd_wait=%d (minus one=unknown)",
-         preflight, (unsigned long)socketCount, listeners, onDiskWait]];
+        [NSString stringWithFormat:@"SSH socket plist: result=%d sockets=%lu port22=%lu port2222=%lu disabled=%d inetd_wait=%d (minus one=unknown)",
+         preflight, (unsigned long)socketCount, (unsigned long)port22Count,
+         (unsigned long)port2222Count, onDiskDisabled, onDiskWait]];
     if (preflight) return [self rh3ActionStage:@"SSH socket plist diagnosis" result:preflight];
 
     NSString *binary = [root stringByAppendingPathComponent:@"usr/bin/launchctl"];
@@ -1139,22 +1188,18 @@ static NSString *RH3SSHPrintScalar(NSString *text, NSString *field, BOOL numeric
     NSString *lastExit = RH3SSHPrintScalar(output, @"last exit code", YES);
     NSString *lastSignal = RH3SSHPrintScalar(output, @"last terminating signal", YES);
     NSString *servicePID = RH3SSHPrintScalar(output, @"pid", YES);
-    BOOL programSeen = NO, programMatchesRoot = NO;
-    NSString *programPrefix = @"program = ";
-    for (NSString *line in [output componentsSeparatedByCharactersInSet:NSCharacterSet.newlineCharacterSet]) {
-        NSString *trimmed = [line stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
-        if ([trimmed hasPrefix:programPrefix]) {
-            programSeen = YES;
-            programMatchesRoot = [[trimmed substringFromIndex:programPrefix.length]
-                isEqualToString:[root stringByAppendingPathComponent:@"usr/sbin/sshd"]];
-            break;
-        }
-    }
+    NSString *programClass = RH3SSHPrintPathClass(output, @"program", root, @"usr/sbin/sshd");
+    NSString *originClass = RH3SSHPrintPathClass(output, @"path", root, @"Library/LaunchDaemons/com.openssh.sshd.plist");
+    // These booleans reflect the human launchctl output only, not whether
+    // dyld successfully executed sshd. Neither expected path is logged.
+    BOOL configArgSeen = [output containsString:[root stringByAppendingPathComponent:@"etc/ssh/sshd_config"]];
+    BOOL keyArgSeen = [output containsString:[root stringByAppendingPathComponent:@"etc/ssh/ssh_host_ed25519_key"]];
     [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
-        [NSString stringWithFormat:@"SSH socket launchctl: spawn=0 exit=%d timed_out=%d read_errno=%d bytes=%lu truncated=%d output_limit=%d state=%@ runs=%@ last_exit=%@ last_signal=%@ pid_present=%d program_seen=%d program_rooted=%d sockets_mentioned=%d (read-only)",
+        [NSString stringWithFormat:@"SSH socket launchctl: spawn=0 exit=%d timed_out=%d read_errno=%d bytes=%lu truncated=%d output_limit=%d state=%@ runs=%@ last_exit=%@ last_signal=%@ pid_present=%d program_class=%@ origin_class=%@ config_arg_seen=%d key_arg_seen=%d sockets_mentioned=%d (read-only)",
          exitCode, timedOut, readError, (unsigned long)capture.length, capped,
          outputLimit, state, runs, lastExit, lastSignal,
-         ![servicePID isEqualToString:@"unknown"], programSeen, programMatchesRoot,
+         ![servicePID isEqualToString:@"unknown"], programClass, originClass,
+         configArgSeen, keyArgSeen,
          [output containsString:@"sockets ="] || [output containsString:@"Sockets ="]]];
     // Preserve command failure separately from the *service's* last exit.
     int code = timedOut ? ETIMEDOUT : outputLimit ? EOVERFLOW : readError ? readError : exitCode < 0 ? ECHILD : exitCode;
