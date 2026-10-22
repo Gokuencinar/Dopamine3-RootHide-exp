@@ -37,6 +37,7 @@
 #import "DOPreferenceManager.h"
 #import "RootHideAppRegistration.h"
 #import "RootHideScriptWait.h"
+#import "RH3TweakToggle.h"
 #import <CoreServices/LSApplicationProxy.h>
 #import <libjailbreak/roothider.h>
 #import "NSData+Hex.h"
@@ -2274,6 +2275,14 @@ static BOOL RH3SSHValidateSingleSocket(id entry, NSUInteger *port22, NSUInteger 
             }
             if (errno != ENOENT) return errno;
             markerPresent = NO;
+            NSString *secondary = [@"/private/var/mobile/Containers/Shared/AppGroup"
+                                   stringByAppendingPathComponent:root.lastPathComponent];
+            bool watchdogLatched = true;
+            int latchResult = rh3_tweak_watchdog_latched(root.fileSystemRepresentation,
+                                                        secondary.fileSystemRepresentation,
+                                                        &watchdogLatched);
+            if (latchResult) return latchResult;
+            if (watchdogLatched) markerPresent = YES;
             return 0;
         }];
         if (result) {
@@ -2289,8 +2298,12 @@ static BOOL RH3SSHValidateSingleSocket(id entry, NSUInteger *port22, NSUInteger 
 {
     NSString *safeModePath = JBROOT_PATH(@"/basebin/.safe_mode");
     if ([DOBootstrapper rootHidePortEnabled]) {
-        // A toggle is not a successful change unless the verified file was
-        // actually removed/created. No silent failures or unbounded shell.
+        // Never modify the protected marker from a running Settings action,
+        // even if the app unexpectedly retains CS_INSTALLER. A watchdog panic
+        // can race with a direct unlink/clear. Only the next controlled
+        // installer phase (before PID 1 injection) may apply this request.
+        __block BOOL stagedPending = NO;
+        __block BOOL unchanged = NO;
         int status = [self rh3PerformPrivilegedAction:^int {
             NSError *rootError = nil;
             NSString *root = [DOBootstrapper rootHideExistingRootWithError:&rootError];
@@ -2301,32 +2314,43 @@ static BOOL RH3SSHValidateSingleSocket(id entry, NSUInteger *port22, NSUInteger 
                 ![RH3CanonicalAppPath(safeModePath) isEqualToString:
                   RH3CanonicalAppPath([root stringByAppendingPathComponent:@"basebin/.safe_mode"])])
                 return EPERM;
+            NSString *secondary = [@"/private/var/mobile/Containers/Shared/AppGroup"
+                                   stringByAppendingPathComponent:root.lastPathComponent];
             struct stat info = {0};
             int exists = lstat(safeModePath.fileSystemRepresentation, &info) == 0;
-            if (!exists && errno != ENOENT) return errno;
+            if (!exists && errno != ENOENT) {
+                int markerErrno = errno;
+                [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
+                    [NSString stringWithFormat:@"tweaks: marker unreadable, result=%d; refused", markerErrno]];
+                return markerErrno;
+            }
             if (exists && (!S_ISREG(info.st_mode) || info.st_uid != 0))
                 return EPERM;
-            if (enabled) {
-                if (exists && unlink(safeModePath.fileSystemRepresentation) != 0)
-                    return errno;
-            } else if (!exists) {
-                int fd = open(safeModePath.fileSystemRepresentation,
-                              O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0644);
-                if (fd < 0) return errno;
-                if (close(fd)) return errno;
+            bool watchdogLatched = true;
+            int latchResult = rh3_tweak_watchdog_latched(root.fileSystemRepresentation,
+                                                        secondary.fileSystemRepresentation,
+                                                        &watchdogLatched);
+            if (latchResult) return latchResult;
+            // No protected file operation. Request is confined to this
+            // jbrand's pinned, root-owned AppGroup/var directory.
+            BOOL needsChange = enabled ? (exists || watchdogLatched) : !exists;
+            int pendingResult = needsChange
+                ? rh3_tweak_request_stage(root.fileSystemRepresentation,
+                                          secondary.fileSystemRepresentation, enabled)
+                : rh3_tweak_request_cancel(root.fileSystemRepresentation,
+                                           secondary.fileSystemRepresentation);
+            if (pendingResult) return pendingResult;
+            if (needsChange) {
+                stagedPending = YES;
+                [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
+                    @"tweaks: request persisted in AppGroup; protected safe-mode marker unchanged"];
+            } else {
+                unchanged = YES;
             }
-            struct stat after = {0};
-            int remaining = lstat(safeModePath.fileSystemRepresentation, &after);
-            int verified = enabled ? (remaining == -1 && errno == ENOENT ? 0 : EIO) :
-                (remaining == 0 && S_ISREG(after.st_mode) && after.st_uid == 0 ? 0 : EIO);
-            if (verified) return verified;
-            int dir = open([root stringByAppendingPathComponent:@"basebin"].fileSystemRepresentation,
-                           O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
-            if (dir < 0) return errno;
-            int synced = fsync(dir) == 0 ? 0 : errno;
-            close(dir);
-            return synced;
+            return 0;
         }];
+        if (status == 0 && stagedPending) status = EINPROGRESS;
+        if (status == 0 && unchanged) status = EALREADY;
         return [self rh3ActionStage:enabled ? @"enable tweak injection" : @"disable tweak injection"
                                   result:status];
     }
@@ -2343,6 +2367,27 @@ static BOOL RH3SSHValidateSingleSocket(id entry, NSUInteger *port22, NSUInteger 
         }];
     }
     return 0;
+}
+
+- (int)cancelRootHideTweakInjectionRequest
+{
+    if (![DOBootstrapper rootHidePortEnabled]) return ENOTSUP;
+    int status = [self rh3PerformPrivilegedAction:^int {
+        NSError *rootError = nil;
+        NSString *root = [DOBootstrapper rootHideExistingRootWithError:&rootError];
+        const char *serverRoot = jbclient_get_jbroot();
+        if (rootError || !root || !serverRoot ||
+            ![RH3CanonicalAppPath(root) isEqualToString:
+              RH3CanonicalAppPath([NSString stringWithUTF8String:serverRoot])])
+            return EPERM;
+        NSString *secondary = [@"/private/var/mobile/Containers/Shared/AppGroup"
+                               stringByAppendingPathComponent:root.lastPathComponent];
+        // Explicit cancel of the single pending leaf, never the effective
+        // .safe_mode marker or watchdog latch. The helper pins both roots.
+        return rh3_tweak_request_cancel(root.fileSystemRepresentation,
+                                        secondary.fileSystemRepresentation);
+    }];
+    return [self rh3ActionStage:@"cancel pending tweak request" result:status];
 }
 
 - (BOOL)isIDownloadEnabled

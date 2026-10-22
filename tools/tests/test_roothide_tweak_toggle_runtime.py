@@ -33,14 +33,15 @@ class RuntimeTweakSwitch(unittest.TestCase):
         self.assertIn('launchd: first activation; no-tweak mode enforced', hook)
         self.assertIn('launchd: existing bootstrap; saved no-tweak marker present=', hook)
 
-    def test_toggle_checks_error_and_never_reboots_if_marker_not_updated(self):
+    def test_toggle_stages_only_and_never_reboots_while_pending(self):
         env = (ROOT / "Application/Dopamine/Jailbreak/DOEnvironmentManager.m").read_text(encoding="utf-8")
         body = env.split("- (int)setTweakInjectionEnabled:", 1)[1].split(
             "- (BOOL)isIDownloadEnabled", 1)[0]
         self.assertIn('rh3PerformPrivilegedAction:', body)
-        self.assertIn('O_CREAT | O_EXCL | O_NOFOLLOW', body)
+        self.assertIn('rh3_tweak_request_stage', body)
         self.assertIn('S_ISREG(info.st_mode) || info.st_uid != 0', body)
-        self.assertIn('unlink(safeModePath.fileSystemRepresentation)', body)
+        self.assertNotIn('unlink(safeModePath.fileSystemRepresentation)', body)
+        self.assertIn('if (status == 0 && stagedPending) status = EINPROGRESS', body)
         self.assertIn('return [self rh3ActionStage:', body)
         ui = (ROOT / "Application/Dopamine/UI/Settings/DOSettingsController.m").read_text(encoding="utf-8")
         setting = ui.split("- (void)setTweakInjectionEnabled:", 1)[1].split(
@@ -50,6 +51,8 @@ class RuntimeTweakSwitch(unittest.TestCase):
                         setting.index('rebootUserspace'))
         self.assertIn('No se cambió la inyección', setting)
         self.assertIn('setPreferenceValue:@(envManager.isTweakInjectionEnabled)', setting)
+        self.assertIn('status == EINPROGRESS', setting)
+        self.assertLess(setting.index('status == EINPROGRESS'), setting.index('rebootUserspace'))
 
     def test_runtime_diagnostics_are_read_only_and_exclude_private_values(self):
         env = (ROOT / "Application/Dopamine/Jailbreak/DOEnvironmentManager.m").read_text(encoding="utf-8")

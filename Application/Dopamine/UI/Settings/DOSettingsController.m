@@ -247,6 +247,18 @@ static BOOL gRootHideProviderRepairInFlight = NO;
             [tweakInjectionSpecifier setProperty:@"tweakInjectionEnabled" forKey:@"key"];
             [tweakInjectionSpecifier setProperty:@YES forKey:@"default"];
             [specifiers addObject:tweakInjectionSpecifier];
+            if ([DOBootstrapper rootHidePortEnabled] && envManager.isJailbroken) {
+                // The switch displays only EFFECTIVE state. Expose a
+                // separate way to cancel a staged, unapplied choice even
+                // when the switch has returned to its original position.
+                PSSpecifier *cancelTweaks = [PSSpecifier preferenceSpecifierNamed:@"Cancelar solicitud pendiente de tweaks"
+                    target:self set:defSetter get:defGetter detail:nil cell:PSStaticTextCell edit:nil];
+                [cancelTweaks setProperty:[DOButtonCell class] forKey:@"cellClass"];
+                [cancelTweaks setProperty:buttonHeight forKey:@"height"];
+                [cancelTweaks setProperty:@"xmark.circle" forKey:@"image"];
+                [cancelTweaks setProperty:@"cancelRootHideTweakRequestPressed" forKey:@"action"];
+                [specifiers addObject:cancelTweaks];
+            }
             
             if (!envManager.isJailbroken) {
                 PSSpecifier *verboseLogSpecifier = [PSSpecifier preferenceSpecifierNamed:DOLocalizedString(@"Settings_Verbose_Logs") target:self set:defSetter get:defGetter detail:nil cell:PSSwitchCell edit:nil];
@@ -545,6 +557,24 @@ static BOOL gRootHideProviderRepairInFlight = NO;
     DOEnvironmentManager *envManager = [DOEnvironmentManager sharedManager];
     if (envManager.isJailbroken) {
         int status = [envManager setTweakInjectionEnabled:((NSNumber *)value).boolValue];
+        if ([DOBootstrapper rootHidePortEnabled] && status == EINPROGRESS) {
+            // Bundle/Application is sealed again after the installer phase.
+            // Keep displaying the ACTUAL state; the opt-in request is stored
+            // in the validated writable RootHide AppGroup, not applied yet.
+            [self setPreferenceValue:@(envManager.isTweakInjectionEnabled) specifier:specifier];
+            UIAlertController *pending = [UIAlertController alertControllerWithTitle:@"Cambio guardado para el próximo jailbreak"
+                message:@"La opción se ha guardado de forma reversible. Puedes cancelar la petición desde el botón «Cancelar solicitud pendiente de tweaks» en estos ajustes. RootHide conserva el modo seguro actual hasta la siguiente fase de jailbreak con permisos de instalación; no se realizará un reinicio de espacio de usuario ahora."
+                preferredStyle:UIAlertControllerStyleAlert];
+            [pending addAction:[UIAlertAction actionWithTitle:@"Aceptar" style:UIAlertActionStyleCancel handler:nil]];
+            [self presentViewController:pending animated:YES completion:nil];
+            return;
+        }
+        if ([DOBootstrapper rootHidePortEnabled] && status == EALREADY) {
+            // Requested effective state already holds. The stale request,
+            // if any, has been cancelled; there is nothing to reboot.
+            [self setPreferenceValue:@(envManager.isTweakInjectionEnabled) specifier:specifier];
+            return;
+        }
         if ([DOBootstrapper rootHidePortEnabled] && status) {
             [self setPreferenceValue:@(envManager.isTweakInjectionEnabled) specifier:specifier];
             UIAlertController *failed = [UIAlertController alertControllerWithTitle:@"No se cambió la inyección"
@@ -736,6 +766,30 @@ static BOOL gRootHideProviderRepairInFlight = NO;
 }
 
 #pragma mark - Button Actions
+
+- (void)cancelRootHideTweakRequestPressed
+{
+    UIAlertController *confirm = [UIAlertController alertControllerWithTitle:@"Cancelar solicitud pendiente"
+        message:@"Se cancelará únicamente la petición de cambio de tweaks aún sin aplicar. El modo seguro efectivo y la marca del watchdog permanecerán intactos."
+        preferredStyle:UIAlertControllerStyleAlert];
+    [confirm addAction:[UIAlertAction actionWithTitle:@"Conservar" style:UIAlertActionStyleCancel handler:nil]];
+    [confirm addAction:[UIAlertAction actionWithTitle:@"Cancelar solicitud" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
+        dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            int status = [[DOEnvironmentManager sharedManager] cancelRootHideTweakInjectionRequest];
+            dispatch_async(dispatch_get_main_queue(), ^{
+                NSString *message = status
+                    ? [NSString stringWithFormat:@"No se pudo cancelar la solicitud (código %d). El modo seguro no se ha cambiado.", status]
+                    : @"Solicitud pendiente cancelada (si existía). El estado efectivo de los tweaks no se ha modificado; no se realizará ningún reinicio.";
+                UIAlertController *result = [UIAlertController alertControllerWithTitle:
+                    status ? @"Cancelación no confirmada" : @"Solicitud cancelada"
+                    message:message preferredStyle:UIAlertControllerStyleAlert];
+                [result addAction:[UIAlertAction actionWithTitle:@"Aceptar" style:UIAlertActionStyleCancel handler:nil]];
+                [self presentViewController:result animated:YES completion:nil];
+            });
+        });
+    }]];
+    [self presentViewController:confirm animated:YES completion:nil];
+}
 
 - (void)verifyRootHideTweaksPressed
 {

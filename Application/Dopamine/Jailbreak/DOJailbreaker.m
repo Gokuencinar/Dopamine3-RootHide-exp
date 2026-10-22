@@ -9,6 +9,7 @@
 #import "RootHideBootstrapProfile.h"
 #import "RootHideAppRegistration.h"
 #import "RootHideScriptWait.h"
+#import "RH3TweakToggle.h"
 #import "DOEnvironmentManager.h"
 #import "DOExploitManager.h"
 #import "DOUIManager.h"
@@ -82,6 +83,98 @@ typedef NS_ENUM(NSInteger, JBErrorCode) {
 
 @implementation RH3BoomerangContext
 @end
+
+// A running sandboxed app cannot safely unlink .safe_mode in the protected
+// Bundle/Application bootstrap (r172: EPERM). Only apply an *explicit* staged
+// choice while the jailbreak installer identity is already active. Do not
+// elevate CS flags or silently reinterpret the old tweak preference here.
+static int RH3ApplyStagedTweakChoice(NSString *root)
+{
+    if (!root || ![DOBootstrapper rootHideBrandForPath:root] ||
+        !gSystemInfo.jailbreakInfo.rootPath ||
+        ![root isEqualToString:@(gSystemInfo.jailbreakInfo.rootPath)]) return EPERM;
+    NSString *installed = [root stringByAppendingPathComponent:@".installed_roothide3"];
+    struct stat installedInfo = {0};
+    if (lstat(installed.fileSystemRepresentation, &installedInfo) != 0) {
+        // The first installation always forces safe mode; no implicit opt-in.
+        return errno == ENOENT ? 0 : errno;
+    }
+    if (!S_ISREG(installedInfo.st_mode) || installedInfo.st_uid != 0 ||
+        ![[NSString stringWithContentsOfFile:installed encoding:NSUTF8StringEncoding
+                                           error:nil] isEqualToString:@"3"]) return EPERM;
+
+    NSString *secondary = [@"/var/mobile/Containers/Shared/AppGroup"
+                           stringByAppendingPathComponent:root.lastPathComponent];
+    bool enable = false;
+    int status = rh3_tweak_request_read(root.fileSystemRepresentation,
+                                       secondary.fileSystemRepresentation, &enable);
+    if (status == ENOENT) return 0;
+    BOOL invalidRequest = status == EINVAL || status == EPERM;
+    if (status && !invalidRequest) return status;
+    if (invalidRequest) {
+        // A malformed request must never enable tweaks or permanently strand
+        // an otherwise verified jailbreak. First revalidate the writable
+        // parent independently: a damaged root/AppGroup backlink still aborts.
+        int verifiedDir = -1;
+        int parentStatus = rh3_tweak_open_request_dir(root.fileSystemRepresentation,
+                                                     secondary.fileSystemRepresentation,
+                                                     &verifiedDir);
+        if (parentStatus) return parentStatus;
+        close(verifiedDir);
+        enable = false; // Restore protected safe mode, leave bad request untouched.
+    }
+    uint32_t flags = 0;
+    if (geteuid() != 0 || getegid() != 0 ||
+        csops(getpid(), CS_OPS_STATUS, &flags, sizeof(flags)) != 0 ||
+        !(flags & CS_INSTALLER) || !(flags & CS_PLATFORM_BINARY)) return EPERM;
+
+    NSString *basebinPath = [root stringByAppendingPathComponent:@"basebin"];
+    int basebin = open(basebinPath.fileSystemRepresentation,
+                       O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (basebin < 0) return errno;
+    struct stat parent = {0};
+    status = fstat(basebin, &parent) ? errno : 0;
+    if (!status && (!S_ISDIR(parent.st_mode) || parent.st_uid != 0 ||
+                    (parent.st_mode & 0022))) status = EPERM;
+    struct stat marker = {0};
+    bool exists = false;
+    if (!status) {
+        if (fstatat(basebin, ".safe_mode", &marker, AT_SYMLINK_NOFOLLOW) == 0) {
+            exists = true;
+            if (!S_ISREG(marker.st_mode) || marker.st_uid != 0 || marker.st_nlink != 1)
+                status = EPERM;
+        } else if (errno != ENOENT) status = errno;
+    }
+    if (!status && enable && exists && unlinkat(basebin, ".safe_mode", 0)) status = errno;
+    if (!status && !enable && !exists) {
+        int fd = openat(basebin, ".safe_mode",
+                        O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0644);
+        if (fd < 0) status = errno;
+        else {
+            if (fchmod(fd, 0644) != 0) status = errno;
+            if (!status && fsync(fd)) status = errno;
+            if (close(fd) && !status) status = errno;
+        }
+    }
+    if (!status && fsync(basebin)) status = errno;
+    if (close(basebin) && !status) status = errno;
+    if (status) return status;
+
+    // Watchdog's post-boot safe-mode latch is under writable AppGroup/var.
+    // Only explicit enable in this verified installer phase may remove it.
+    if (enable) {
+        status = rh3_tweak_watchdog_clear(root.fileSystemRepresentation,
+                                         secondary.fileSystemRepresentation);
+        if (status) return status;
+    }
+    if (invalidRequest) {
+        [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
+            @"tweaks: invalid pending request; safe-mode marker enforced, request retained for explicit replacement"];
+        return 0;
+    }
+    return rh3_tweak_request_cancel(root.fileSystemRepresentation,
+                                   secondary.fileSystemRepresentation);
+}
 
 @implementation DOJailbreaker
 
@@ -1022,6 +1115,22 @@ static void *rh3_boomerang_server(void *opaque)
     }
     if ([DOBootstrapper rootHidePortEnabled])
         [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:@"phase: hidden bootstrap prepared"];
+    if ([DOBootstrapper rootHidePortEnabled] && !removeJailbreakEnabled) {
+        NSString *activeRoot = gSystemInfo.jailbreakInfo.rootPath ?
+            @(gSystemInfo.jailbreakInfo.rootPath) : nil;
+        int requestedTweakState = RH3ApplyStagedTweakChoice(activeRoot);
+        [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
+            [NSString stringWithFormat:@"tweaks: staged installer-phase transition result=%d",
+             requestedTweakState]];
+        if (requestedTweakState) {
+            *errOut = [NSError errorWithDomain:JBErrorDomain
+                                         code:JBErrorCodeFailedLaunchdInjection
+                                     userInfo:@{NSLocalizedDescriptionKey:
+                                         [NSString stringWithFormat:@"Unsafe or incomplete RootHide tweak-mode change (%d); no launchd injection attempted", requestedTweakState]}];
+            [self cleanUpPostExploitation];
+            return;
+        }
+    }
     if ([DOBootstrapper rootHidePortEnabled]) {
         setenv("PATH", "/sbin:/bin:/usr/sbin:/usr/bin:/rootfs/sbin:/rootfs/bin:/rootfs/usr/sbin:/rootfs/usr/bin", 1);
     }

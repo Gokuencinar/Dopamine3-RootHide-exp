@@ -11,7 +11,7 @@ La nueva candidata elimina el filtro de CPU arm64e y contempla iOS 15, 16, 17, 1
 3. Refírmala con AltStore u otro instalador compatible. La IPA lleva firma ad hoc; todavía no se ha probado la instalación con estos servicios.
 4. Abre la app y comprueba la compatibilidad antes de pulsar Jailbreak.
 
-Cada intento empieza sin tweaks. Si termina bien, puedes solicitar la inyección desde los ajustes de la app y reiniciar el espacio de usuario. Ese paso tampoco está probado en hardware.
+La primera instalación empieza sin tweaks. En posteriores activaciones se conserva el modo seguro efectivo; el cambio de inyección puede requerir una nueva fase de jailbreak con permisos de instalación. No interpretes una solicitud pendiente como activación efectiva. Este flujo nuevo tampoco está probado en hardware.
 
 La instalación inicial incluye RootHide Manager y los gestores que selecciones: Sileo y, opcionalmente, Zebra. No incluye arm64ePatcher.
 
@@ -521,3 +521,55 @@ que el proceso `sshd` sobreviva a spawn/dyld ni que responda el banner. El
 último `renameat` tampoco es un CAS frente a un `dpkg` concurrente. En
 consecuencia, ni SSH ni los gestores deben declararse funcionales por los
 tests de host o por una compilación nativa exitosa.
+
+### Integración posterior a r172: solicitud explícita de tweaks y dyld acotado
+
+Los registros físicos de r172 muestran `safe_mode=1` y que «Habilitar inyección»
+devolvió `EPERM` (`result=1`). El bootstrap primario se conserva dentro de
+`Bundle/Application` y deja de ser escribible cuando termina `CS_INSTALLER`.
+La raíz secundaria `AppGroup/.jbroot-<jbrand>/var` permite guardar una petición
+pendiente sin alterar el marcador protegido, ni declarar un reinicio como
+solución de un cambio todavía no aplicado.
+
+En esta revisión el interruptor crea o cancela una solicitud de una sola opción,
+root-owned, `0600` y de contenido acotado, dentro de la secundaria enlazada al
+root verificado. La interfaz devuelve el estado real y señala cuándo la
+solicitud **sigue pendiente**. Únicamente la siguiente activación autorizada del
+jailbreak, tras preparar el bootstrap y mientras la aplicación conserva
+`CS_INSTALLER` y `CS_PLATFORM_BINARY`, puede aplicarla a `basebin/.safe_mode`.
+La primera instalación mantiene modo seguro; un latch del watchdog en AppGroup
+también obliga a deshabilitar tweaks hasta una habilitación explícita, nunca
+se borra silenciosamente tras un panic. Los errores interrumpen la activación
+antes de modificar PID 1 y dejan el estado disponible para recuperación.
+
+Para posibles hijos RootHide lanzados directamente por PID 1 se añade un ajuste
+**restringido** de `DYLD_IN_CACHE=0`: solo las rutas exactas `sshd`, `login` y
+los tres gestores dentro de la raíz activa, después de verificar la procedencia
+del hook y la presencia de `systemhook.dylib` en el entorno. Se conserva el resto
+del entorno y quedan fuera `xpcproxy`, hijos de otras raíces y aplicaciones no
+enumeradas. No se suspenden hijos ni se invoca XPC síncrono desde launchd.
+
+**Límites de esta integración:** `xpcproxy` puede arrancar Zebra/Sileo por un
+camino distinto y NewTerm crea `login` desde su propia app, no necesariamente
+desde PID 1. El plist OpenSSH ya se observó correctamente importado en r172,
+pero no hay evidencia de que el proceso produzca un banner `SSH-2.0`.
+Las pruebas host de esta revisión no comprueban dyld, trustcache ni la política
+del kernel en el teléfono. El resultado de Xcode, el paquete íntegro y la
+ejecución física se consignarán por separado; no instalar ni repetir pruebas
+solo por haber pasado tests de host.
+
+El botón **Cancelar solicitud pendiente de tweaks** está disponible en Ajustes
+cuando RootHide está activo. Cancela únicamente el archivo de solicitud en
+AppGroup sin cambiar el modo seguro real, el latch del watchdog ni reiniciar
+servicios. Incluso si la app aún tiene `CS_INSTALLER`, un cambio desde Ajustes
+**se guarda siempre como solicitud**, nunca elimina el marcador protegido:
+la única aplicación del cambio ocurre antes de la nueva inyección de PID 1,
+evitando competir con un panic del watchdog durante la sesión actual.
+
+Si una solicitud pendiente contiene bytes o metadatos inválidos, la fase
+instaladora únicamente puede forzar el modo seguro (sin inyectar tweaks), y
+conserva el archivo para un reemplazo explícito posterior desde Ajustes. El
+directorio secundario y su enlace deben seguir pasando la validación estricta;
+los fallos de I/O o de identidad del bootstrap continúan abortando sin iniciar
+la inyección de PID 1. Una nueva elección sustituye atómicamente solo el nombre
+reservado para la solicitud; no sigue enlaces ni modifica otros archivos.

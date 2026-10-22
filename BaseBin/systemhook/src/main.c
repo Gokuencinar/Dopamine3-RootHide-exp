@@ -233,6 +233,16 @@ int csops_audittoken_hook(pid_t pid, unsigned int ops, void *useraddr, size_t us
 
 bool should_enable_tweaks(void)
 {
+	// When watchdog intercepts a userspace panic, it must disable injection
+	// without needing CS_INSTALLER to write into Bundle/Application/basebin.
+	// The dedicated marker lives in the already linked AppGroup/var storage.
+	// A denied/malformed lookup fails closed, never enables injected tweaks.
+	if (systemhook_is_roothide_root_path(get_jbroot())) {
+		struct stat watchdogInfo = {0};
+		if (lstat(JBROOT_PATH("/var/.roothide3-watchdog-safe-mode"), &watchdogInfo) == 0)
+			return false;
+		if (errno != ENOENT) return false;
+	}
 	// Treat any stat error except ENOENT as safe mode, not as permission
 	// to load tweaks. On RootHide the marker can be hidden from a sandbox.
 	struct stat safeInfo = {0};

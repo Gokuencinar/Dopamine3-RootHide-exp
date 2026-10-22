@@ -104,6 +104,99 @@ void ensure_fakelib_mounted(void)
 	}
 }
 
+// RootHide 2 used private dyld mappings for injected launchd children. The
+// shared Dopamine 3 spawn helper deliberately omits DYLD_IN_CACHE=0 in PID 1.
+// Restore that environment contract only for known executables *inside* the
+// verified hidden root. This does not suspend children or ask PID 1 to make a
+// synchronous jailbreakd/XPC request (which can deadlock launchd).
+static bool rh3_pid1_private_dyld_target(const char *path)
+{
+	if (getpid() != 1 || !path || gInEarlyBoot || launchdhookFirstLoad ||
+	    !roothide_is_active() || !roothide_launchdhook_origin_verified()) return false;
+	const char *root = get_jbroot();
+	if (!root) return false;
+	size_t rootLen = strlen(root);
+	if (rootLen == 0 || rootLen >= PATH_MAX || strncmp(path, root, rootLen)) return false;
+	const char *relative = path + rootLen;
+	if (*relative != '/') return false;
+	return !strcmp(relative, "/usr/sbin/sshd") ||
+	       !strcmp(relative, "/usr/bin/login") ||
+	       !strcmp(relative, "/bin/login") ||
+	       !strcmp(relative, "/Applications/Sileo.app/Sileo") ||
+	       !strcmp(relative, "/Applications/Zebra.app/Zebra") ||
+	       !strcmp(relative, "/Applications/RootHide.app/RootHide");
+}
+
+// Search a colon-delimited dyld insert list by exact path, never substring:
+// an unrelated library or an old randomized RootHide root is not sufficient.
+static bool rh3_pid1_has_private_systemhook(char *const envp[])
+{
+	const char *hook = JBROOT_PATH("/basebin/systemhook.dylib");
+	if (!hook) return false;
+	size_t hookLen = strlen(hook);
+	static const char prefix[] = "DYLD_INSERT_LIBRARIES=";
+	for (size_t i = 0; envp && envp[i] && i < 4096; i++) {
+		if (strncmp(envp[i], prefix, sizeof(prefix) - 1)) continue;
+		const char *entry = envp[i] + sizeof(prefix) - 1;
+		while (*entry) {
+			const char *end = strchr(entry, ':');
+			size_t length = end ? (size_t)(end - entry) : strlen(entry);
+			if (length == hookLen && !memcmp(entry, hook, hookLen)) return true;
+			if (!end) break;
+			entry = end + 1;
+		}
+	}
+	return false;
+}
+
+// Caller owns *ownedEnv when non-NULL. Preserve every unrelated entry and
+// replace any DYLD_IN_CACHE assignments with one unambiguous value.
+static int rh3_pid1_prepare_private_dyld_env(const char *path,
+					      struct _posix_spawn_args_desc *desc,
+					      char *const envp[], char ***ownedEnv)
+{
+	*ownedEnv = NULL;
+	if (!rh3_pid1_private_dyld_target(path) || !envp)
+		return 0;
+	// A NULL descriptor or attrp is a valid posix_spawn request with default
+	// attributes, not a reason to skip an otherwise verified RootHide child.
+	// Only inspect SETEXEC/driver properties when explicit attributes exist.
+	if (desc && desc->attrp) {
+		posix_spawnattr_t attributes = desc->attrp;
+		short flags = 0;
+		if (posix_spawnattr_getflags(&attributes, &flags) != 0 ||
+		    (flags & POSIX_SPAWN_SETEXEC)) return 0;
+		int type = 0;
+		if (posix_spawnattr_getprocesstype_np(&attributes, &type) == 0 &&
+		    type == POSIX_SPAWN_PROC_TYPE_DRIVER) return 0;
+	}
+	if (!rh3_pid1_has_private_systemhook(envp)) return 0;
+
+	static const char cacheKey[] = "DYLD_IN_CACHE=";
+	static char cacheValue[] = "DYLD_IN_CACHE=0";
+	size_t count = 0, cacheCount = 0;
+	bool alreadyZero = false;
+	while (envp[count]) {
+		if (++count > 4096) return E2BIG;
+		if (!strncmp(envp[count - 1], cacheKey, sizeof(cacheKey) - 1)) {
+			cacheCount++;
+			alreadyZero = !strcmp(envp[count - 1], cacheValue);
+		}
+	}
+	if (cacheCount == 1 && alreadyZero) return 0;
+	char **result = calloc(count + 2, sizeof(*result));
+	if (!result) return ENOMEM;
+	size_t used = 0;
+	for (size_t i = 0; i < count; i++) {
+		if (!strncmp(envp[i], cacheKey, sizeof(cacheKey) - 1)) continue;
+		result[used++] = envp[i];
+	}
+	result[used++] = cacheValue;
+	result[used] = NULL;
+	*ownedEnv = result;
+	return 0;
+}
+
 int __posix_spawn_orig_wrapper(pid_t *restrict pid, const char *restrict path,
 					   struct _posix_spawn_args_desc *desc,
 					   char *const argv[restrict],
@@ -127,12 +220,23 @@ int __posix_spawn_orig_wrapper(pid_t *restrict pid, const char *restrict path,
 		         !strcmp(path, "/usr/libexec/xpcproxy"));
 		rh3_bootlog(stage);
 	}
+	char **privateDyldEnv = NULL;
+	int envResult = rh3_pid1_prepare_private_dyld_env(path, desc, envp, &privateDyldEnv);
+	if (envResult) return envResult;
 	// we need to disable the crash reporter during the orig call
 	// otherwise the child process inherits the exception ports
 	// and this would trip jailbreak detections
 	crashreporter_pause();	
-	int r = __posix_spawn_inline(recordedPid, path, desc, argv, envp);
+	int r = __posix_spawn_inline(recordedPid, path, desc, argv,
+	                             privateDyldEnv ? privateDyldEnv : envp);
 	crashreporter_resume();
+	if (privateDyldEnv) {
+		free(privateDyldEnv);
+		char stage[96];
+		snprintf(stage, sizeof(stage), "PID1 private dyld: spawn_result=%d pid=%d", r,
+		         r == 0 ? *recordedPid : 0);
+		rh3_bootlog(stage);
+	}
 	if (manager) {
 		char stage[160];
 		snprintf(stage, sizeof(stage), "manager launch %s: spawn_result=%d pid=%d", manager, r, *recordedPid);

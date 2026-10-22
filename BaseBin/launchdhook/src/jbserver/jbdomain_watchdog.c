@@ -7,6 +7,7 @@
 #include <unistd.h>
 #include <time.h>
 #include <libjailbreak/util.h>
+#include <libjailbreak/roothider.h>
 #include "../crashreporter.h"
 
 static bool watchdog_domain_allowed(audit_token_t clientToken)
@@ -28,16 +29,41 @@ static int watchdog_intercept_userspace_panic(const char *panicMessage)
 	}
 
 	setenv("WATCHDOG_PANIC_MESSAGE", panicMessage, 1);
-	// Never truncate or follow a symlink in PID 1 on a crash-sensitive path.
-	// The userspace reboot is only allowed after the no-tweak marker is durable.
-	int markerFD = open(JBROOT_PATH("/basebin/.safe_mode"),
-	                    O_WRONLY | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0644);
-	if (markerFD < 0) return errno;
+    // The RootHide primary bootstrap is an iOS app Bundle/Application
+    // directory: after the installer phase it can reject marker creation
+    // with EPERM. Persist a separate, root-owned watchdog latch under the
+    // existing writable AppGroup/var mapping instead. systemhook reads it
+    // in addition to the legacy basebin marker; neither is cleared except
+    // by an explicit, verified installer-phase user request.
+    bool hiddenRoot = roothide_is_active();
+    int parent = -1;
+    if (hiddenRoot) {
+        parent = open(JBROOT_PATH("/var"), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        if (parent < 0) return errno;
+        struct stat directory = {0};
+        int problem = fstat(parent, &directory) ? errno :
+            (!S_ISDIR(directory.st_mode) || directory.st_uid != 0 ||
+             (directory.st_mode & 0022) ? EPERM : 0);
+        if (problem) { close(parent); return problem; }
+    }
+    // Preserve the stock Dopamine path. On RootHide openat pins a verified
+    // writable directory and never follows a symlink for the marker itself.
+    int markerFD = hiddenRoot ?
+        openat(parent, ".roothide3-watchdog-safe-mode",
+               O_WRONLY | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600) :
+        open(JBROOT_PATH("/basebin/.safe_mode"),
+             O_WRONLY | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0644);
+    if (markerFD < 0) { int failure = errno; if (parent >= 0) close(parent); return failure; }
 	struct stat markerInfo = {0};
 	int markerError = fstat(markerFD, &markerInfo) ? errno :
-	    (!S_ISREG(markerInfo.st_mode) || markerInfo.st_uid != 0 ? EPERM : 0);
+        (!S_ISREG(markerInfo.st_mode) || markerInfo.st_uid != 0 ||
+         markerInfo.st_nlink != 1 ||
+         (hiddenRoot && ((markerInfo.st_mode & 0077) || markerInfo.st_size != 0))
+          ? EPERM : 0);
 	if (!markerError && fsync(markerFD)) markerError = errno;
 	if (close(markerFD) && !markerError) markerError = errno;
+    if (!markerError && parent >= 0 && fsync(parent)) markerError = errno;
+    if (parent >= 0 && close(parent) && !markerError) markerError = errno;
 	if (markerError) return markerError;
 
 	return 0;

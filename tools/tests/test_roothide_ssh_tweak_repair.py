@@ -124,13 +124,18 @@ class RootHideSSHTweakRepairTests(unittest.TestCase):
         self.assertIn('rootHideExistingRootWithError:&rootError', check)
         self.assertIn('jbclient_get_jbroot()', check)
 
-    def test_privileged_marker_write_checks_same_root_and_fsync(self):
+    def test_privileged_toggle_uses_same_root_and_stages_atomically(self):
         env = source("Application/Dopamine/Jailbreak/DOEnvironmentManager.m")
         setter = env.split("- (int)setTweakInjectionEnabled:", 1)[1].split(
             "- (BOOL)isIDownloadEnabled", 1)[0]
         self.assertIn('rootHideExistingRootWithError:&rootError', setter)
         self.assertIn('jbclient_get_jbroot()', setter)
-        self.assertIn('fsync(dir)', setter)
+        self.assertIn('rh3_tweak_request_stage', setter)
+        self.assertIn('rh3_tweak_request_cancel', setter)
+        self.assertNotIn('unlink(safeModePath', setter)
+        helper = source("Application/Dopamine/Jailbreak/RH3TweakToggle.h")
+        self.assertIn('fsync(directory)', helper)
+        self.assertIn('renameat(directory, temp, directory, RH3_TWEAK_REQUEST_NAME)', helper)
         ui = source("Application/Dopamine/UI/Settings/DOSettingsController.m")
         self.assertIn('verifyRootHideTweaksPressed', ui)
         self.assertIn('repairRootHideSSHPressed', ui)
