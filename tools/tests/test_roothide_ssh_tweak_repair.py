@@ -21,7 +21,7 @@ class RootHideSSHTweakRepairTests(unittest.TestCase):
         self.assertIn('rh3_prepare_openssh_socket_job(daemonXdict)', hook)
         self.assertNotIn('us.diatr.shshd', hook)
 
-    def test_repair_is_explicit_and_never_writes_stock_rootfs_or_plist(self):
+    def test_repair_is_explicit_and_never_writes_stock_rootfs_or_starts_service(self):
         env = source("Application/Dopamine/Jailbreak/DOEnvironmentManager.m")
         repair = env.split("- (int)repairRootHideSSH", 1)[1].split(
             "// Read the effective launchd disabled override", 1)[0]
@@ -38,10 +38,48 @@ class RootHideSSHTweakRepairTests(unittest.TestCase):
         self.assertIn('@"com.openssh.sshd"', repair)
         self.assertIn('@"-t", @"ed25519", @"-N", @"", @"-f", keyPath', repair)
         self.assertIn('@"-t", @"-f", configPath, @"-h", keyPath', repair)
+        self.assertIn('RH3SSHRebaseInstalledPlist(plistPath, sshdPath, configPath, keyPath, &changed)', repair)
+        self.assertIn('config/key validated; socket job atomic rebase', repair)
         self.assertNotIn('@"-A"', repair)
         for name in ('launchctl', 'kickstart', 'writeToFile:plistPath', 'chmod(plistPath',
                      'master.passwd', '/rootfs/'):
             self.assertNotIn(name, repair)
+
+    def test_atomic_ssh_plist_rebase_is_single_job_and_preserves_sockets(self):
+        env = source("Application/Dopamine/Jailbreak/DOEnvironmentManager.m")
+        repair = env.split('static int RH3SSHRebaseInstalledPlist(', 1)[1].split(
+            '// Procursus names the entries SSHListener', 1)[0]
+        self.assertIn('@"com.openssh.sshd.plist"', repair)
+        self.assertIn('const char *jobName = "com.openssh.sshd.plist"', repair)
+        self.assertIn('const char *backupName = ".com.openssh.sshd.rh3-original"', repair)
+        self.assertIn('const char *nextName = ".com.openssh.sshd.rh3-next"', repair)
+        self.assertIn('job[@"Program"] = sshd;', repair)
+        self.assertIn('job[@"ProgramArguments"] = args;', repair)
+        self.assertIn('@[sshd, @"-i", @"-f", config, @"-h", key]', repair)
+        self.assertIn('job[@"Sockets"]', repair)
+        self.assertIn('job[@"inetdCompatibility"]', repair)
+        self.assertNotIn('job[@"Sockets"] =', repair)
+        self.assertNotIn('job[@"Disabled"] =', repair)
+        self.assertNotIn('job[@"inetdCompatibility"] =', repair)
+        self.assertIn('O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC', repair)
+        self.assertIn('O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC', repair)
+        self.assertIn('before.st_nlink != 1', repair)
+        self.assertIn('bs.st_nlink != 1', repair)
+        self.assertIn('fstatat(dir, jobName, &current, AT_SYMLINK_NOFOLLOW)', repair)
+        self.assertIn('renameat(dir, nextName, dir, jobName)', repair)
+        self.assertIn('if (fsync(dir))', repair)
+        self.assertIn('RH3SSHReadBounded(checked, checkedInfo.st_size)', repair)
+        self.assertIn('if (madeBackup && result && !renamedJob)', repair)
+        for forbidden in ('launchctl', 'kickstart', 'bootout', 'reboot3', 'chmod(plistPath',
+                          'chown(plistPath', 'us.diatr.shshd', 'master.passwd'):
+            self.assertNotIn(forbidden, repair)
+
+    def test_ui_confirms_persistent_and_delayed_service_change(self):
+        ui = source("Application/Dopamine/UI/Settings/DOSettingsController.m")
+        self.assertIn('Reparar OpenSSH en RootHide (con respaldo)', ui)
+        self.assertIn('únicamente Program y ProgramArguments', ui)
+        self.assertIn('No se activará ningún servicio', ui)
+        self.assertIn('El servicio activo aún no se ha recargado', ui)
 
     def test_tweaks_use_authoritative_marker_and_watchdog_fails_closed(self):
         jb = source("Application/Dopamine/Jailbreak/DOJailbreaker.m")

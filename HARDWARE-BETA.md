@@ -91,14 +91,26 @@ La distribución inicial RootHide **no contiene OpenSSH**; su
 instalado posteriormente tenía `ssh_host_key_files=0`, ejecutable SSH
 presente y un programa del plist no accesible desde launchd. Con el jailbreak
 activo, y **solo tras asegurar contraseñas de acceso no predeterminadas**, pulsa
-**Ajustes → Preparar OpenSSH en RootHide**. La operación valida el bootstrap
+**Ajustes → Reparar OpenSSH en RootHide (con respaldo)**. La operación valida el bootstrap
 oculto, busca una única entrada `com.openssh.sshd` con socket, genera únicamente
 su clave de host ED25519 bajo `<hidden-root>/etc/ssh` si falta, y ejecuta
-`sshd -t` con rutas explícitas. No inicia servicios, no toca la instalación
-stock de iOS ni reescribe plists de paquetes. Tras un reinicio de espacio de
-usuario, el hook de launchd reubica **solo** `com.openssh.sshd` a rutas del
-bootstrap activo en su diccionario XPC, incluso cuando cambia el nombre
-aleatorio de la raíz. No redirige ni altera `us.diatr.shshd`.
+`sshd -t` con rutas explícitas. Desde la revisión posterior a r165, una vez
+validada la configuración, guarda **una copia privada de los bytes originales**
+del único plist `com.openssh.sshd` y cambia atómicamente **solo** `Program`
+y `ProgramArguments` para invocar `sshd -i -f <config> -h <clave>` bajo la
+raíz oculta activa. Conserva `Sockets`, `inetdCompatibility`, `Disabled` y
+el resto de propiedades. No inicia servicios ni toca la instalación stock de
+iOS, otras claves o `us.diatr.shshd`. El cambio en disco **no** cambia la
+configuración del servicio ya cargada: solo se observará después de una nueva
+importación de `launchd` mediante un reinicio de espacio de usuario **manual
+y controlado**. Detenerse si la función informa error; no repetir reinicios.
+
+**Advertencia de persistencia:** RootHide vuelve a aleatorizar el nombre de
+la raíz durante un jailbreak completo posterior. Las rutas absolutas
+persistidas podrían caducar después de ese cambio; antes de volver a probar
+OpenSSH en otra sesión de jailbreak hay que comprobar la ruta con el botón de
+diagnóstico y, si procede, repetir la reparación optativa. No se instala
+ningún hook global nuevo en PID 1 para evitar riesgos de arranque.
 
 Prueba desde el ordenador con `ssh -vvv -o BatchMode=yes mobile@IP`
 primero, sin enviar contraseña. Se espera recibir un banner de servidor
@@ -185,6 +197,23 @@ reinicia o detiene SSH. El estado `no_override` tampoco prueba un daemon
 activo; ha de cotejarse con `Disabled` del plist y los datos de `launchctl`.
 Hasta que esta evidencia discrimine la causa, no parchear globalmente
 `launchd`, no reescribir el plist de terceros ni regenerar host keys.
+
+### Diagnóstico r165 y reparación optativa posterior
+
+El registro r165 (05:14 UTC del 22/10/2026) confirmó
+`program_matches_plist=1 disk_program_class=other_absolute disabled_override=enabled`.
+Es decir, el trabajo de `launchd` preserva el ejecutable original del plist,
+a pesar de que la transformación XPC del hook sí se registró en el inicio.
+El servicio no está deshabilitado. Se descarta ampliar el hook a todo
+`xpc_create_from_plist` en PID 1: afecta a importaciones no relacionadas y
+no hay pruebas de que sea la ruta efectiva. En su lugar, una acción **con
+confirmación expresa** reubica únicamente ese plist y conserva un respaldo
+privado en `.com.openssh.sshd.rh3-original` (sin sufijo `.plist`, no importable
+por el hook). No se hace `bootout`, `kickstart`, ni reinicio implícito.
+La prueba física pendiente es comprobar después de una nueva importación que
+`program_class=expected`, los argumentos `-f/-h` aparecen y la conexión
+recibe el banner `SSH-2.0` antes de enviar credenciales. El éxito de la
+escritura del plist **no es** prueba de SSH funcional.
 
 Guarda el mensaje de error, los logs, el modelo, la versión exacta de iOS y la revisión de la app. No repitas el proceso sin revisar el fallo: puede haber quedado un bootstrap a medias. No se borra automáticamente una instalación de RootHide 2, y reiniciar no garantiza resolver cualquier estado parcial.
 

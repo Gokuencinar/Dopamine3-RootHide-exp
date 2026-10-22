@@ -347,7 +347,7 @@ static BOOL gRootHideProviderRepairInFlight = NO;
                         [probeTweaks setProperty:@"checkmark.shield" forKey:@"image"];
                         [probeTweaks setProperty:@"verifyRootHideTweaksPressed" forKey:@"action"];
                         [specifiers addObject:probeTweaks];
-                        PSSpecifier *repairSSH = [PSSpecifier preferenceSpecifierNamed:@"Preparar OpenSSH en RootHide" target:self set:defSetter get:defGetter detail:nil cell:PSStaticTextCell edit:nil];
+                        PSSpecifier *repairSSH = [PSSpecifier preferenceSpecifierNamed:@"Reparar OpenSSH en RootHide (con respaldo)" target:self set:defSetter get:defGetter detail:nil cell:PSStaticTextCell edit:nil];
                         [repairSSH setProperty:[DOButtonCell class] forKey:@"cellClass"];
                         [repairSSH setProperty:buttonHeight forKey:@"height"];
                         [repairSSH setProperty:@"key.horizontal" forKey:@"image"];
@@ -740,8 +740,8 @@ static BOOL gRootHideProviderRepairInFlight = NO;
 
 - (void)repairRootHideSSHPressed
 {
-    UIAlertController *confirm = [UIAlertController alertControllerWithTitle:@"Preparar OpenSSH"
-        message:@"Solo si ya has cambiado las contraseñas de acceso. Se comprobará OpenSSH, se creará una clave ED25519 privada solo si falta, y se verificará su configuración en el bootstrap oculto. No se inicia el servidor ni se cambia el plist instalado. Después necesitas un reinicio de espacio de usuario."
+    UIAlertController *confirm = [UIAlertController alertControllerWithTitle:@"Reparar OpenSSH (cambio reversible)"
+        message:@"Solo si ya has cambiado las contraseñas de acceso. Se verificará OpenSSH y su configuración en la raíz oculta. Se conservará un respaldo privado del plist original y se actualizarán únicamente Program y ProgramArguments para apuntar a SSH en RootHide. No se activará ningún servicio ni se modificarán las claves existentes. Para aplicar el cambio hace falta un reinicio de espacio de usuario controlado; no se hará automáticamente."
         preferredStyle:UIAlertControllerStyleAlert];
     [confirm addAction:[UIAlertAction actionWithTitle:@"Cancelar" style:UIAlertActionStyleCancel handler:nil]];
     [confirm addAction:[UIAlertAction actionWithTitle:@"Continuar" style:UIAlertActionStyleDefault handler:^(__unused UIAlertAction *action) {
@@ -749,9 +749,9 @@ static BOOL gRootHideProviderRepairInFlight = NO;
             int result = [[DOEnvironmentManager sharedManager] repairRootHideSSH];
             dispatch_async(dispatch_get_main_queue(), ^{
                 UIAlertController *done = [UIAlertController alertControllerWithTitle:
-                    result ? @"OpenSSH no preparado" : @"OpenSSH preparado"
-                    message:result ? [NSString stringWithFormat:@"Falló una comprobación (código %d). No se han iniciado servicios. Comparte el diagnóstico.", result] :
-                        @"La clave y configuración ocultas están verificadas. Reinicia una vez el espacio de usuario para que launchd importe la ruta corregida y prueba SSH desde tu ordenador."
+                    result ? @"Reparación de OpenSSH incompleta" : @"Rutas de OpenSSH preparadas"
+                    message:result ? [NSString stringWithFormat:@"Falló una comprobación (código %d). No se han iniciado servicios. No reinicies todavía; comparte el diagnóstico para comprobar el estado y el respaldo.", result] :
+                        @"El programa y sus argumentos apuntan al SSH verificado de RootHide; el plist original está respaldado si hubo cambios. El servicio activo aún no se ha recargado. Comparte el diagnóstico y acuerda un reinicio controlado de espacio de usuario antes de probar SSH."
                     preferredStyle:UIAlertControllerStyleAlert];
                 [done addAction:[UIAlertAction actionWithTitle:@"Aceptar" style:UIAlertActionStyleCancel handler:nil]];
                 [self presentViewController:done animated:YES completion:nil];

@@ -155,6 +155,171 @@ static NSString *RH3SSHParseDisabledOverride(NSString *text)
     return found ?: @"no_override";
 }
 
+// Deliberately operate on one verified, root-owned Procursus job. Changing a
+// persistent plist is opt-in; the existing RootHide PID 1 hooks are untouched.
+// The private backup never has a .plist suffix, so it cannot be imported as a
+// second launchd job. No private path or file contents are written to logs.
+static int RH3SSHWriteAll(int fd, NSData *data)
+{
+    const uint8_t *bytes = data.bytes;
+    NSUInteger offset = 0;
+    while (offset < data.length) {
+        ssize_t written = write(fd, bytes + offset, data.length - offset);
+        if (written > 0) offset += (NSUInteger)written;
+        else if (written < 0 && errno == EINTR) continue;
+        else return written == 0 ? EIO : errno;
+    }
+    return fsync(fd) ? errno : 0;
+}
+
+static NSData *RH3SSHReadBounded(int fd, off_t length)
+{
+    if (length < 32 || length > 65536) return nil;
+    NSMutableData *data = [NSMutableData dataWithLength:(NSUInteger)length];
+    uint8_t *bytes = data.mutableBytes;
+    NSUInteger offset = 0;
+    while (offset < (NSUInteger)length) {
+        ssize_t amount = pread(fd, bytes + offset, (NSUInteger)length - offset, (off_t)offset);
+        if (amount > 0) offset += (NSUInteger)amount;
+        else if (amount < 0 && errno == EINTR) continue;
+        else return nil;
+    }
+    return data;
+}
+
+static int RH3SSHRebaseInstalledPlist(NSString *plistPath, NSString *sshd,
+                                     NSString *config, NSString *key, BOOL *changed)
+{
+    if (changed) *changed = NO;
+    if (![plistPath.lastPathComponent isEqualToString:@"com.openssh.sshd.plist"])
+        return ENOTSUP;
+    const char *jobName = "com.openssh.sshd.plist";
+    const char *backupName = ".com.openssh.sshd.rh3-original";
+    const char *nextName = ".com.openssh.sshd.rh3-next";
+    int dir = open(plistPath.stringByDeletingLastPathComponent.fileSystemRepresentation,
+                   O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (dir < 0) return errno;
+    int result = 0;
+    int original = -1, backup = -1, next = -1;
+    BOOL madeBackup = NO, madeNext = NO, renamedJob = NO;
+    struct stat directory = {0}, before = {0}, current = {0};
+    NSData *originalData = nil, *nextData = nil;
+    do {
+        if (fstat(dir, &directory) || !S_ISDIR(directory.st_mode) ||
+            directory.st_uid != 0 || (directory.st_mode & 022)) {
+            result = EPERM; break;
+        }
+        original = openat(dir, jobName, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+        if (original < 0) { result = errno; break; }
+        if (fstat(original, &before) || !S_ISREG(before.st_mode) ||
+            before.st_uid != 0 || before.st_gid != 0 ||
+            (before.st_mode & 022) || before.st_nlink != 1) {
+            result = EPERM; break;
+        }
+        originalData = RH3SSHReadBounded(original, before.st_size);
+        if (!originalData) { result = EIO; break; }
+        id parsed = [NSPropertyListSerialization propertyListWithData:originalData
+                    options:NSPropertyListMutableContainers format:NULL error:NULL];
+        if (![parsed isKindOfClass:NSDictionary.class]) { result = EINVAL; break; }
+        NSMutableDictionary *job = [parsed mutableCopy];
+        NSDictionary *sockets = [job[@"Sockets"] isKindOfClass:NSDictionary.class] ? job[@"Sockets"] : nil;
+        NSDictionary *inetd = [job[@"inetdCompatibility"] isKindOfClass:NSDictionary.class] ?
+                              job[@"inetdCompatibility"] : nil;
+        if (![job[@"Label"] isEqual:@"com.openssh.sshd"] || sockets.count != 2 ||
+            ![inetd[@"Wait"] isKindOfClass:NSNumber.class] || [inetd[@"Wait"] boolValue]) {
+            result = ENOTSUP; break;
+        }
+        NSArray *args = @[sshd, @"-i", @"-f", config, @"-h", key];
+        if ([job[@"Program"] isEqual:sshd] && [job[@"ProgramArguments"] isEqual:args])
+            break; // Idempotent: verified paths already persisted.
+        job[@"Program"] = sshd;
+        job[@"ProgramArguments"] = args;
+        nextData = [NSPropertyListSerialization dataWithPropertyList:job
+                    format:NSPropertyListXMLFormat_v1_0 options:0 error:NULL];
+        if (!nextData || nextData.length > 65536 || nextData.length < 32) {
+            result = EOVERFLOW; break;
+        }
+
+        backup = openat(dir, backupName, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+        if (backup >= 0) {
+            madeBackup = YES;
+            if (fchown(backup, 0, 0) || fchmod(backup, 0600) ||
+                (result = RH3SSHWriteAll(backup, originalData)) != 0) {
+                if (!result) result = errno;
+                break;
+            }
+            close(backup); backup = -1;
+            if (fsync(dir)) { result = errno; break; }
+        } else if (errno == EEXIST) {
+            // Preserve the very first package original across repeated repairs.
+            // Refuse a symlink, foreign owner, malformed or writable backup.
+            backup = openat(dir, backupName, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+            struct stat bs = {0};
+            if (backup < 0 || fstat(backup, &bs) || !S_ISREG(bs.st_mode) ||
+                bs.st_uid != 0 || bs.st_gid != 0 || (bs.st_mode & 0777) != 0600 ||
+                bs.st_nlink != 1) { result = EPERM; break; }
+            NSData *saved = RH3SSHReadBounded(backup, bs.st_size);
+            id savedJob = saved ? [NSPropertyListSerialization propertyListWithData:saved
+                              options:NSPropertyListImmutable format:NULL error:NULL] : nil;
+            if (![savedJob isKindOfClass:NSDictionary.class] ||
+                ![savedJob[@"Label"] isEqual:@"com.openssh.sshd"] ||
+                ![savedJob[@"Sockets"] isKindOfClass:NSDictionary.class]) {
+                result = EPERM; break;
+            }
+            close(backup); backup = -1;
+        } else { result = errno; break; }
+
+        next = openat(dir, nextName, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+        if (next < 0) { result = errno; break; }
+        madeNext = YES;
+        if (fchown(next, before.st_uid, before.st_gid) ||
+            fchmod(next, before.st_mode & 0777)) { result = errno; break; }
+        result = RH3SSHWriteAll(next, nextData);
+        if (result) break;
+        close(next); next = -1;
+        if (fstatat(dir, jobName, &current, AT_SYMLINK_NOFOLLOW) ||
+            current.st_dev != before.st_dev || current.st_ino != before.st_ino ||
+            current.st_size != before.st_size || current.st_mtime != before.st_mtime) {
+            result = EBUSY; break; // A package manager or other process changed it.
+        }
+        if (renameat(dir, nextName, dir, jobName)) { result = errno; break; }
+        renamedJob = YES;
+        if (changed) *changed = YES; // Even if readback/fsync later fails.
+        madeNext = NO;
+        if (fsync(dir)) { result = errno; break; }
+        // Check the persisted result before reporting success to the user.
+        int checked = openat(dir, jobName, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+        struct stat checkedInfo = {0};
+        if (checked < 0) { result = errno; break; }
+        if (fstat(checked, &checkedInfo)) result = errno;
+        NSData *verifiedData = result ? nil : RH3SSHReadBounded(checked, checkedInfo.st_size);
+        close(checked);
+        id verified = verifiedData ? [NSPropertyListSerialization propertyListWithData:verifiedData
+                                options:NSPropertyListImmutable format:NULL error:NULL] : nil;
+        NSMutableDictionary *originalOtherKeys = [parsed mutableCopy];
+        NSMutableDictionary *verifiedOtherKeys = [verified isKindOfClass:NSDictionary.class] ?
+                                                  [verified mutableCopy] : nil;
+        [originalOtherKeys removeObjectsForKeys:@[@"Program", @"ProgramArguments"]];
+        [verifiedOtherKeys removeObjectsForKeys:@[@"Program", @"ProgramArguments"]];
+        if (![verified isKindOfClass:NSDictionary.class] ||
+            ![verified[@"Program"] isEqual:sshd] ||
+            ![verified[@"ProgramArguments"] isEqual:args] ||
+            ![verified[@"Sockets"] isEqual:sockets] ||
+            ![verified[@"inetdCompatibility"] isEqual:inetd] ||
+            ![verifiedOtherKeys isEqual:originalOtherKeys]) {
+            result = EIO; break; // Original is still recoverable from the backup.
+        }
+    } while (0);
+    if (backup >= 0) close(backup);
+    if (next >= 0) close(next);
+    if (original >= 0) close(original);
+    if (madeNext) (void)unlinkat(dir, nextName, 0);
+    if (madeBackup && result && !renamedJob)
+        (void)unlinkat(dir, backupName, 0); // Original job was not replaced.
+    close(dir);
+    return result;
+}
+
 // Procursus names the entries SSHListener and SSHListener2 rather than the
 // Apple example's Listeners. Count their actual service names, not key names.
 static void RH3SSHCountSocketPorts(id entry, NSUInteger *port22, NSUInteger *port2222)
@@ -915,8 +1080,8 @@ static void RH3SSHCountSocketPorts(id entry, NSUInteger *port22, NSUInteger *por
 // Explicit, opt-in repair for the OpenSSH socket job installed later by the
 // package manager. The donor's us.diatr.shshd job is unrelated (SHSH blobs).
 // Never write to /etc or /usr on the stock OS, load a service, or change
-// passwords. The hook rebases OpenSSH IN MEMORY on each launchd boot; this
-// repair prepares a host key without altering installed package plists.
+// passwords. The original XPC hook did not affect the live launchd job on
+// r165; opt-in recovery persists ONLY Program/ProgramArguments with a backup.
 - (int)repairRootHideSSH
 {
     if (![DOBootstrapper rootHidePortEnabled]) return ENOTSUP;
@@ -1074,11 +1239,14 @@ static void RH3SSHCountSocketPorts(id entry, NSUInteger *port22, NSUInteger *por
             close(directory);
             if (syncResult) return syncResult;
         }
+        BOOL changed = NO;
+        int writeResult = RH3SSHRebaseInstalledPlist(plistPath, sshdPath, configPath, keyPath, &changed);
         [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
-            @"SSH repair: hidden ED25519 host key and sshd config verified; OpenSSH will be rebased in-memory at next userspace reboot"];
-        return 0;
+            [NSString stringWithFormat:@"SSH repair: config/key validated; socket job atomic rebase result=%d changed=%d; no service started",
+             writeResult, changed]];
+        return writeResult;
     }];
-    return [self rh3ActionStage:@"SSH repair (no server started)" result:result];
+    return [self rh3ActionStage:@"SSH socket plist repair (no server started)" result:result];
 }
 
 // Read the effective launchd disabled override without changing the service.
