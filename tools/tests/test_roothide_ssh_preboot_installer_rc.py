@@ -77,13 +77,18 @@ class RootHideSSHPrebootRC(unittest.TestCase):
             self.assertIn(recovery, transaction)
         self.assertIn('port22 != 1 || port2222 != 1', transaction)
         self.assertIn('for (id socketEntry in sockets.allValues)', transaction)
-        self.assertIn('RH3SSHCountSocketPorts(socketEntry, &entry22, &entry2222)', transaction)
-        self.assertIn('entry22 + entry2222 != 1', transaction)
+        self.assertIn('RH3SSHValidateSingleSocket(socketEntry, &entry22, &entry2222)', transaction)
         self.assertNotIn('RH3SSHCountSocketPorts(sockets, &port22, &port2222)', transaction)
         self.assertIn('arc4random(), arc4random()', transaction)
         self.assertIn('rootHideBrandForPath:oldRoot', transaction)
         self.assertIn('renameatx_np(dir, backupTempName, dir, backupName, RENAME_EXCL)', transaction)
         self.assertIn('backup_publish_sync', transaction)
+        socket_guard = ENV.split('static BOOL RH3SSHValidateSingleSocket(id entry, NSUInteger *port22, NSUInteger *port2222)\n{', 1)[1].split('\n}\n', 1)[0]
+        self.assertIn('members.count == 1', socket_guard)
+        self.assertIn('RH3SSHValidateSingleSocket(members[0], port22, port2222)', socket_guard)
+        self.assertIn('if (![entry isKindOfClass:NSDictionary.class]) return NO', socket_guard)
+        self.assertIn('return NO;', socket_guard)
+        self.assertIn('if ([name isEqualToString:@"2222"])', socket_guard)
         for forbidden in ('job[@"Sockets"] =', 'job[@"inetdCompatibility"] =',
                           'job[@"Disabled"] =', 'launchctl', 'kickstart'):
             self.assertNotIn(forbidden, transaction)

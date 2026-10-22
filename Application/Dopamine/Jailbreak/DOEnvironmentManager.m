@@ -223,6 +223,7 @@ static NSString *RH3SSHRootForPhase(BOOL installerPhase)
 }
 
 static void RH3SSHCountSocketPorts(id entry, NSUInteger *port22, NSUInteger *port2222);
+static BOOL RH3SSHValidateSingleSocket(id entry, NSUInteger *port22, NSUInteger *port2222);
 
 static int RH3SSHRebaseInstalledPlist(NSString *plistPath, NSString *sshd,
                                      NSString *config, NSString *key, BOOL *changed,
@@ -383,10 +384,8 @@ static int RH3SSHRebaseInstalledPlist(NSString *plistPath, NSString *sshd,
         BOOL socketEntriesTrusted = sockets.count == 2;
         for (id socketEntry in sockets.allValues) {
             NSUInteger entry22 = 0, entry2222 = 0;
-            if (![socketEntry isKindOfClass:NSDictionary.class])
+            if (!RH3SSHValidateSingleSocket(socketEntry, &entry22, &entry2222))
                 socketEntriesTrusted = NO;
-            RH3SSHCountSocketPorts(socketEntry, &entry22, &entry2222);
-            if (entry22 + entry2222 != 1) socketEntriesTrusted = NO;
             port22 += entry22;
             port2222 += entry2222;
         }
@@ -680,6 +679,31 @@ static void RH3SSHCountSocketPorts(id entry, NSUInteger *port22, NSUInteger *por
         ([service isKindOfClass:NSNumber.class] ? [service stringValue] : nil);
     if ([name isEqualToString:@"ssh"] || [name isEqualToString:@"22"]) ++*port22;
     if ([name isEqualToString:@"2222"]) ++*port2222;
+}
+
+// Unlike the read-only diagnostic counter, the write path must reject every
+// extra/unknown array member. Counting only recognized ports would otherwise
+// accept [{SockServiceName=ssh}, {SockServiceName=9999}] as ONE valid listener.
+static BOOL RH3SSHValidateSingleSocket(id entry, NSUInteger *port22, NSUInteger *port2222)
+{
+    if ([entry isKindOfClass:NSArray.class]) {
+        NSArray *members = entry;
+        return members.count == 1 &&
+               RH3SSHValidateSingleSocket(members[0], port22, port2222);
+    }
+    if (![entry isKindOfClass:NSDictionary.class]) return NO;
+    id service = ((NSDictionary *)entry)[@"SockServiceName"];
+    NSString *name = [service isKindOfClass:NSString.class] ? service :
+        ([service isKindOfClass:NSNumber.class] ? [service stringValue] : nil);
+    if ([name isEqualToString:@"ssh"] || [name isEqualToString:@"22"]) {
+        ++*port22;
+        return YES;
+    }
+    if ([name isEqualToString:@"2222"]) {
+        ++*port2222;
+        return YES;
+    }
+    return NO;
 }
 
 @implementation DOEnvironmentManager

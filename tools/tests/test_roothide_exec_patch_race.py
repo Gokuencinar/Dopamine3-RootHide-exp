@@ -19,16 +19,16 @@ class RootHideExecPatchRaceTests(unittest.TestCase):
         self.assertGreater(add.rfind("[gExecPatchArray removeObjectForKey:@(pid)]"),
                            add.index("kevent(kq, &kev, 1, NULL, 0, NULL)"))
 
-    def test_openssh_import_reports_failure_without_paths(self):
+    def test_openssh_import_never_silently_rebases_without_opt_in(self):
         src = (ROOT / "BaseBin/launchdhook/src/daemon_hook.m").read_text()
-        method = src.split("static void rh3_prepare_openssh_socket_job", 1)[1].split(
-            "void xpc_dictionary_add_launch_daemon_plist_at_path", 1
+        self.assertNotIn("rh3_prepare_openssh_socket_job", src)
+        method = src.split("void xpc_dictionary_add_launch_daemon_plist_at_path", 1)[1].split(
+            "xpc_object_t (*xpc_dictionary_get_value_orig)", 1
         )[0]
-        self.assertIn("rh3_bootlog(\"OpenSSH import: ED25519 host key", method)
-        self.assertIn("rh3_bootlog(\"OpenSSH import: socket XPC program arguments rebased", method)
-        self.assertIn("strcmp(label, \"com.openssh.sshd\")", method)
-        self.assertNotIn("rh3_bootlog(program", method)
-        self.assertNotIn("rh3_bootlog(key", method)
+        self.assertIn("xpc_create_from_plist(addr, len)", method)
+        self.assertIn("xpc_dictionary_set_value(xdict, path, daemonXdict)", method)
+        self.assertNotIn('xpc_dictionary_set_string(job, "Program"', method)
+        self.assertNotIn('xpc_dictionary_set_value(job, "ProgramArguments"', method)
 
     def test_lsd_auto_uicache_cannot_launch_concurrent_rebuild_children(self):
         src = (ROOT / "BaseBin/roothidehooks/lsd.x").read_text()

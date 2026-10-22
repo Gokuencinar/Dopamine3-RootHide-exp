@@ -11,52 +11,6 @@
 #import <Foundation/Foundation.h>
 #import <litehook.h>
 
-// Do not alter third-party plists on disk: RootHide re-randomizes its hidden
-// root, so absolute paths persisted by a package become stale. Rebase ONLY
-// the installed OpenSSH socket job in the launchd XPC dictionary, each boot.
-static void rh3_prepare_openssh_socket_job(xpc_object_t job)
-{
-    if (!job || xpc_get_type(job) != XPC_TYPE_DICTIONARY) return;
-    const char *label = xpc_dictionary_get_string(job, "Label");
-    if (!label || strcmp(label, "com.openssh.sshd")) return;
-    xpc_object_t sockets = xpc_dictionary_get_value(job, "Sockets");
-    if (!sockets || xpc_get_type(sockets) != XPC_TYPE_DICTIONARY) {
-        rh3_bootlog("OpenSSH import: socket dictionary missing; XPC job unchanged");
-        return;
-    }
-    NSString *program = JBROOT_PATH(@"/usr/sbin/sshd");
-    NSString *config = JBROOT_PATH(@"/etc/ssh/sshd_config");
-    NSString *key = JBROOT_PATH(@"/etc/ssh/ssh_host_ed25519_key");
-    struct stat st = {0};
-    if (lstat(program.fileSystemRepresentation, &st) ||
-        !S_ISREG(st.st_mode) || st.st_uid != 0 || !(st.st_mode & S_IXUSR)) {
-        rh3_bootlog("OpenSSH import: verified sshd unavailable; XPC job unchanged");
-        return;
-    }
-    if (lstat(config.fileSystemRepresentation, &st) ||
-        !S_ISREG(st.st_mode) || st.st_uid != 0) {
-        rh3_bootlog("OpenSSH import: verified config unavailable; XPC job unchanged");
-        return;
-    }
-    if (lstat(key.fileSystemRepresentation, &st) ||
-        !S_ISREG(st.st_mode) || st.st_uid != 0 || (st.st_mode & 077) ||
-        st.st_size < 32) {
-        rh3_bootlog("OpenSSH import: ED25519 host key missing or unsafe; XPC job unchanged");
-        return;
-    }
-    xpc_object_t args = xpc_array_create(NULL, 0);
-    if (!args) {
-        rh3_bootlog("OpenSSH import: XPC argument allocation failed");
-        return;
-    }
-    for (NSString *part in @[program, @"-i", @"-f", config, @"-h", key])
-        xpc_array_set_string(args, XPC_ARRAY_APPEND, part.fileSystemRepresentation);
-    xpc_dictionary_set_string(job, "Program", program.fileSystemRepresentation);
-    xpc_dictionary_set_value(job, "ProgramArguments", args);
-    rh3_bootlog("OpenSSH import: socket XPC program arguments rebased to active hidden root");
-    // XPC objects bridge to Objective-C here and are ARC-managed.
-}
-
 void xpc_dictionary_add_launch_daemon_plist_at_path(xpc_object_t xdict, const char *path)
 {
 	int ldFd = open(path, O_RDONLY);
@@ -71,7 +25,11 @@ void xpc_dictionary_add_launch_daemon_plist_at_path(xpc_object_t xdict, const ch
 		if (addr != MAP_FAILED) {
 			xpc_object_t daemonXdict = xpc_create_from_plist(addr, len);
 			if (daemonXdict) {
-				rh3_prepare_openssh_socket_job(daemonXdict);
+				// Import package-managed launchd dictionaries verbatim. The
+				// former SSH-only in-memory rebase ran without consent, and r165
+				// showed it did not govern the live job. A separately opted-in
+				// installer-phase repair can update the verified on-disk plist
+				// for a later import; its effective timing is unverified.
 				xpc_dictionary_set_value(xdict, path, daemonXdict);
 			}
 			munmap(addr, len);

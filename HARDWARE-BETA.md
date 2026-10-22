@@ -334,6 +334,75 @@ RootHide3 hoy ofrece **dos rutas** de importación de `/Library/LaunchDaemons`
 XPC no gobernó el job efectivo. Escribir antes de un userspace reboot debería
 alinear ambas, pero **todavía no se ha probado en hardware** ni se conoce la
 fuente definitiva de importación del job.
+
+**Auditoría adicional del spawn de OpenSSH (22/10/2026, sin iPhone):** el
+donante RootHide 2 (`BaseBin/launchdhook/src/roothider.m:212-275`) suspende y
+parchea los hijos de PID 1 mediante `jbdSpawnPatchChild`, fuerza
+`DYLD_IN_CACHE=0` cuando inyecta una dylib y contempla confianza recursiva.
+RootHide3 (`BaseBin/systemhook/src/common/common.c:392,445-470`) excluye PID 1
+del camino `rh3_spawn_patched` y de ese cambio de dyld, mientras su
+`launchdhook/src/spawn_hook.c:345` confía inicialmente solo en el ejecutable.
+Esta **diferencia de implementación es real**, pero no demuestra que el
+`sshd` concreto falle por ella. Si `launchd` lo inicia a través de
+`/usr/libexec/xpcproxy`, el proxy sí puede recibir `systemhook`, realizar su
+check-in alternativo en iOS 16 (`systemhook/src/main.c:423-438`) y pasar por
+el camino RootHide con confianza recursiva y parcheo al hacer el `execve`
+(`systemhook/src/main.c:284-323`). No consta todavía cuál de esas dos rutas
+usó efectivamente el trabajo `com.openssh.sshd`.
+
+**Decisión de seguridad:** no transportar a ciegas el patch-child de RootHide
+2 a PID 1. La ruta `jbclient_roothide_patch_child` depende de servicios XPC
+que pueden convertirse en una llamada autorreferente desde `launchd`; la vía
+directa a `jailbreakd` también usa una petición síncrona sin límite estricto
+de tiempo. Antes de cualquier cambio que afecte al spawn, se necesita
+evidencia del ejecutable cargado, secuencia xpcproxy/directa, resultado del
+check-in, confianza de dependencias y estado del proceso hijo. Ninguna de las
+dos rutas ha sido verificada en un nuevo ensayo físico.
+
+Tampoco debe ofrecerse como arreglo «inofensivo» confiar recursivamente el
+sshd desde la app durante preboot: la implementación RootHide
+(`libjailbreak/src/roothider/signatures.m:377-385` y `recdhash.m:221-244`)
+puede randomizar hashes y **reescribir contenido Mach-O** del ejecutable y
+dependencias, además de crear enlaces bajo jbroot. Esa ruta necesitaría una
+transacción específica para binarios de paquetes y una política de IPC con
+tiempo máximo verificable; la RC actual deliberadamente NO la ejecuta.
+
+**Comparación con Relaxin (fuente pública de OwnGoal Studio, pin
+`owngoal-dev/Relaxin@f44e0acfe`, 17/08/2026):** el repositorio está archivado
+y constituye una instantánea antigua; **no contiene** las modificaciones de
+las versiones 0.5.5/0.5.6 anunciadas después. No confundir la web
+`relaxin.dev`, que es un archivo mantenido por terceros, con el repositorio
+oficial ni considerar su IPA una reparación de esta instalación.
+
+- `Vendor/Dopamine/BaseBin/launchdhook/src/daemon_hook.m:33-53` incorpora
+  `/basebin/LaunchDaemons` tanto a `LaunchDaemons` como a `Paths`, pero NO
+  incorpora `/Library/LaunchDaemons` por ninguna de esas dos vías. En cambio,
+  `Vendor/Dopamine/BaseBin/jbctl/src/internal.m:297-300` realiza **después de
+  disponer de launchdhook y systemhook** el `launchctl bootstrap system
+  /Library/LaunchDaemons`. Es la misma separación intencional que el donor
+  RootHide 2 pinned, distinta de la doble importación inicial RootHide3.
+  Este contraste **no demuestra** aún si eliminar uno de los importadores
+  RootHide3 mantendría operativos los demás daemons en el iPhone; aplazar
+  una migración global del orden de arranque hasta tener evidencia.
+- `Vendor/Dopamine/BaseBin/launchdhook/src/roothider.m:194-252` mantiene
+  confianza recursiva, `DYLD_IN_CACHE=0` al inyectar y suspender/parchear los
+  hijos de PID 1. Confirma que el diseño existe fuera del donor RH2, pero
+  conserva `jbdSpawnPatchChild` **síncrono**, sin plazo estricto; no copiarlo
+  al `launchd` experimental a ciegas. El camino de `xpcproxy`/`execve` de
+  RootHide3 puede cubrir parte de la funcionalidad y sigue sin traza física.
+- `Vendor/Dopamine/BaseBin/launchdhook/src/jbserver/jbdomain_systemwide.c:
+  528-540` establece `CS_PLATFORM_BINARY` y `CS_INSTALLER` durante su entrega
+  de privilegios. Es otra solución al problema de permisos, pero ampliar
+  permanentemente los derechos de la app relanzada contradiría el principio
+  de **privilegio temporal y mínimo** elegido aquí. Se conserva la ventana
+  post-exploit con consentimiento específico en lugar de copiar ese patrón.
+
+**Resultado de la comparación:** Relaxin aporta una confirmación independiente
+de la separación de importadores y de la relevancia de trust/dyld en spawn,
+pero su instantánea abierta NO contiene una corrección específica de
+`com.openssh.sshd`, respaldo de su plist ni demostración de banner SSH para
+este iPhone X. Nuestra corrección mantiene la preferencia opt-in y evita
+añadir hooks globales o una petición XPC bloqueante a PID 1.
 La aceptación física de esta RC exige `atomic rebase result=0`, un
 `launchctl print system/com.openssh.sshd` con la ruta activa y los
 argumentos esperados, y una conexión real que devuelva `SSH-2.0`

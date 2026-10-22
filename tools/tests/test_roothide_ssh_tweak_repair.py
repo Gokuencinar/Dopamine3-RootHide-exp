@@ -12,13 +12,11 @@ def source(path):
 class RootHideSSHTweakRepairTests(unittest.TestCase):
     def test_donor_shsh_not_confused_with_openssh(self):
         hook = source("BaseBin/launchdhook/src/daemon_hook.m")
-        self.assertIn('strcmp(label, "com.openssh.sshd")', hook)
-        self.assertIn('xpc_dictionary_get_value(job, "Sockets")', hook)
-        self.assertIn('JBROOT_PATH(@"/usr/sbin/sshd")', hook)
-        self.assertIn('JBROOT_PATH(@"/etc/ssh/sshd_config")', hook)
-        self.assertIn('JBROOT_PATH(@"/etc/ssh/ssh_host_ed25519_key")', hook)
-        self.assertIn('@"-i", @"-f", config, @"-h", key', hook)
-        self.assertIn('rh3_prepare_openssh_socket_job(daemonXdict)', hook)
+        self.assertNotIn('rh3_prepare_openssh_socket_job', hook)
+        self.assertIn('xpc_create_from_plist(addr, len)', hook)
+        self.assertIn('xpc_dictionary_set_value(xdict, path, daemonXdict)', hook)
+        self.assertIn('xpc_dictionary_add_launch_daemon_plist_at_path(origXvalue', hook)
+        self.assertIn('JBROOT_PATH(@"/Library/LaunchDaemons")', hook)
         self.assertNotIn('us.diatr.shshd', hook)
 
     def test_repair_is_explicit_and_never_writes_stock_rootfs_or_starts_service(self):
