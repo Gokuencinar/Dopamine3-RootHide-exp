@@ -24,7 +24,7 @@ class RootHideSSHTweakRepairTests(unittest.TestCase):
     def test_repair_is_explicit_and_never_writes_stock_rootfs_or_plist(self):
         env = source("Application/Dopamine/Jailbreak/DOEnvironmentManager.m")
         repair = env.split("- (int)repairRootHideSSH", 1)[1].split(
-            "// User-triggered, read-only diagnosis of the *live*", 1)[0]
+            "// Read the effective launchd disabled override", 1)[0]
         self.assertIn('rootHideExistingRootWithError:&error', repair)
         self.assertIn('jbclient_get_jbroot()', repair)
         self.assertIn('O_DIRECTORY | O_NOFOLLOW', repair)

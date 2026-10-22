@@ -73,6 +73,45 @@ class SSHSocketDiagnosisR161(unittest.TestCase):
         self.assertNotIn('rh3RecordDiagnosticStage:[NSString stringWithFormat:@"%@", output]',
                          self.diagnostic)
 
+    def test_differential_plist_vs_launchd_is_read_only_and_non_disclosing(self):
+        body = self.diagnostic
+        self.assertIn('diskProgram = program', body)
+        self.assertIn('RH3SSHPrintPrivatePath(output, @"program")', body)
+        self.assertIn('RH3CanonicalAppPath(diskProgram)', body)
+        self.assertIn('RH3CanonicalAppPath(liveProgram)', body)
+        self.assertIn('int programMatchesPlist = canonicalDisk && canonicalLive', body)
+        self.assertIn('disk_program_class=%@ program_matches_plist=%d disabled_override=%@', body)
+        self.assertIn('[self rh3OpenSSHDisabledOverrideUsingLaunchctl:binary]', body)
+        self.assertNotIn('rh3RecordDiagnosticStage:diskProgram', body)
+        self.assertNotIn('rh3RecordDiagnosticStage:liveProgram', body)
+        self.assertNotIn('stringWithFormat:@"%@", diskProgram', body)
+
+    def test_disabled_override_uses_exact_label_and_bounded_query(self):
+        helper = ENV.split('static NSString *RH3SSHParseDisabledOverride', 1)[1].split(
+            '// Procursus names the entries', 1
+        )[0]
+        self.assertIn('@"\\\"com.openssh.sshd\\\" => "', helper)
+        self.assertIn('@"disabled"', helper)
+        self.assertIn('@"enabled"', helper)
+        self.assertIn('@"true"', helper)
+        self.assertIn('@"false"', helper)
+        self.assertIn('if (found) return @"unknown"', helper)
+        self.assertIn('return found ?: @"no_override"', helper)
+
+        query = ENV.split('- (NSString *)rh3OpenSSHDisabledOverrideUsingLaunchctl:', 1)[1].split(
+            '// User-triggered, read-only diagnosis', 1
+        )[0]
+        self.assertIn('"print-disabled", "system", NULL', query)
+        self.assertIn('char *const cleanEnv[] = {NULL}', query)
+        self.assertIn('posix_spawn(&pid, argv[0], &actions, NULL, argv, cleanEnv)', query)
+        self.assertIn('const NSUInteger maximum = 128 * 1024', query)
+        self.assertIn('CLOCK_MONOTONIC', query)
+        self.assertIn('WIFEXITED(status)', query)
+        for forbidden in ('"enable"', '"disable"', '"kickstart"', '"bootstrap"',
+                          '"bootout"', '"sshd"', 'rebootUserspace',
+                          'jbclient_trust_executable_recurse', 'rh3RecordDiagnosticStage:output'):
+            self.assertNotIn(forbidden, query)
+
     def test_child_only_bounded_capture(self):
         body = self.diagnostic
         self.assertIn("O_NONBLOCK", body)

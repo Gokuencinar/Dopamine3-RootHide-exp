@@ -156,6 +156,36 @@ Con r162 instalada, basta ejecutar una sola vez **Diagnosticar arranque de
 OpenSSH (solo lectura)** y compartir el nuevo registro. No preparar SSH,
 alterar claves, forzar `launchctl kickstart` ni reiniciar.
 
+### Diferencial posterior a r164: sin tocar OpenSSH
+
+El registro r164 (22/10/2026 04:28:30 UTC) obtuvo
+`origin_class=expected program_class=other_absolute runs=0`, con ambas
+entradas de socket presentes y sin las rutas de configuración/clave esperadas
+en la representación humana de `launchctl`. Esto demuestra una discrepancia
+entre el ejecutable *esperado* por el hook y el programa *declarado* en el
+trabajo activo; no demuestra por sí solo qué ruta se está ejecutando, que el
+hook se haya aplicado al trabajo efectivo ni si hay un override de
+habilitación.
+
+La siguiente instrumentación, siempre bajo el mismo botón **de solo lectura**,
+añade exclusivamente:
+
+- `disk_program_class`: categoría fija de `Program` en el plist instalado.
+- `program_matches_plist=-1/0/1`: imposible de comparar / distinto /
+  equivalente tras normalizar alias. Solo compara rutas internamente.
+- `disabled_override=disabled|enabled|no_override|unknown`: resultado de
+  consultar `launchctl print-disabled system`, limitado a la etiqueta exacta
+  `com.openssh.sshd` y admitiendo variantes `true/false` o
+  `disabled/enabled`. `unknown` incluye formatos desconocidos, error,
+  truncado, timeout o consulta no compatible.
+
+No se exportan rutas, otras etiquetas del dominio, argumentos completos,
+credenciales ni claves. Ninguna de las dos consultas inicia, habilita,
+reinicia o detiene SSH. El estado `no_override` tampoco prueba un daemon
+activo; ha de cotejarse con `Disabled` del plist y los datos de `launchctl`.
+Hasta que esta evidencia discrimine la causa, no parchear globalmente
+`launchd`, no reescribir el plist de terceros ni regenerar host keys.
+
 Guarda el mensaje de error, los logs, el modelo, la versión exacta de iOS y la revisión de la app. No repitas el proceso sin revisar el fallo: puede haber quedado un bootstrap a medias. No se borra automáticamente una instalación de RootHide 2, y reiniciar no garantiza resolver cualquier estado parcial.
 
 ## Compilar esta variante

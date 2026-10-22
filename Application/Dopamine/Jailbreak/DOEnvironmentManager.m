@@ -114,6 +114,47 @@ static NSString *RH3SSHPrintPathClass(NSString *text, NSString *field,
     return @"missing";
 }
 
+// Return a path only to the caller, never to the diagnostic log. Use this to
+// compare launchd's live Program with the root-owned OpenSSH plist, without
+// exporting either path. A missing/malformed path stays indeterminate.
+static NSString *RH3SSHPrintPrivatePath(NSString *text, NSString *field)
+{
+    NSString *prefix = [field stringByAppendingString:@" = "];
+    NSString *found = nil;
+    for (NSString *line in [text componentsSeparatedByCharactersInSet:NSCharacterSet.newlineCharacterSet]) {
+        NSString *trimmed = [line stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
+        if (![trimmed hasPrefix:prefix]) continue;
+        if (found) return nil; // Refuse ambiguous nested/multiple program fields.
+        NSString *value = [[trimmed substringFromIndex:prefix.length]
+            stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
+        if (!value.length || value.length > 4096 || ![value hasPrefix:@"/"]) return nil;
+        found = value;
+    }
+    return found;
+}
+
+// launchctl's persistent disabled overrides are independent of the Disabled
+// key in a launchd plist. Match just one exact service label, never log the
+// complete domain (which contains names of unrelated installed services).
+static NSString *RH3SSHParseDisabledOverride(NSString *text)
+{
+    NSString *found = nil;
+    for (NSString *line in [text componentsSeparatedByCharactersInSet:NSCharacterSet.newlineCharacterSet]) {
+        NSString *trimmed = [line stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
+        NSString *prefix = @"\"com.openssh.sshd\" => ";
+        if (![trimmed hasPrefix:prefix]) continue;
+        if (found) return @"unknown"; // Ambiguous duplicate.
+        NSString *value = [[trimmed substringFromIndex:prefix.length]
+            stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet].lowercaseString;
+        if ([value isEqualToString:@"disabled"] || [value isEqualToString:@"true"])
+            found = @"disabled";
+        else if ([value isEqualToString:@"enabled"] || [value isEqualToString:@"false"])
+            found = @"enabled";
+        else return @"unknown";
+    }
+    return found ?: @"no_override";
+}
+
 // Procursus names the entries SSHListener and SSHListener2 rather than the
 // Apple example's Listeners. Count their actual service names, not key names.
 static void RH3SSHCountSocketPorts(id entry, NSUInteger *port22, NSUInteger *port2222)
@@ -1040,6 +1081,80 @@ static void RH3SSHCountSocketPorts(id entry, NSUInteger *port22, NSUInteger *por
     return [self rh3ActionStage:@"SSH repair (no server started)" result:result];
 }
 
+// Read the effective launchd disabled override without changing the service.
+// A failure, timeout, partial output or unsupported subcommand is unknown.
+- (NSString *)rh3OpenSSHDisabledOverrideUsingLaunchctl:(NSString *)binary
+{
+    int fds[2] = {-1, -1};
+    if (pipe(fds) != 0) return @"unknown";
+    posix_spawn_file_actions_t actions;
+    int result = posix_spawn_file_actions_init(&actions);
+    BOOL actionsReady = (result == 0);
+    if (!result) result = posix_spawn_file_actions_addopen(&actions, STDIN_FILENO, "/dev/null", O_RDONLY, 0);
+    if (!result) result = posix_spawn_file_actions_adddup2(&actions, fds[1], STDOUT_FILENO);
+    if (!result) result = posix_spawn_file_actions_adddup2(&actions, fds[1], STDERR_FILENO);
+    if (!result) result = posix_spawn_file_actions_addclose(&actions, fds[0]);
+    if (!result) result = posix_spawn_file_actions_addclose(&actions, fds[1]);
+    __block pid_t pid = -1;
+    if (!result) result = [self rh3PerformPrivilegedAction:^int {
+        // Only the already-verified hidden launchctl, never PATH or a shell.
+        char *const argv[] = {(char *)binary.fileSystemRepresentation,
+                              "print-disabled", "system", NULL};
+        char *const cleanEnv[] = {NULL};
+        return posix_spawn(&pid, argv[0], &actions, NULL, argv, cleanEnv);
+    }];
+    if (actionsReady) posix_spawn_file_actions_destroy(&actions);
+    close(fds[1]);
+    if (result || pid <= 1) { close(fds[0]); return @"unknown"; }
+
+    int flags = fcntl(fds[0], F_GETFL);
+    if (flags < 0 || fcntl(fds[0], F_SETFL, flags | O_NONBLOCK) < 0) {
+        kill(pid, SIGKILL); // Own diagnostic child only.
+        (void)RH3WaitForBootstrapChildStatus(pid, 2, NULL);
+        close(fds[0]);
+        return @"unknown";
+    }
+    NSMutableData *capture = [NSMutableData dataWithCapacity:8192];
+    const NSUInteger maximum = 128 * 1024;
+    BOOL eof = NO, reaped = NO, overflow = NO, timedOut = NO;
+    int status = -1;
+    struct timespec start = {0}, now = {0};
+    if (clock_gettime(CLOCK_MONOTONIC, &start) != 0) timedOut = YES;
+    while (!timedOut && !overflow && !(eof && reaped)) {
+        char buffer[2048];
+        for (;;) {
+            ssize_t n = read(fds[0], buffer, sizeof(buffer));
+            if (n > 0) {
+                if ((NSUInteger)n > maximum - capture.length) {
+                    overflow = YES;
+                    break;
+                }
+                [capture appendBytes:buffer length:(NSUInteger)n];
+            } else if (n == 0) { eof = YES; break; }
+            else if (errno == EINTR) continue;
+            else if (errno == EAGAIN || errno == EWOULDBLOCK) break;
+            else { overflow = YES; break; }
+        }
+        if (!reaped) {
+            pid_t waited = waitpid(pid, &status, WNOHANG);
+            if (waited == pid) reaped = YES;
+            else if (waited < 0 && errno != EINTR) overflow = YES;
+        }
+        if (clock_gettime(CLOCK_MONOTONIC, &now) != 0 ||
+            now.tv_sec - start.tv_sec >= 10) timedOut = YES;
+        if (!eof || !reaped) usleep(40000);
+    }
+    if (!reaped) {
+        kill(pid, SIGKILL); // Never signal the service or launchd.
+        (void)RH3WaitForBootstrapChildStatus(pid, 2, &status);
+    }
+    close(fds[0]);
+    if (overflow || timedOut || !eof || !reaped ||
+        !WIFEXITED(status) || WEXITSTATUS(status) != 0) return @"unknown";
+    NSString *output = [[NSString alloc] initWithData:capture encoding:NSUTF8StringEncoding];
+    return output ? RH3SSHParseDisabledOverride(output) : @"unknown";
+}
+
 // User-triggered, read-only diagnosis of the *live* launchd socket job.
 // Only use the already-installed Procursus launchctl from the active hidden
 // root. No shell, service-control operations or TCP connection.
@@ -1054,6 +1169,7 @@ static void RH3SSHCountSocketPorts(id entry, NSUInteger *port22, NSUInteger *por
     __block int onDiskDisabled = -1;
     __block NSUInteger socketCount = 0;
     __block NSUInteger port22Count = 0, port2222Count = 0;
+    __block NSString *diskProgram = nil;
     int preflight = [self rh3PerformPrivilegedAction:^int {
         NSError *error = nil;
         root = [DOBootstrapper rootHideExistingRootWithError:&error];
@@ -1077,6 +1193,8 @@ static void RH3SSHCountSocketPorts(id entry, NSUInteger *port22, NSUInteger *por
             if (![plist[@"Label"] isEqual:@"com.openssh.sshd"]) continue;
             matches++;
             if (matches > 1) return EEXIST;
+            NSString *program = [plist[@"Program"] isKindOfClass:NSString.class] ? plist[@"Program"] : nil;
+            if (program.length && program.length <= 4096) diskProgram = program;
             NSDictionary *sockets = [plist[@"Sockets"] isKindOfClass:NSDictionary.class] ? plist[@"Sockets"] : nil;
             socketCount = sockets.count;
             for (id entry in sockets.allValues)
@@ -1190,15 +1308,24 @@ static void RH3SSHCountSocketPorts(id entry, NSUInteger *port22, NSUInteger *por
     NSString *servicePID = RH3SSHPrintScalar(output, @"pid", YES);
     NSString *programClass = RH3SSHPrintPathClass(output, @"program", root, @"usr/sbin/sshd");
     NSString *originClass = RH3SSHPrintPathClass(output, @"path", root, @"Library/LaunchDaemons/com.openssh.sshd.plist");
+    NSString *liveProgram = RH3SSHPrintPrivatePath(output, @"program");
+    NSString *canonicalDisk = RH3CanonicalAppPath(diskProgram);
+    NSString *canonicalLive = RH3CanonicalAppPath(liveProgram);
+    int programMatchesPlist = canonicalDisk && canonicalLive ? [canonicalDisk isEqualToString:canonicalLive] : -1;
+    NSString *diskProgramClass = diskProgram ?
+        RH3SSHPrintPathClass([@"program = " stringByAppendingString:diskProgram],
+                            @"program", root, @"usr/sbin/sshd") : @"missing";
+    NSString *disabledOverride = [self rh3OpenSSHDisabledOverrideUsingLaunchctl:binary];
     // These booleans reflect the human launchctl output only, not whether
     // dyld successfully executed sshd. Neither expected path is logged.
     BOOL configArgSeen = [output containsString:[root stringByAppendingPathComponent:@"etc/ssh/sshd_config"]];
     BOOL keyArgSeen = [output containsString:[root stringByAppendingPathComponent:@"etc/ssh/ssh_host_ed25519_key"]];
     [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
-        [NSString stringWithFormat:@"SSH socket launchctl: spawn=0 exit=%d timed_out=%d read_errno=%d bytes=%lu truncated=%d output_limit=%d state=%@ runs=%@ last_exit=%@ last_signal=%@ pid_present=%d program_class=%@ origin_class=%@ config_arg_seen=%d key_arg_seen=%d sockets_mentioned=%d (read-only)",
+        [NSString stringWithFormat:@"SSH socket launchctl: spawn=0 exit=%d timed_out=%d read_errno=%d bytes=%lu truncated=%d output_limit=%d state=%@ runs=%@ last_exit=%@ last_signal=%@ pid_present=%d program_class=%@ origin_class=%@ disk_program_class=%@ program_matches_plist=%d disabled_override=%@ config_arg_seen=%d key_arg_seen=%d sockets_mentioned=%d (read-only)",
          exitCode, timedOut, readError, (unsigned long)capture.length, capped,
          outputLimit, state, runs, lastExit, lastSignal,
          ![servicePID isEqualToString:@"unknown"], programClass, originClass,
+         diskProgramClass, programMatchesPlist, disabledOverride,
          configArgSeen, keyArgSeen,
          [output containsString:@"sockets ="] || [output containsString:@"Sockets ="]]];
     // Preserve command failure separately from the *service's* last exit.
