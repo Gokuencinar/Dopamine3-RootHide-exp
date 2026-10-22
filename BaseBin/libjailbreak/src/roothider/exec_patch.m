@@ -116,20 +116,26 @@ int spawnExecPatchDel(int pid)
 
     struct kevent kev;
     EV_SET(&kev, pid, EVFILT_PROC, EV_DELETE, 0, 0, NULL);
-    if (kevent(kq, &kev, 1, NULL, 0, NULL) == -1) {
-        JBLogError("delete kevent failed for pid: %d", pid);
+    int deleted;
+    do {
+        deleted = kevent(kq, &kev, 1, NULL, 0, NULL);
+    } while (deleted == -1 && errno == EINTR);
+    int deleteError = deleted == -1 ? errno : 0;
+    if (!rh3_exec_patch_watch_cancelled(deleted, deleteError)) {
+        JBLogError("delete kevent failed for pid: %d errno=%d", pid, deleteError);
         return -1;
     }
 
-    __block int ret = -1;
+    __block int ret = 0;
 
     //synchronous deletion
     dispatch_sync(gExecPatchDataQueue, ^{
         if([gExecPatchArray objectForKey:@(pid)] != nil) {
             [gExecPatchArray removeObjectForKey:@(pid)];
-            ret = 0;
         } else {
-            JBLogError("[spawnExecPatchDel] no record for process: %d", pid);
+            // The event handler may have consumed the one-shot watch and
+            // removed the record before cancellation. This is idempotent.
+            JBLogDebug("[spawnExecPatchDel] already cleared for process: %d", pid);
         }
     });
 

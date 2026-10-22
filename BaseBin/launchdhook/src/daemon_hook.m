@@ -13,7 +13,9 @@
 
 void xpc_dictionary_add_launch_daemon_plist_at_path(xpc_object_t xdict, const char *path)
 {
-	int ldFd = open(path, O_RDONLY);
+	// Import must not block PID 1 when a malformed package has installed a
+	// FIFO or other special file in place of a launch daemon plist.
+	int ldFd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
 	if (ldFd >= 0) {
 		struct stat s = {};
 		if(fstat(ldFd, &s) != 0) {
@@ -37,7 +39,15 @@ void xpc_dictionary_add_launch_daemon_plist_at_path(xpc_object_t xdict, const ch
 				// showed it did not govern the live job. A separately opted-in
 				// installer-phase repair can update the verified on-disk plist
 				// for a later import; its effective timing is unverified.
-				xpc_dictionary_set_value(xdict, path, daemonXdict);
+				// Ignore malformed/non-job plists instead of giving launchd a
+				// foreign XPC type. The required Label is not rewritten.
+				if (xpc_get_type(daemonXdict) == XPC_TYPE_DICTIONARY &&
+				    xpc_dictionary_get_string(daemonXdict, "Label") != NULL)
+					xpc_dictionary_set_value(xdict, path, daemonXdict);
+				// xpc_create_from_plist returns owned (+1) data; set_value
+				// retains its input. Repeated LaunchDaemons lookups in PID 1
+				// must not leak one dictionary for each inspected package.
+				xpc_release(daemonXdict);
 			}
 			munmap(addr, len);
 		}

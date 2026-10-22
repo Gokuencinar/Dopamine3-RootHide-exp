@@ -1489,7 +1489,10 @@ cleanup_root:
     }
 
     error = [self rh3InstallBasebinAtRoot:root];
-    if (!error) error = [self rh3BuildPackageSourcesInRoot:root version:version];
+    // Sources are initialized only when creating a new root (or recovering
+    // the known donor tmp collision). Do not regenerate them on a subsequent
+    // jailbreak: that would delete user APT sources and overwrite Zebra's
+    // editable sources.list in an already installed bootstrap.
     // Once prep_bootstrap.sh has succeeded it removes itself; never downgrade
     // script-complete to prepared after a later BaseBin refresh.
     if (!error && ![RH3PendingState(root) isEqualToString:@"script-complete"] &&

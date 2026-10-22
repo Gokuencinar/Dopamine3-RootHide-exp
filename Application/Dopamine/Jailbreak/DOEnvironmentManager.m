@@ -233,6 +233,11 @@ static int RH3SSHRebaseInstalledPlist(NSString *plistPath, NSString *sshd,
     if (stageOut) *stageOut = "name";
     if (![plistPath.lastPathComponent isEqualToString:@"com.openssh.sshd.plist"])
         return ENOTSUP;
+    NSString *launchDirectory = plistPath.stringByDeletingLastPathComponent;
+    NSString *libraryDirectory = launchDirectory.stringByDeletingLastPathComponent;
+    if (![launchDirectory.lastPathComponent isEqualToString:@"LaunchDaemons"] ||
+        ![libraryDirectory.lastPathComponent isEqualToString:@"Library"])
+        return ENOTSUP;
     const char *jobName = "com.openssh.sshd.plist";
     const char *backupName = ".com.openssh.sshd.rh3-original";
     // An unexpected interruption must not permanently poison the next run
@@ -249,10 +254,32 @@ static int RH3SSHRebaseInstalledPlist(NSString *plistPath, NSString *sshd,
                              arc4random(), arc4random());
     if (backupLen <= 0 || (size_t)backupLen >= sizeof(backupTempName)) return EOVERFLOW;
     const char *rollbackName = ".com.openssh.sshd.rh3-rollback";
+    // O_NOFOLLOW on LaunchDaemons alone does not protect its Library parent.
+    // Pin both directories so that an intermediate symlink cannot redirect an
+    // opt-in write to another (even root-owned) service directory.
+    if (stageOut) *stageOut = "open_library";
+    int libraryFD = open(libraryDirectory.fileSystemRepresentation,
+                         O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (libraryFD < 0) return errno;
+    if (stageOut) *stageOut = "library_stat";
+    struct stat libraryInfo = {0};
+    int libraryError = fstat(libraryFD, &libraryInfo) ? errno : 0;
+    BOOL trustedLibrary = libraryInfo.st_gid == 0 &&
+        (libraryInfo.st_mode & 0777) == 0775;
+    if (!libraryError && (!S_ISDIR(libraryInfo.st_mode) || libraryInfo.st_uid != 0 ||
+        (libraryInfo.st_mode & S_IWOTH) ||
+        ((libraryInfo.st_mode & S_IWGRP) && !trustedLibrary)))
+        libraryError = EPERM;
+    if (libraryError) {
+        close(libraryFD);
+        return libraryError;
+    }
     if (stageOut) *stageOut = "open_directory";
-    int dir = open(plistPath.stringByDeletingLastPathComponent.fileSystemRepresentation,
-                   O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
-    if (dir < 0) return errno;
+    int dir = openat(libraryFD, "LaunchDaemons",
+                     O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    int directoryError = dir < 0 ? errno : 0;
+    close(libraryFD);
+    if (directoryError) return directoryError;
     int result = 0;
     const char *stage = "directory_stat";
     int original = -1, backup = -1, next = -1, replacementRead = -1;

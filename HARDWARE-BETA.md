@@ -478,3 +478,46 @@ python3 tools/verify_roothide_full_experimental.py --hardware-beta --ipa Applica
 ```
 
 El identificador de esta app es `com.gokuencinar.roothide3.hardwarebeta`. Compilar y revisar el paquete no sustituye las [pruebas en un iPhone](validation/README.md).
+
+### Candidata posterior a r172: correcciones de integridad y ciclo de vida
+
+La r172 (`bce63b7`) compiló como Hardware Beta con jailbreak habilitado y
+firmado ad hoc. Su `Build`, slices arm64/arm64e, empaquetado y publicación IPA
+pasaron CI; el control estricto global sigue en 7/9 por el guard de fuente y
+la ausencia de validación física, **no** por un error del compilador. Ningún
+ensayo físico de esa IPA confirmó `SSH-2.0`, Sileo ni Zebra.
+
+Esta revisión contiene correcciones verificables adicionales:
+
+- **Repositorios de los gestores:** durante una reactivación de una instalación
+  ya marcada como instalada, `prepareRootHideBootstrapWithCompletion:` ya no
+  vuelve a llamar a `rh3BuildPackageSourcesInRoot`. Esa llamada repetida borraba
+  `etc/apt/sources.list`, sobrescribía `default.sources` y reemplazaba la lista
+  editable de Zebra. Las fuentes iniciales siguen preparándose al crear la
+  raíz y al completar únicamente la recuperación verificada del choque `tmp`.
+  No se reinstalan paquetes ni se refrescan iconos indiscriminadamente.
+- **OpenSSH:** la transacción voluntaria de `com.openssh.sshd.plist` ancla
+  `Library` y `LaunchDaemons` con directorios `O_NOFOLLOW`, modo y propietario
+  validados antes de crear respaldos, impidiendo que una sustitución de
+  `Library` por un enlace intermedio redirija la escritura a otro servicio.
+  Mantiene la ventana original CS_INSTALLER y sus rechazos sin privilegios.
+- **Importación launchd:** al inspeccionar plists importados de paquetes se
+  evita bloquear PID 1 en ficheros especiales, se exige un diccionario de job
+  con `Label`, y se libera el objeto XPC creado después de insertarlo (la
+  inserción conserva su propia referencia). Reduce fugas por lecturas
+  repetidas; no reescribe plists ni incorpora hooks nuevos.
+- **SETEXEC:** cancelar una vigilancia `kevent` de un solo uso tolera `EINTR` y
+  trata `ENOENT` como vigilancia ya consumida. Limpia el registro de usuario
+  idempotentemente; otros fallos de kernel siguen propagándose sin éxito falso.
+- **Comprobación adicional del paquete:** un verificador independiente exige
+  `LC_CODE_SIGNATURE` válido a nivel estructural, `CodeDirectory` y
+  entitlements XML exactamente iguales a la política fijada de Dopamine.
+  Ejecuta pruebas de corrupción y casos negativos. **No** valida firma
+  criptográfica CMS, un perfil Apple, aceptación de sideload ni ejecución iOS.
+
+Se mantiene una limitación sustantiva: aunque la transacción del plist pase,
+no se ha demostrado que la importación de `launchd` adopte la ruta corregida,
+que el proceso `sshd` sobreviva a spawn/dyld ni que responda el banner. El
+último `renameat` tampoco es un CAS frente a un `dpkg` concurrente. En
+consecuencia, ni SSH ni los gestores deben declararse funcionales por los
+tests de host o por una compilación nativa exitosa.

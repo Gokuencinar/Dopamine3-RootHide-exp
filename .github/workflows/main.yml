@@ -411,6 +411,10 @@ jobs:
           set -euo pipefail
           cp Application/Dopamine.ipa Application/RootHide3-Hardware-Beta.ipa
           python3 tools/verify_roothide_full_experimental.py --hardware-beta --ipa Application/RootHide3-Hardware-Beta.ipa --json | tee roothide-hardware-beta-inspection.json
+          # Validate the signed main Mach-O CodeDirectory and embedded policy,
+          # not merely the signing load-command offsets. This remains an ad-hoc
+          # signature: Apple provisioning and actual sideloading are not tested.
+          python3 tools/verify_roothide_app_signature.py --ipa Application/RootHide3-Hardware-Beta.ipa --json | tee roothide-app-signature-inspection.json
           suffix="r${GITHUB_RUN_NUMBER}-a${GITHUB_RUN_ATTEMPT}-${GITHUB_SHA:0:7}"
           asset="RootHide3-Hardware-Beta-${suffix}.ipa"
           tag="roothide3-hw-${suffix}"
@@ -430,6 +434,7 @@ jobs:
           path: |
             ${{ github.workspace }}/Application/${{ steps.hardware_beta_package.outputs.asset }}
             ${{ github.workspace }}/roothide-hardware-beta-inspection.json
+            ${{ github.workspace }}/roothide-app-signature-inspection.json
             ${{ github.workspace }}/Application/${{ steps.hardware_beta_package.outputs.asset }}.sha256
             ${{ github.workspace }}/ROOT_HIDE_HARDWARE_BETA_README.txt
             ${{ github.workspace }}/HARDWARE-BETA.md
