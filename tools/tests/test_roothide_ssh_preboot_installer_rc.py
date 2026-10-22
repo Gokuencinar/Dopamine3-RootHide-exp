@@ -36,7 +36,8 @@ class RootHideSSHPrebootRC(unittest.TestCase):
             'static int RH3SSHRebaseInstalledPlist', 1)[0]
         self.assertIn('JBS_SYSTEMWIDE_GET_JBROOT, NULL', helper)
         self.assertIn('xpc_dictionary_get_string(reply, "root-path")', helper)
-        self.assertIn('xpc_release(reply)', helper)
+        self.assertNotIn('xpc_release(reply)', helper)
+        self.assertIn('compiler manages its lifetime', helper)
         self.assertIn('if (!installerPhase) return RH3SSHCurrentServerRoot()', helper)
         self.assertIn('gSystemInfo.jailbreakInfo.rootPath', helper)
         repair = ENV.split('- (int)rh3RepairRootHideSSHAllowKeyGeneration:', 1)[1].split(

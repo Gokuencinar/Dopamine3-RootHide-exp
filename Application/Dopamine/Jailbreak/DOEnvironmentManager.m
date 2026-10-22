@@ -201,12 +201,12 @@ static NSString *RH3SSHCurrentServerRoot(void)
                                            JBS_SYSTEMWIDE_GET_JBROOT, NULL);
     if (!reply) return nil;
     if (xpc_get_type(reply) != XPC_TYPE_DICTIONARY) {
-        xpc_release(reply);
+        // In this Objective-C ARC translation unit xpc_object_t is an
+        // Objective-C OS object: the compiler manages its lifetime.
         return nil;
     }
     const char *path = xpc_dictionary_get_string(reply, "root-path");
     NSString *root = path ? [NSString stringWithUTF8String:path] : nil;
-    xpc_release(reply);
     return root;
 }
 
@@ -1446,7 +1446,7 @@ static void RH3SSHCountSocketPorts(id entry, NSUInteger *port22, NSUInteger *por
     int installerStatus = csops(getpid(), CS_OPS_STATUS, &installerFlags, sizeof(installerFlags));
     if (installerStatus != 0 || !(installerFlags & CS_INSTALLER)) {
         [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
-            @"SSH repair: installer right unavailable; no plist write attempted. Use opt-in pre-import preparation.";
+            @"SSH repair: installer right unavailable; no plist write attempted. Use opt-in pre-import preparation."];
         return EPERM;
     }
     // During jailbreak startup the app is ALREADY uid 0 / unsandboxed by
