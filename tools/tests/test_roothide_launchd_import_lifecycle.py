@@ -25,6 +25,8 @@ class LaunchDaemonImport(unittest.TestCase):
         function = "void xpc_dictionary_add_launch_daemon_plist_at_path(" + function.split(
             "xpc_object_t (*xpc_dictionary_get_value_orig)", 1
         )[0]
+        self.assertIn("ARC releases this local at scope exit", code)
+        self.assertNotIn("xpc_release(daemonXdict)", function)
         stub = r'''
 #include <stdbool.h>
 #include <stddef.h>
@@ -98,9 +100,9 @@ static int run_case(int scenario, int eInsert, int eParse, int eRelease) {
     return 0;
 }
 int main(void) {
-    if (run_case(0,1,1,1)) return 1; // valid package job
-    if (run_case(1,0,1,1)) return 2; // wrong XPC type
-    if (run_case(2,0,1,1)) return 3; // missing required Label
+    if (run_case(0,1,1,0)) return 1; // valid package job; ARC owns local
+    if (run_case(1,0,1,0)) return 2; // wrong XPC type
+    if (run_case(2,0,1,0)) return 3; // missing required Label
     if (run_case(3,0,0,0)) return 4; // pipe: reject before mapping
     if (run_case(4,0,0,0)) return 5; // oversized: reject before mapping
     if (run_case(5,0,0,0)) return 6; // failed fstat: close descriptor

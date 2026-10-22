@@ -44,10 +44,10 @@ void xpc_dictionary_add_launch_daemon_plist_at_path(xpc_object_t xdict, const ch
 				if (xpc_get_type(daemonXdict) == XPC_TYPE_DICTIONARY &&
 				    xpc_dictionary_get_string(daemonXdict, "Label") != NULL)
 					xpc_dictionary_set_value(xdict, path, daemonXdict);
-				// xpc_create_from_plist returns owned (+1) data; set_value
-				// retains its input. Repeated LaunchDaemons lookups in PID 1
-				// must not leak one dictionary for each inspected package.
-				xpc_release(daemonXdict);
+				// Under -fobjc-arc, xpc_object_t is an Objective-C OS object:
+				// ARC releases this local at scope exit. xpc_dictionary_set_value
+				// keeps its own reference. An explicit xpc_release is forbidden
+				// by ARC and must not be added here.
 			}
 			munmap(addr, len);
 		}
