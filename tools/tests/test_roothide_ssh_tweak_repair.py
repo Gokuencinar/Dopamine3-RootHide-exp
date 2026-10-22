@@ -38,8 +38,9 @@ class RootHideSSHTweakRepairTests(unittest.TestCase):
         self.assertIn('@"com.openssh.sshd"', repair)
         self.assertIn('@"-t", @"ed25519", @"-N", @"", @"-f", keyPath', repair)
         self.assertIn('@"-t", @"-f", configPath, @"-h", keyPath', repair)
-        self.assertIn('RH3SSHRebaseInstalledPlist(plistPath, sshdPath, configPath, keyPath, &changed)', repair)
+        self.assertIn('RH3SSHRebaseInstalledPlist(plistPath, sshdPath, configPath, keyPath, &changed, &failedAt)', repair)
         self.assertIn('config/key validated; socket job atomic rebase', repair)
+        self.assertIn('stage=%s; no service started', repair)
         self.assertNotIn('@"-A"', repair)
         for name in ('launchctl', 'kickstart', 'writeToFile:plistPath', 'chmod(plistPath',
                      'master.passwd', '/rootfs/'):
@@ -70,6 +71,14 @@ class RootHideSSHTweakRepairTests(unittest.TestCase):
         self.assertIn('if (fsync(dir))', repair)
         self.assertIn('RH3SSHReadBounded(checked, checkedInfo.st_size)', repair)
         self.assertIn('if (madeBackup && result && !renamedJob)', repair)
+        self.assertIn('const char **stageOut', repair)
+        for stage in ('directory_stat', 'directory_owner', 'directory_permissions',
+                      'open_original', 'original_group', 'original_permissions',
+                      'original_links', 'backup_owner', 'backup_permissions',
+                      'backup_metadata', 'backup_contract', 'create_replacement',
+                      'replacement_owner', 'replacement_permissions',
+                      'replacement_write_sync', 'replace_atomic'):
+            self.assertIn('"' + stage + '"', repair)
         for forbidden in ('launchctl', 'kickstart', 'bootout', 'reboot3', 'chmod(plistPath',
                           'chown(plistPath', 'us.diatr.shshd', 'master.passwd'):
             self.assertNotIn(forbidden, repair)

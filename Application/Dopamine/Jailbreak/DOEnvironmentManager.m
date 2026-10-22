@@ -188,36 +188,53 @@ static NSData *RH3SSHReadBounded(int fd, off_t length)
 }
 
 static int RH3SSHRebaseInstalledPlist(NSString *plistPath, NSString *sshd,
-                                     NSString *config, NSString *key, BOOL *changed)
+                                     NSString *config, NSString *key, BOOL *changed,
+                                     const char **stageOut)
 {
     if (changed) *changed = NO;
+    if (stageOut) *stageOut = "name";
     if (![plistPath.lastPathComponent isEqualToString:@"com.openssh.sshd.plist"])
         return ENOTSUP;
     const char *jobName = "com.openssh.sshd.plist";
     const char *backupName = ".com.openssh.sshd.rh3-original";
     const char *nextName = ".com.openssh.sshd.rh3-next";
+    if (stageOut) *stageOut = "open_directory";
     int dir = open(plistPath.stringByDeletingLastPathComponent.fileSystemRepresentation,
                    O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
     if (dir < 0) return errno;
     int result = 0;
+    const char *stage = "directory_stat";
     int original = -1, backup = -1, next = -1;
     BOOL madeBackup = NO, madeNext = NO, renamedJob = NO;
     struct stat directory = {0}, before = {0}, current = {0};
     NSData *originalData = nil, *nextData = nil;
     do {
-        if (fstat(dir, &directory) || !S_ISDIR(directory.st_mode) ||
-            directory.st_uid != 0 || (directory.st_mode & 022)) {
-            result = EPERM; break;
-        }
+        if (fstat(dir, &directory)) { result = errno; break; }
+        stage = "directory_type";
+        if (!S_ISDIR(directory.st_mode)) { result = EPERM; break; }
+        stage = "directory_owner";
+        if (directory.st_uid != 0) { result = EPERM; break; }
+        stage = "directory_permissions";
+        if (directory.st_mode & 022) { result = EPERM; break; }
+        stage = "open_original";
         original = openat(dir, jobName, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
         if (original < 0) { result = errno; break; }
-        if (fstat(original, &before) || !S_ISREG(before.st_mode) ||
-            before.st_uid != 0 || before.st_gid != 0 ||
-            (before.st_mode & 022) || before.st_nlink != 1) {
-            result = EPERM; break;
-        }
+        stage = "original_stat";
+        if (fstat(original, &before)) { result = errno; break; }
+        stage = "original_type";
+        if (!S_ISREG(before.st_mode)) { result = EPERM; break; }
+        stage = "original_owner";
+        if (before.st_uid != 0) { result = EPERM; break; }
+        stage = "original_group";
+        if (before.st_gid != 0) { result = EPERM; break; }
+        stage = "original_permissions";
+        if (before.st_mode & 022) { result = EPERM; break; }
+        stage = "original_links";
+        if (before.st_nlink != 1) { result = EPERM; break; }
+        stage = "read_original";
         originalData = RH3SSHReadBounded(original, before.st_size);
         if (!originalData) { result = EIO; break; }
+        stage = "parse_original";
         id parsed = [NSPropertyListSerialization propertyListWithData:originalData
                     options:NSPropertyListMutableContainers format:NULL error:NULL];
         if (![parsed isKindOfClass:NSDictionary.class]) { result = EINVAL; break; }
@@ -225,6 +242,7 @@ static int RH3SSHRebaseInstalledPlist(NSString *plistPath, NSString *sshd,
         NSDictionary *sockets = [job[@"Sockets"] isKindOfClass:NSDictionary.class] ? job[@"Sockets"] : nil;
         NSDictionary *inetd = [job[@"inetdCompatibility"] isKindOfClass:NSDictionary.class] ?
                               job[@"inetdCompatibility"] : nil;
+        stage = "socket_contract";
         if (![job[@"Label"] isEqual:@"com.openssh.sshd"] || sockets.count != 2 ||
             ![inetd[@"Wait"] isKindOfClass:NSNumber.class] || [inetd[@"Wait"] boolValue]) {
             result = ENOTSUP; break;
@@ -234,33 +252,46 @@ static int RH3SSHRebaseInstalledPlist(NSString *plistPath, NSString *sshd,
             break; // Idempotent: verified paths already persisted.
         job[@"Program"] = sshd;
         job[@"ProgramArguments"] = args;
+        stage = "serialize_rebased";
         nextData = [NSPropertyListSerialization dataWithPropertyList:job
                     format:NSPropertyListXMLFormat_v1_0 options:0 error:NULL];
         if (!nextData || nextData.length > 65536 || nextData.length < 32) {
             result = EOVERFLOW; break;
         }
 
+        stage = "create_backup";
         backup = openat(dir, backupName, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
         if (backup >= 0) {
             madeBackup = YES;
-            if (fchown(backup, 0, 0) || fchmod(backup, 0600) ||
-                (result = RH3SSHWriteAll(backup, originalData)) != 0) {
-                if (!result) result = errno;
-                break;
-            }
+            stage = "backup_owner";
+            if (fchown(backup, 0, 0)) { result = errno; break; }
+            stage = "backup_permissions";
+            if (fchmod(backup, 0600)) { result = errno; break; }
+            stage = "backup_write_sync";
+            result = RH3SSHWriteAll(backup, originalData);
+            if (result) break;
             close(backup); backup = -1;
+            stage = "backup_directory_sync";
             if (fsync(dir)) { result = errno; break; }
         } else if (errno == EEXIST) {
             // Preserve the very first package original across repeated repairs.
             // Refuse a symlink, foreign owner, malformed or writable backup.
+            stage = "backup_open_existing";
             backup = openat(dir, backupName, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
             struct stat bs = {0};
-            if (backup < 0 || fstat(backup, &bs) || !S_ISREG(bs.st_mode) ||
-                bs.st_uid != 0 || bs.st_gid != 0 || (bs.st_mode & 0777) != 0600 ||
-                bs.st_nlink != 1) { result = EPERM; break; }
+            if (backup < 0) { result = errno; break; }
+            stage = "backup_stat";
+            if (fstat(backup, &bs)) { result = errno; break; }
+            stage = "backup_metadata";
+            if (!S_ISREG(bs.st_mode) || bs.st_uid != 0 || bs.st_gid != 0 ||
+                (bs.st_mode & 0777) != 0600 || bs.st_nlink != 1) {
+                result = EPERM; break;
+            }
+            stage = "backup_read";
             NSData *saved = RH3SSHReadBounded(backup, bs.st_size);
             id savedJob = saved ? [NSPropertyListSerialization propertyListWithData:saved
                               options:NSPropertyListImmutable format:NULL error:NULL] : nil;
+            stage = "backup_contract";
             if (![savedJob isKindOfClass:NSDictionary.class] ||
                 ![savedJob[@"Label"] isEqual:@"com.openssh.sshd"] ||
                 ![savedJob[@"Sockets"] isKindOfClass:NSDictionary.class]) {
@@ -269,29 +300,39 @@ static int RH3SSHRebaseInstalledPlist(NSString *plistPath, NSString *sshd,
             close(backup); backup = -1;
         } else { result = errno; break; }
 
+        stage = "create_replacement";
         next = openat(dir, nextName, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
         if (next < 0) { result = errno; break; }
         madeNext = YES;
-        if (fchown(next, before.st_uid, before.st_gid) ||
-            fchmod(next, before.st_mode & 0777)) { result = errno; break; }
+        stage = "replacement_owner";
+        if (fchown(next, before.st_uid, before.st_gid)) { result = errno; break; }
+        stage = "replacement_permissions";
+        if (fchmod(next, before.st_mode & 0777)) { result = errno; break; }
+        stage = "replacement_write_sync";
         result = RH3SSHWriteAll(next, nextData);
         if (result) break;
         close(next); next = -1;
+        stage = "original_revalidate";
         if (fstatat(dir, jobName, &current, AT_SYMLINK_NOFOLLOW) ||
             current.st_dev != before.st_dev || current.st_ino != before.st_ino ||
             current.st_size != before.st_size || current.st_mtime != before.st_mtime) {
             result = EBUSY; break; // A package manager or other process changed it.
         }
+        stage = "replace_atomic";
         if (renameat(dir, nextName, dir, jobName)) { result = errno; break; }
         renamedJob = YES;
         if (changed) *changed = YES; // Even if readback/fsync later fails.
         madeNext = NO;
+        stage = "replacement_directory_sync";
         if (fsync(dir)) { result = errno; break; }
         // Check the persisted result before reporting success to the user.
+        stage = "verify_open";
         int checked = openat(dir, jobName, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
         struct stat checkedInfo = {0};
         if (checked < 0) { result = errno; break; }
+        stage = "verify_stat";
         if (fstat(checked, &checkedInfo)) result = errno;
+        stage = "verify_read";
         NSData *verifiedData = result ? nil : RH3SSHReadBounded(checked, checkedInfo.st_size);
         close(checked);
         id verified = verifiedData ? [NSPropertyListSerialization propertyListWithData:verifiedData
@@ -301,6 +342,7 @@ static int RH3SSHRebaseInstalledPlist(NSString *plistPath, NSString *sshd,
                                                   [verified mutableCopy] : nil;
         [originalOtherKeys removeObjectsForKeys:@[@"Program", @"ProgramArguments"]];
         [verifiedOtherKeys removeObjectsForKeys:@[@"Program", @"ProgramArguments"]];
+        stage = "verify_contract";
         if (![verified isKindOfClass:NSDictionary.class] ||
             ![verified[@"Program"] isEqual:sshd] ||
             ![verified[@"ProgramArguments"] isEqual:args] ||
@@ -316,6 +358,7 @@ static int RH3SSHRebaseInstalledPlist(NSString *plistPath, NSString *sshd,
     if (madeNext) (void)unlinkat(dir, nextName, 0);
     if (madeBackup && result && !renamedJob)
         (void)unlinkat(dir, backupName, 0); // Original job was not replaced.
+    if (stageOut) *stageOut = result ? stage : (changed && *changed ? "replaced_verified" : "already_current");
     close(dir);
     return result;
 }
@@ -1240,10 +1283,11 @@ static void RH3SSHCountSocketPorts(id entry, NSUInteger *port22, NSUInteger *por
             if (syncResult) return syncResult;
         }
         BOOL changed = NO;
-        int writeResult = RH3SSHRebaseInstalledPlist(plistPath, sshdPath, configPath, keyPath, &changed);
+        const char *failedAt = "unknown";
+        int writeResult = RH3SSHRebaseInstalledPlist(plistPath, sshdPath, configPath, keyPath, &changed, &failedAt);
         [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
-            [NSString stringWithFormat:@"SSH repair: config/key validated; socket job atomic rebase result=%d changed=%d; no service started",
-             writeResult, changed]];
+            [NSString stringWithFormat:@"SSH repair: config/key validated; socket job atomic rebase result=%d changed=%d stage=%s; no service started",
+             writeResult, changed, failedAt]];
         return writeResult;
     }];
     return [self rh3ActionStage:@"SSH socket plist repair (no server started)" result:result];
@@ -1338,6 +1382,10 @@ static void RH3SSHCountSocketPorts(id entry, NSUInteger *port22, NSUInteger *por
     __block NSUInteger socketCount = 0;
     __block NSUInteger port22Count = 0, port2222Count = 0;
     __block NSString *diskProgram = nil;
+    // -1=unknown; 0=false; 1=true. Backup: 0=absent, 1=metadata trusted,
+    // 2=present but unexpected metadata, -1=unreadable. No paths are logged.
+    __block int directoryTrusted = -1, originalGroupTrusted = -1;
+    __block int originalModeTrusted = -1, originalLinksTrusted = -1, backupState = -1;
     int preflight = [self rh3PerformPrivilegedAction:^int {
         NSError *error = nil;
         root = [DOBootstrapper rootHideExistingRootWithError:&error];
@@ -1348,6 +1396,16 @@ static void RH3SSHCountSocketPorts(id entry, NSUInteger *port22, NSUInteger *por
         NSString *directory = [root stringByAppendingPathComponent:@"Library/LaunchDaemons"];
         NSArray *names = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:directory error:&error];
         if (!names || error) return EIO;
+        struct stat folder = {0}, backupInfo = {0};
+        if (lstat(directory.fileSystemRepresentation, &folder) == 0)
+            directoryTrusted = S_ISDIR(folder.st_mode) && folder.st_uid == 0 &&
+                               (folder.st_mode & 022) == 0;
+        NSString *backupPath = [directory stringByAppendingPathComponent:@".com.openssh.sshd.rh3-original"];
+        if (lstat(backupPath.fileSystemRepresentation, &backupInfo) == 0)
+            backupState = S_ISREG(backupInfo.st_mode) && backupInfo.st_uid == 0 &&
+                          backupInfo.st_gid == 0 && (backupInfo.st_mode & 0777) == 0600 &&
+                          backupInfo.st_nlink == 1 ? 1 : 2;
+        else if (errno == ENOENT) backupState = 0;
         NSUInteger matches = 0;
         for (NSString *name in names) {
             if (![name.pathExtension.lowercaseString isEqualToString:@"plist"] ||
@@ -1361,6 +1419,9 @@ static void RH3SSHCountSocketPorts(id entry, NSUInteger *port22, NSUInteger *por
             if (![plist[@"Label"] isEqual:@"com.openssh.sshd"]) continue;
             matches++;
             if (matches > 1) return EEXIST;
+            originalGroupTrusted = file.st_gid == 0;
+            originalModeTrusted = (file.st_mode & 022) == 0;
+            originalLinksTrusted = file.st_nlink == 1;
             NSString *program = [plist[@"Program"] isKindOfClass:NSString.class] ? plist[@"Program"] : nil;
             if (program.length && program.length <= 4096) diskProgram = program;
             NSDictionary *sockets = [plist[@"Sockets"] isKindOfClass:NSDictionary.class] ? plist[@"Sockets"] : nil;
@@ -1379,6 +1440,9 @@ static void RH3SSHCountSocketPorts(id entry, NSUInteger *port22, NSUInteger *por
         [NSString stringWithFormat:@"SSH socket plist: result=%d sockets=%lu port22=%lu port2222=%lu disabled=%d inetd_wait=%d (minus one=unknown)",
          preflight, (unsigned long)socketCount, (unsigned long)port22Count,
          (unsigned long)port2222Count, onDiskDisabled, onDiskWait]];
+    [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
+        [NSString stringWithFormat:@"SSH socket plist metadata: directory_trusted=%d original_group_trusted=%d original_mode_trusted=%d original_links_trusted=%d backup_state=%d (read-only)",
+         directoryTrusted, originalGroupTrusted, originalModeTrusted, originalLinksTrusted, backupState]];
     if (preflight) return [self rh3ActionStage:@"SSH socket plist diagnosis" result:preflight];
 
     NSString *binary = [root stringByAppendingPathComponent:@"usr/bin/launchctl"];

@@ -55,6 +55,18 @@ class SSHSocketDiagnosisR161(unittest.TestCase):
         self.assertNotIn("program_rooted=", body)
         self.assertNotIn("listeners=%d", body)
 
+    def test_r167_metadata_probe_reports_flags_without_private_values(self):
+        body = self.diagnostic
+        self.assertIn('SSH socket plist metadata: directory_trusted=%d', body)
+        self.assertIn('original_group_trusted=%d', body)
+        self.assertIn('original_mode_trusted=%d', body)
+        self.assertIn('original_links_trusted=%d', body)
+        self.assertIn('backup_state=%d', body)
+        self.assertIn('lstat(backupPath.fileSystemRepresentation, &backupInfo)', body)
+        self.assertIn('lstat(directory.fileSystemRepresentation, &folder)', body)
+        self.assertNotIn('rh3RecordDiagnosticStage:backupPath', body)
+        self.assertNotIn('rh3RecordDiagnosticStage:directory', body)
+
     def test_r162_classifies_without_disclosing_live_paths(self):
         helpers = ENV.split("// launchctl print is a diagnostic format", 1)[1].split(
             "@implementation DOEnvironmentManager", 1

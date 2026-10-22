@@ -215,6 +215,32 @@ La prueba física pendiente es comprobar después de una nueva importación que
 recibe el banner `SSH-2.0` antes de enviar credenciales. El éxito de la
 escritura del plist **no es** prueba de SSH funcional.
 
+### r166: rechazo EPERM de la reparación; diagnóstico r167
+
+El log r166 del 22/10/2026 a las 06:24:43 UTC registra
+`SSH preflight: verified; key_generation_needed=0`,
+`RootHide child sshd: ... result=0` y
+`socket job atomic rebase result=1 changed=0`. Significa `EPERM` antes
+de completar el reemplazo atómico del plist; no es un error demostrado de
+`sshd` ni de su clave. El código r166 no distingue la comprobación concreta
+fallida: UID/GID, permisos del plist/directorio, hardlinks, estado de respaldo,
+o permisos devueltos por `openat`, `fchown`, `fchmod` y `fsync`.
+
+La revisión r167 amplía la acción **Diagnosticar arranque de OpenSSH
+(solo lectura)** con un resumen de metadatos: `directory_trusted`,
+`original_group_trusted`, `original_mode_trusted`,
+`original_links_trusted`, `backup_state` (0 ausente, 1 metadatos
+correctos, 2 metadatos sospechosos, −1 desconocido). No registra valores de
+propietario, rutas ni contenido de los ficheros. La reparación optativa,
+si se ejecuta en un ensayo posterior, informa `stage=<etapa_fija>` junto
+al código de error. Se mantienen sin cambios todas las comprobaciones
+de seguridad y no se modifica ningún plist con la acción diagnóstica.
+
+**Hasta conocer esos datos:** no reiniciar espacio de usuario, no volver
+a ejecutar el jailbreak, no cambiar permisos de SSH manualmente ni repetir
+la reparación a ciegas. `changed=0` no demuestra que no exista algún
+respaldo parcial de un intento previo; `backup_state` ayudará a comprobarlo.
+
 Guarda el mensaje de error, los logs, el modelo, la versión exacta de iOS y la revisión de la app. No repitas el proceso sin revisar el fallo: puede haber quedado un bootstrap a medias. No se borra automáticamente una instalación de RootHide 2, y reiniciar no garantiza resolver cualquier estado parcial.
 
 ## Compilar esta variante
