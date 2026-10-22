@@ -20,6 +20,13 @@ void xpc_dictionary_add_launch_daemon_plist_at_path(xpc_object_t xdict, const ch
 			close(ldFd);
 			return;
 		}
+		// Import runs inside launchd. A malformed package entry must never
+		// cause an unbounded mapping or a read from a special device here.
+		// Four MiB is a defensive ceiling, far above ordinary launchd plists.
+		if (!S_ISREG(s.st_mode) || s.st_size <= 0 || s.st_size > 4 * 1024 * 1024) {
+			close(ldFd);
+			return;
+		}
 		size_t len = s.st_size;
 		void *addr = mmap(NULL, len, PROT_READ, MAP_FILE | MAP_PRIVATE, ldFd, 0);
 		if (addr != MAP_FAILED) {
@@ -39,11 +46,24 @@ void xpc_dictionary_add_launch_daemon_plist_at_path(xpc_object_t xdict, const ch
 }
 
 xpc_object_t (*xpc_dictionary_get_value_orig)(xpc_object_t xdict, const char *key);
+// launchd may read Paths repeatedly while importing a daemon. Avoid appending
+// the same private directories on every read, which grows the shared array.
+static bool rh3_xpc_paths_contains(xpc_object_t paths, const char *path)
+{
+    if (!paths || !path || xpc_get_type(paths) != XPC_TYPE_ARRAY) return false;
+    size_t count = xpc_array_get_count(paths);
+    for (size_t i = 0; i < count; i++) {
+        const char *current = xpc_array_get_string(paths, i);
+        if (current && !strcmp(current, path)) return true;
+    }
+    return false;
+}
+
 xpc_object_t xpc_dictionary_get_value_hook(xpc_object_t xdict, const char *key)
 {
 	xpc_object_t origXvalue = xpc_dictionary_get_value_orig(xdict, key);
 	if (!strcmp(key, "LaunchDaemons")) {
-		if (xpc_get_type(origXvalue) == XPC_TYPE_DICTIONARY) {
+		if (origXvalue && xpc_get_type(origXvalue) == XPC_TYPE_DICTIONARY) {
 			for (NSString *daemonPlistName in [[NSFileManager defaultManager] contentsOfDirectoryAtPath:JBROOT_PATH(@"/basebin/LaunchDaemons") error:nil]) {
 				if ([daemonPlistName.pathExtension isEqualToString:@"plist"]) {
 					xpc_dictionary_add_launch_daemon_plist_at_path(origXvalue, [JBROOT_PATH(@"/basebin/LaunchDaemons") stringByAppendingPathComponent:daemonPlistName].fileSystemRepresentation);
@@ -57,9 +77,13 @@ xpc_object_t xpc_dictionary_get_value_hook(xpc_object_t xdict, const char *key)
 		}
 	}
 	else if (!strcmp(key, "Paths")) {
-		if (xpc_get_type(origXvalue) == XPC_TYPE_ARRAY) {
-			xpc_array_set_string(origXvalue, XPC_ARRAY_APPEND, JBROOT_PATH("/basebin/LaunchDaemons"));
-			xpc_array_set_string(origXvalue, XPC_ARRAY_APPEND, JBROOT_PATH("/Library/LaunchDaemons"));
+		if (origXvalue && xpc_get_type(origXvalue) == XPC_TYPE_ARRAY) {
+			const char *basebin = JBROOT_PATH("/basebin/LaunchDaemons");
+			const char *packages = JBROOT_PATH("/Library/LaunchDaemons");
+			if (!rh3_xpc_paths_contains(origXvalue, basebin))
+				xpc_array_set_string(origXvalue, XPC_ARRAY_APPEND, basebin);
+			if (!rh3_xpc_paths_contains(origXvalue, packages))
+				xpc_array_set_string(origXvalue, XPC_ARRAY_APPEND, packages);
 		}
 	}
 	else if (!strcmp(key, "com.apple.private.xpc.launchd.userspace-reboot")) {

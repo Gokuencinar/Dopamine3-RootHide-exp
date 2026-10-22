@@ -426,6 +426,50 @@ de contrato de fuente; no constituye compilación ObjC iOS, pruebas de fallos
 de filesystem ni validación física. No instalar ni ejecutar otro jailbreak
 basándose solamente en esta sección.
 
+### Integración defensiva derivada de la IPA oficial Relaxin v0.5.6
+
+Se contrastó el desensamblado verificado de la IPA oficial v0.5.6 con el
+protocolo real de RootHide3: Relaxin prepara confianza con mensaje 1101,
+finaliza trust de ejecución con 1102, conserva el watcher SETEXEC 1002/1003
+y sigue parcheando hijos mediante 1001. **No** se trasplanta a PID 1: la
+operación XPC continúa siendo síncrona, sin timeout/reentrancia demostrados,
+y los dos `jailbreakd` no comparten el contrato de 1101/1102.
+
+En su lugar, esta revisión corrige rutas comprobables de seguridad/arranque:
+
+- Con host key ED25519 presente, el rebase opt-in de OpenSSH no requiere
+  `ssh-keygen`; solo se verifica el generador antes de generar una clave en
+  una acción interactiva expresamente autorizada. En preboot nunca genera.
+  Antes de aceptar el binario se comprueba también que `usr` y `usr/sbin`
+  sean directorios reales controlados por root (revalidación en commit),
+  para no seguir symlinks intermedios de `lstat(sshd)`.
+- La clasificación de procesos ignora entradas XPC no string de
+  `ProcessBlacklist`, evitando una desreferencia de `NULL` en el hook
+  compartido que también usa launchd.
+- El hook **existente** de importación de `launchd` impide duplicados de
+  `Paths` en lecturas sucesivas, comprueba respuestas XPC nulas y limita
+  mapeos de plists a ficheros regulares de hasta 4 MiB. No incorpora nuevos
+  endpoints, importadores ni privilegios.
+- `jailbreakd` devuelve fallo si no consigue reanudar un hijo tras patch
+  1001; el padre puede limpiar solamente el proceso que acaba de crear.
+- El spawn compartido no intenta corregir la persona cuando el spawn falló;
+  el watcher NOTE_EXEC tolera `EINTR`, y la limpieza de hijos suspendidos usa
+  `waitpid(WNOHANG)` acotado en vez de una espera sin plazo.
+
+Los tests de host ejecutan el clasificador real de blacklist y el helper de
+consulta de `Paths` con dobles XPC, además de comprobar contratos de
+propagación de error. Siguen sin simular APFS/launchd/iOS ni demostrar SSH.
+
+**Riesgo residual a no ocultar:** entre la última validación del inode de
+`com.openssh.sshd.plist` y `renameat` no existe una transacción CAS contra un
+`dpkg` concurrente. Una actualización del paquete publicada precisamente en
+ese intervalo podría sobrescribirse. El opt-in preboot sucede después de
+finalizar el bootstrap; no se ha demostrado exclusión mutua con un gestor de
+paquetes externo. No ejecutar la reparación interactiva durante operaciones
+de paquetes; una futura variante solo debe ampliar el alcance tras demostrar
+la seguridad del reemplazo en APFS. Tampoco está probado que el rebase se
+importe efectivamente o que el banner SSH responda tras él.
+
 Los builds normales mantienen el jailbreak desactivado. La variante habilitada se genera manualmente con `hardware_beta` en GitHub Actions o, en macOS con las dependencias del proyecto:
 
 ```sh

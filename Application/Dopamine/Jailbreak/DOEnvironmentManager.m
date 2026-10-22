@@ -1494,7 +1494,11 @@ static BOOL RH3SSHValidateSingleSocket(id entry, NSUInteger *port22, NSUInteger 
         }
         // Reject symlinks or writable directories along paths where an
         // attacker could redirect ssh-keygen or the root-owned host key.
-        for (NSString *suffix in @[@"etc", @"etc/ssh", @"Library", @"Library/LaunchDaemons"]) {
+        // Checking only lstat(usr/sbin/sshd) would follow a symlink in an
+        // intermediate usr or usr/sbin component. Pin their directory types
+        // and root ownership before accepting an executable for launchd.
+        for (NSString *suffix in @[@"etc", @"etc/ssh", @"usr", @"usr/sbin",
+                                   @"Library", @"Library/LaunchDaemons"]) {
             NSString *directory = [root stringByAppendingPathComponent:suffix];
             int fd = open(directory.fileSystemRepresentation, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
             if (fd < 0) {
@@ -1557,7 +1561,10 @@ static BOOL RH3SSHValidateSingleSocket(id entry, NSUInteger *port22, NSUInteger 
         configPath = [root stringByAppendingPathComponent:@"etc/ssh/sshd_config"];
         keyPath = [root stringByAppendingPathComponent:@"etc/ssh/ssh_host_ed25519_key"];
         publicKeyPath = [keyPath stringByAppendingString:@".pub"];
-        for (NSString *binary in @[sshdPath, keygenPath]) {
+        // A previously provisioned host key is authoritative. In particular,
+        // the installer-phase rebase must never require ssh-keygen: it does
+        // not generate keys and the package may supply only the server.
+        for (NSString *binary in @[sshdPath]) {
             struct stat st = {0};
             if (lstat(binary.fileSystemRepresentation, &st) != 0 ||
                 !S_ISREG(st.st_mode) || st.st_uid != 0 || !(st.st_mode & S_IXUSR) ||
@@ -1605,6 +1612,27 @@ static BOOL RH3SSHValidateSingleSocket(id entry, NSUInteger *port22, NSUInteger 
         return ENOENT;
     }
     if (needsKey) {
+            // Only the separately confirmed interactive key-generation action
+            // needs this executable. Never make its presence a prerequisite
+            // for an existing host key or for an installer-phase plist rebase.
+            int keygenDirectory = open([root stringByAppendingPathComponent:@"usr/bin"].fileSystemRepresentation,
+                                       O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+            if (keygenDirectory < 0) return errno;
+            struct stat keygenDirInfo = {0};
+            int keygenDirError = fstat(keygenDirectory, &keygenDirInfo) ? errno : 0;
+            close(keygenDirectory);
+            if (keygenDirError) return keygenDirError;
+            if (!S_ISDIR(keygenDirInfo.st_mode) || keygenDirInfo.st_uid != 0 ||
+                (keygenDirInfo.st_mode & (S_IWGRP | S_IWOTH))) return EPERM;
+            struct stat keygenInfo = {0};
+            if (lstat(keygenPath.fileSystemRepresentation, &keygenInfo) != 0 ||
+                !S_ISREG(keygenInfo.st_mode) || keygenInfo.st_uid != 0 ||
+                !(keygenInfo.st_mode & S_IXUSR) ||
+                (keygenInfo.st_mode & (S_IWGRP | S_IWOTH))) {
+                [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
+                    @"SSH preflight: key generation requested but trusted ssh-keygen unavailable"];
+                return ENOENT;
+            }
         // Never use ssh-keygen -A: it writes the stock /etc/ssh directory.
         // -f pins output to the verified, root-owned hidden bootstrap.
         result = [self rh3RunCommand:keygenPath arguments:
@@ -1633,6 +1661,20 @@ static BOOL RH3SSHValidateSingleSocket(id entry, NSUInteger *port22, NSUInteger 
             ![RH3CanonicalAppPath(active) isEqualToString:
               RH3CanonicalAppPath(serverRoot)])
             return EPERM;
+        // The binary and configuration ancestors must still be real,
+        // root-owned directories when the transaction is committed; lstat
+        // on each final file cannot detect a swapped intermediate symlink.
+        for (NSString *suffix in @[@"usr", @"usr/sbin", @"etc", @"etc/ssh"]) {
+            int ancestor = open([root stringByAppendingPathComponent:suffix].fileSystemRepresentation,
+                                O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+            if (ancestor < 0) return errno;
+            struct stat info = {0};
+            int ancestorError = fstat(ancestor, &info) ? errno : 0;
+            close(ancestor);
+            if (ancestorError) return ancestorError;
+            if (!S_ISDIR(info.st_mode) || info.st_uid != 0 ||
+                (info.st_mode & (S_IWGRP | S_IWOTH))) return EPERM;
+        }
         struct stat keyInfo = {0};
         if (lstat(keyPath.fileSystemRepresentation, &keyInfo) != 0 ||
             !S_ISREG(keyInfo.st_mode) || keyInfo.st_uid != 0 ||

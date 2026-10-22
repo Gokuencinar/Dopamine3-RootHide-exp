@@ -62,7 +62,7 @@ void jailbreakd_received_message(mach_port_t port)
 							result = proc_patch_csflags(pid);
 						}
 						else if(proc_fix_spinlock(pid) == 0) {
-							if(resume) kill(pid, SIGCONT);
+								if(resume) kill(pid, SIGCONT);
 						} else {
 							JBLogError("spinlock fix failed: %d", pid);
 							result = -1;
@@ -87,7 +87,12 @@ void jailbreakd_received_message(mach_port_t port)
 							result = proc_patch_csflags(pid);
 						}
 						else if(roothide_patch_proc(pid) == 0) {
-							if(resume) kill(pid, SIGCONT);
+								if(resume && kill(pid, SIGCONT) != 0) {
+									// The parent will kill/reap its OWN suspended child
+									// when it receives this nonzero patch result.
+									JBLogError("spawn patch: failed to resume child %d", pid);
+									result = -1;
+								}
 						} else {
 							JBLogError("spawn patch failed: %d", pid);
 							result = -1;

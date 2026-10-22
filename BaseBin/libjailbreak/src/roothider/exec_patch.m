@@ -19,7 +19,12 @@ void event_handler(int kq)
     while(true)
     {
         struct kevent event = {0};
-        int ret = kevent(kq, NULL, 0, &event, 1, NULL);
+        int ret;
+        do {
+            ret = kevent(kq, NULL, 0, &event, 1, NULL);
+        } while (ret == -1 && errno == EINTR);
+        // A signal is not a reason to crash the patch daemon (and strand
+        // suspended children waiting for their NOTE_EXEC notification).
         assert(ret == 1);
         assert(event.filter == EVFILT_PROC);
 

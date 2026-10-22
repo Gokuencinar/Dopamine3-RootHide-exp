@@ -5,6 +5,7 @@
 #include <errno.h>
 #include <signal.h>
 #include <sys/wait.h>
+#include <unistd.h>
 
 // RootHide needs the child patched before its first userspace instruction.
 // Keep this policy independent of Mach/XPC so failure ordering can be tested.
@@ -40,8 +41,16 @@ static int rh3_spawn_patched(pid_t *pidOut, posix_spawnattr_t *attributes, bool 
     if (child <= 0) return EIO;
     if (restored || patch(child, resume) != 0) {
         // Only this newly created, still suspended child is ours to terminate.
-        kill(child, SIGKILL);
-        while (waitpid(child, NULL, 0) < 0 && errno == EINTR) {}
+        (void)kill(child, SIGKILL);
+        // Never introduce an unbounded wait into a caller's spawn failure
+        // path. Match the bounded cleanup used by exec_cmd_roothide_spawn:
+        // kill our suspended child, then attempt a short, nonblocking reap.
+        for (int attempt = 0; attempt < 20; attempt++) {
+            pid_t waited = waitpid(child, NULL, WNOHANG);
+            if (waited == child || (waited < 0 && errno == ECHILD)) break;
+            if (waited < 0 && errno != EINTR) break;
+            usleep(10000);
+        }
         if (pidOut) *pidOut = 0;
         return EIO;
     }

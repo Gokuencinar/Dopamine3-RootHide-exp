@@ -228,7 +228,11 @@ static kSpawnConfig spawn_config_for_executable(const char* path, char *const ar
 	if (userBlacklist && xpc_get_type(userBlacklist) == XPC_TYPE_ARRAY) {
 		size_t userBlacklistCount = xpc_array_get_count(userBlacklist);
 		for (size_t i = 0; i < userBlacklistCount; i++) {
-			if (!strcmp(xpc_array_get_string(userBlacklist, i), path)) return kSpawnConfigTrust;
+				// A malformed preferences array must not crash launchd (PID 1).
+				// XPC returns NULL for non-string entries; skip them instead
+				// of feeding NULL to strcmp in the shared spawn path.
+				const char *excluded = xpc_array_get_string(userBlacklist, i);
+				if (excluded && !strcmp(excluded, path)) return kSpawnConfigTrust;
 		}
 	}
 
@@ -419,7 +423,10 @@ static int spawn_exec_hook_common(bool isExec,
 	}
 	free(normalizedInserts);
 
-	if (personaFixUid == 0 || personaFixGid == 0 && childPid != -1) {
+		// Only fix a child actually created by this spawn. The previous
+		// operator precedence evaluated UID==0 even when spawn failed, and
+		// could send a persona request (and SIGCONT) to the invalid PID -1.
+		if (r == 0 && childPid > 0 && (personaFixUid == 0 || personaFixGid == 0)) {
 		jbclient_persona_fix(childPid, personaFixUid, personaFixGid);
 		if (personaFixNeedsResume) {
 			kill(childPid, SIGCONT);
