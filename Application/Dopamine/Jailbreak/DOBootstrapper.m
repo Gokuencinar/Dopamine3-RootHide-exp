@@ -1554,6 +1554,67 @@ cleanup_root:
     return [NSBundle.mainBundle.bundlePath stringByAppendingPathComponent:name];
 }
 
+// RootHide 2's bootstrap explicitly registered the new managers with uicache.
+// Merely unpacking their .debs does not guarantee a home-screen icon. Limit
+// this to pinned bundle identifiers inside the active verified bootstrap and
+// bound both spawn and process exit; never re-register every user application.
+static NSError *RH3RegisterPinnedJailbreakApps(NSString *root)
+{
+    if (geteuid() != 0 || ![DOBootstrapper rootHideBrandForPath:root] ||
+        !RH3IsRealDirectory(root))
+        return RH3Error(BootstrapErrorCodeFailedFinalising, @"RootHide app registration requires the active verified root");
+    NSString *uicache = [root stringByAppendingPathComponent:@"usr/bin/uicache"];
+    struct stat toolInfo = {0};
+    if (lstat(uicache.fileSystemRepresentation, &toolInfo) != 0 ||
+        !S_ISREG(toolInfo.st_mode) || toolInfo.st_uid != 0 ||
+        toolInfo.st_nlink != 1 || (toolInfo.st_mode & 0022))
+        return RH3Error(BootstrapErrorCodeFailedFinalising, @"Untrusted or missing RootHide uicache executable");
+    NSDictionary<NSString *, NSString *> *bundles = @{
+        @"Sileo": @"org.coolstar.SileoStore", @"Zebra": @"xyz.willy.Zebra",
+        @"RootHide": @"com.roothide.manager"
+    };
+    for (NSString *name in @[@"Sileo", @"Zebra", @"RootHide"]) {
+        NSString *app = [root stringByAppendingPathComponent:
+                         [@"Applications" stringByAppendingPathComponent:[name stringByAppendingString:@".app"]]];
+        struct stat appInfo = {0};
+        if (lstat(app.fileSystemRepresentation, &appInfo) != 0) {
+            if (errno == ENOENT && ![name isEqualToString:@"RootHide"]) continue;
+            return RH3Error(BootstrapErrorCodeFailedFinalising,
+                            [NSString stringWithFormat:@"RootHide bundle %@ is missing or unreadable", name]);
+        }
+        NSString *plist = [app stringByAppendingPathComponent:@"Info.plist"];
+        struct stat plistInfo = {0};
+        NSString *bundleName = [name stringByAppendingString:@".app"];
+        if (!S_ISDIR(appInfo.st_mode) || (appInfo.st_mode & 0022) ||
+            !rh3_bundle_owner_allowed(bundleName.UTF8String, appInfo.st_uid, 0) ||
+            lstat(plist.fileSystemRepresentation, &plistInfo) != 0 ||
+            !S_ISREG(plistInfo.st_mode) || plistInfo.st_nlink != 1 ||
+            plistInfo.st_size <= 0 || plistInfo.st_size > 64 * 1024 ||
+            !rh3_bundle_owner_allowed(bundleName.UTF8String, plistInfo.st_uid, 0) ||
+            ![[NSDictionary dictionaryWithContentsOfFile:plist][@"CFBundleIdentifier"] isEqual:bundles[name]])
+            return RH3Error(BootstrapErrorCodeFailedFinalising,
+                            [NSString stringWithFormat:@"RootHide bundle %@ failed integrity checks", name]);
+        __block pid_t child = 0;
+        __block int spawnResult = EIO;
+        dispatch_group_t launch = dispatch_group_create();
+        dispatch_group_async(launch, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+            int trust = jbclient_trust_file_by_path(uicache.fileSystemRepresentation);
+            spawnResult = trust ? trust : exec_cmd_nowait(&child, uicache.fileSystemRepresentation,
+                                                        "-p", app.fileSystemRepresentation, NULL);
+        });
+        if (dispatch_group_wait(launch, dispatch_time(DISPATCH_TIME_NOW, 20 * NSEC_PER_SEC)) != 0)
+            return RH3Error(BootstrapErrorCodeFailedFinalising,
+                            [NSString stringWithFormat:@"RootHide uicache launch timed out for %@; outcome unknown", name]);
+        int result = spawnResult ? spawnResult : (child > 1 ? RH3WaitForBootstrapChild(child, 30) : EIO);
+        [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
+            [NSString stringWithFormat:@"apps: register %@ result=%d", name, result]];
+        if (result)
+            return RH3Error(BootstrapErrorCodeFailedFinalising,
+                            [NSString stringWithFormat:@"RootHide app registration failed for %@ (%d)", name, result]);
+    }
+    return nil;
+}
+
 static void RH3RecordInstalledAppInventory(NSString *root)
 {
     if (![DOBootstrapper rootHideBrandForPath:root] || !RH3IsRealDirectory(root)) return;
@@ -1567,10 +1628,13 @@ static void RH3RecordInstalledAppInventory(NSString *root)
                          [@"Applications" stringByAppendingPathComponent:[name stringByAppendingString:@".app"]]];
         NSString *plist = [app stringByAppendingPathComponent:@"Info.plist"];
         struct stat appInfo = {0}, plistInfo = {0};
+        NSString *bundleName = [name stringByAppendingString:@".app"];
         BOOL ownedBundle = lstat(app.fileSystemRepresentation, &appInfo) == 0 &&
-                           S_ISDIR(appInfo.st_mode) && appInfo.st_uid == 0 &&
+                           S_ISDIR(appInfo.st_mode) && !(appInfo.st_mode & 0022) &&
+                           rh3_bundle_owner_allowed(bundleName.UTF8String, appInfo.st_uid, 0) &&
                            lstat(plist.fileSystemRepresentation, &plistInfo) == 0 &&
-                           S_ISREG(plistInfo.st_mode) && plistInfo.st_uid == 0;
+                           S_ISREG(plistInfo.st_mode) &&
+                           rh3_bundle_owner_allowed(bundleName.UTF8String, plistInfo.st_uid, 0);
         BOOL expectedID = ownedBundle &&
             [[NSDictionary dictionaryWithContentsOfFile:plist][@"CFBundleIdentifier"] isEqualToString:bundles[name]];
         [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
@@ -1829,6 +1893,10 @@ static void RH3RecordInstalledAppInventory(NSString *root)
     RH3RecordInstalledAppInventory(root);
     NSError *appLinksError = [self repairRootHideAppLinks];
     if (appLinksError) return appLinksError;
+    if (!installed) {
+        NSError *registrationError = RH3RegisterPinnedJailbreakApps(root);
+        if (registrationError) return registrationError;
+    }
     if ([self fileOrSymlinkExistsAtPath:@"/var/jb"])
         return RH3Error(BootstrapErrorCodeFailedFinalising,
                         @"A package exposed /var/jb during RootHide setup; refusing to mark it installed");

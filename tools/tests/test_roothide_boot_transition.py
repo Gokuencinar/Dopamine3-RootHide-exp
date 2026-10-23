@@ -78,7 +78,9 @@ int main(void){
         self.assertIn('roothide_is_active() ? rh3_bootlog_configure(fd) : ENOTSUP',server)
         app=(ROOT/'Application/Dopamine/Jailbreak/DOJailbreaker.m').read_text(encoding='utf-8')
         self.assertIn('oldError == ENOENT',app)
-        self.assertIn('S_ISDIR(appInfo.st_mode) && appInfo.st_uid == 0',app)
+        self.assertIn('S_ISDIR(appInfo.st_mode)', app)
+        self.assertIn('rh3_bundle_owner_allowed(expected.lastPathComponent.UTF8String, appInfo.st_uid, 0)', app)
+        self.assertIn('rh3_apps_directory_owner_allowed(appsInfo.st_uid, 0, appsInfo.st_mode)', app)
         self.assertIn('applicationProxyForIdentifier:dopamineAppId',app)
         self.assertIn('RH3WaitForBootstrapChild(child, 30)',app)
 

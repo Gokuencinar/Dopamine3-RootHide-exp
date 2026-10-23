@@ -10,6 +10,7 @@
 #include <limits.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 // jbclient_roothide.c supplies the image-path resolver in both libjailbreak
@@ -58,18 +59,38 @@ static void roothide_call_pathhook(void)
     if (install) install();
 }
 
+static void rh3_load_rooted_init(const char *root)
+{
+    // RootHide 2/3 initializes every checked-in process, not just executables
+    // located within the hidden bootstrap. Without this, SpringBoard and
+    // ordinary apps never initialize RootHide's per-process runtime.
+    const char *init = JBROOT_PATH("/usr/lib/roothideinit.dylib");
+    if (!init) return;
+    struct stat st = {0};
+    if (lstat(init, &st) != 0 || !S_ISREG(st.st_mode) || st.st_uid != 0 ||
+        st.st_nlink != 1 || st.st_size <= 0 || (st.st_mode & 0022)) return;
+    char resolvedRoot[PATH_MAX] = {0}, resolvedInit[PATH_MAX] = {0};
+    if (!realpath(root, resolvedRoot) || !realpath(init, resolvedInit)) return;
+    if (!rh3_trust_is_active_root_child(init, root) ||
+        !rh3_trust_is_active_root_child(resolvedInit, resolvedRoot)) return;
+    // Match the upstream loader visibility; never overwrite or re-sign the
+    // bootstrap library, and leave stock Dopamine when it is absent.
+    (void)dlopen(init, RTLD_NOW);
+}
+
 void roothide_prepare_process(const char *root, const char *executable)
 {
-	if (!root || !jbclient_roothide_jailbroken() ||
-	    !root_contains_executable(root, executable)) return;
+    if (!root || !systemhook_is_roothide_root_path(root) ||
+        !jbclient_roothide_jailbroken()) return;
 
-    roothide_redirect_home(root);
-    roothide_call_pathhook();
+    // HOME/path redirection is narrower: only the hidden-root executables.
+    // Never rewrite containers for ordinary UIKit apps or Apple daemons.
+    if (root_contains_executable(root, executable)) {
+        roothide_redirect_home(root);
+        roothide_call_pathhook();
+    }
 
-    // Optional RootHide components can arrive with the bootstrap. Do not
-    // prevent normal Dopamine launch when they are not installed.
-    const char *init = JBROOT_PATH("/usr/lib/roothideinit.dylib");
-    if (init && access(init, R_OK) == 0) dlopen(init, RTLD_NOW | RTLD_LOCAL);
+    rh3_load_rooted_init(root);
 }
 
 void roothide_trust_injected_libraries(char *const envp[])

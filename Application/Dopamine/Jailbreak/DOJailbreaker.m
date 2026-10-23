@@ -8,6 +8,7 @@
 #import "DOJailbreaker.h"
 #import "RootHideBootstrapProfile.h"
 #import "RootHideAppRegistration.h"
+#import "RootHideAppOwnerPolicy.h"
 #import "RootHideScriptWait.h"
 #import "RH3TweakToggle.h"
 #import "DOEnvironmentManager.h"
@@ -892,9 +893,13 @@ static void *rh3_boomerang_server(void *opaque)
                 NSString *plist = [expected stringByAppendingPathComponent:@"Info.plist"];
                 BOOL valid = oldRoot && [DOBootstrapper rootHideBrandForPath:oldRoot] && oldStatus != 0 && oldError == ENOENT &&
                     !ownershipError && [RH3CanonicalAppPath(owned) isEqual:RH3CanonicalAppPath(dopamineAppsPath.stringByDeletingLastPathComponent)] &&
-                    lstat(dopamineAppsPath.fileSystemRepresentation, &appsInfo) == 0 && S_ISDIR(appsInfo.st_mode) && appsInfo.st_uid == 0 &&
-                    lstat(expected.fileSystemRepresentation, &appInfo) == 0 && S_ISDIR(appInfo.st_mode) && appInfo.st_uid == 0 &&
-                    lstat(plist.fileSystemRepresentation, &plistInfo) == 0 && S_ISREG(plistInfo.st_mode) && plistInfo.st_uid == 0 &&
+                    lstat(dopamineAppsPath.fileSystemRepresentation, &appsInfo) == 0 && S_ISDIR(appsInfo.st_mode) &&
+                    rh3_apps_directory_owner_allowed(appsInfo.st_uid, 0, appsInfo.st_mode) &&
+                    lstat(expected.fileSystemRepresentation, &appInfo) == 0 && S_ISDIR(appInfo.st_mode) &&
+                    !(appInfo.st_mode & 0022) &&
+                    rh3_bundle_owner_allowed(expected.lastPathComponent.UTF8String, appInfo.st_uid, 0) &&
+                    lstat(plist.fileSystemRepresentation, &plistInfo) == 0 && S_ISREG(plistInfo.st_mode) &&
+                    rh3_bundle_owner_allowed(expected.lastPathComponent.UTF8String, plistInfo.st_uid, 0) &&
                     [[NSDictionary dictionaryWithContentsOfFile:plist][@"CFBundleIdentifier"] isEqual:dopamineAppId];
                 if (valid) {
                     [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:[NSString stringWithFormat:@"apps: refreshing stale registration for %@", dopamineAppId]];
