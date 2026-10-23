@@ -48,7 +48,7 @@ int main(int argc,char **argv) {
             self.skipTest("No host C compiler")
         source = MAIN.read_text(encoding="utf-8")
         fn = source[source.index("static xpc_object_t rh3_copy_spawn_arch_preferences("):
-                    source.index("static int rh3_trust_before_spawn(")]
+                    source.index("static bool rh3_spawn_canonical_root_child(")]
         prelude = r'''
 #include <stdint.h>
 #include <stddef.h>

@@ -89,6 +89,26 @@ static void rh3_load_rooted_init(const char *root)
     (void)dlopen(init, RTLD_NOW);
 }
 
+static void rh3_load_rooted_patch(const char *root)
+{
+    // RootHide's post-executable runtime is a separate phase from global
+    // roothideinit. It is optional in the pinned bootstrap and may arrive
+    // later through dpkg; never synthesize/install it in a running process.
+    if (!root || !systemhook_is_roothide_root_path(root)) return;
+    const char *patch = JBROOT_PATH("/usr/lib/roothidepatch.dylib");
+    if (!patch || !rh3_trust_is_active_root_child(patch, root)) return;
+    struct stat st = {0};
+    if (lstat(patch, &st) != 0 || !S_ISREG(st.st_mode) || st.st_uid != 0 ||
+        st.st_nlink != 1 || st.st_size <= 0 || (st.st_mode & 0022)) return;
+    char resolvedRoot[PATH_MAX] = {0}, resolvedPatch[PATH_MAX] = {0};
+    if (!realpath(root, resolvedRoot) || !realpath(patch, resolvedPatch) ||
+        !rh3_trust_is_active_root_child(resolvedPatch, resolvedRoot)) return;
+    // Trust is mediated by the existing dyld hook when active. Do not add a
+    // second synchronous trust XPC request to an executable's constructor:
+    // unavailable launchd/jailbreakd services must not stall its startup.
+    (void)dlopen(patch, RTLD_NOW); // Keep the package runtime loaded.
+}
+
 void roothide_prepare_checked_in_process(const char *root)
 {
     // The systemhook constructor calls this only AFTER a successful dyld
@@ -116,6 +136,7 @@ void roothide_prepare_process(const char *root, const char *executable)
     if (root_contains_executable(root, executable)) {
         roothide_redirect_home(root);
         roothide_call_pathhook(root);
+        rh3_load_rooted_patch(root);
     }
 
 }

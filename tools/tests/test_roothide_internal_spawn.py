@@ -9,6 +9,22 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 class InternalSpawnTests(unittest.TestCase):
+    def test_systemhook_readiness_requires_actual_hook_installation(self):
+        main = (ROOT/'BaseBin/systemhook/src/main.c').read_text()
+        helper = (ROOT/'BaseBin/libjailbreak/src/roothider/common.m').read_text()
+        constructor = main.split('__attribute__((constructor)) static void initializer(', 1)[1]
+        self.assertIn('rh3_systemhook_spawn_hooks_ready(void)', main)
+        self.assertIn('atomic_load_explicit(&gRh3SpawnHookReady', main)
+        self.assertLess(constructor.index('jbclient_process_checkin('),
+                        constructor.index('litehook_hook_function(__posix_spawn, __posix_spawn_hook)'))
+        self.assertIn('spawnHookResult == KERN_SUCCESS', constructor)
+        self.assertIn('atomic_store_explicit(&gRh3SpawnHookReady, true', constructor)
+        fn = helper.split('int exec_cmd_roothide_spawn_traced(', 1)[1].split(
+            'int exec_cmd_roothide_spawn(', 1)[0]
+        self.assertIn('dlsym(systemhook, "rh3_systemhook_spawn_hooks_ready")', fn)
+        self.assertIn('if (spawnHooksReady && spawnHooksReady()) need_patch_child = false;', fn)
+        self.assertNotIn('if(systemhook) {\n        need_patch_child = false;', fn)
+
     def test_bootstrap_commands_use_helper_only_for_an_active_hidden_root(self):
         util = (ROOT/'BaseBin/libjailbreak/src/util.c').read_text()
         section = util.split('int __exec_cmd_internal_va', 1)[1].split('int exec_cmd(', 1)[0]
@@ -62,8 +78,9 @@ typedef void posix_spawn_file_actions_t;
 #define usleep rh_test_usleep
 #define dlopen rh_test_dlopen
 #define dlclose rh_test_dlclose
+#define dlsym rh_test_dlsym
 static bool exec_patch_enabled;
-static struct { int hook, close, trust_error, trust_calls, init_error, read_error,
+static struct { int hook, ready, close, trust_error, trust_calls, init_error, read_error,
     spawn_error, patch_error, resume_error, init, destroy, spawn, patch, resume,
     killed, waited, should_resume, seen_flags; } state;
 static char stages[16][48]; static int stage_count;
@@ -73,6 +90,11 @@ static void capture(const char *stage,int pid,int result,void *context) {
 static void reset(void) { memset(&state, 0, sizeof(state)); exec_patch_enabled=true; }
 static void *dlopen(const char *p, int mode) { return state.hook ? (void *)1 : NULL; }
 static int dlclose(void *p) { state.close++; return 0; }
+static bool rh_test_ready(void) { return state.ready != 0; }
+static void *dlsym(void *h, const char *name) {
+    return state.hook && !strcmp(name, "rh3_systemhook_spawn_hooks_ready")
+        ? (void *)&rh_test_ready : NULL;
+}
 static bool dyld_patch_enabled(void) { return false; }
 static pid_t getpid(void) { return 123; }
 static int jbclient_trust_executable_recurse(const char *p, void *a) { state.trust_calls++; return state.trust_error; }
@@ -133,9 +155,15 @@ int main(void) {
     reset();
     CHECK(exec_cmd_roothide_spawn(&pid,"/tool",NULL,NULL,args,NULL)==0);
     CHECK(pid==42 && state.patch==1 && state.should_resume && state.resume==0 && state.destroy==1);
-    reset(); state.hook=1;
+    reset(); state.hook=1;state.ready=1;
     CHECK(exec_cmd_roothide_spawn(&pid,"/tool",NULL,NULL,args,NULL)==0);
     CHECK(state.close==1 && state.patch==0 && state.trust_calls==0 && state.resume==1 && state.destroy==1);
+    reset(); state.hook=1;state.ready=0;
+    CHECK(exec_cmd_roothide_spawn(&pid,"/tool",NULL,NULL,args,NULL)==0);
+    CHECK(state.close==1 && state.patch==1 && state.trust_calls==1 && state.resume==0);
+    reset(); state.hook=1;state.ready=0;state.patch_error=7;
+    CHECK(exec_cmd_roothide_spawn(&pid,"/tool",NULL,NULL,args,NULL)==202);
+    CHECK(pid==0 && state.patch==1 && state.killed==1 && state.waited==1);
     reset(); state.spawn_error=ENOENT;
     CHECK(exec_cmd_roothide_spawn(&pid,"/tool",NULL,&attr,args,NULL)==ENOENT);
     CHECK(external.flags==0 && state.killed==0 && pid==0);

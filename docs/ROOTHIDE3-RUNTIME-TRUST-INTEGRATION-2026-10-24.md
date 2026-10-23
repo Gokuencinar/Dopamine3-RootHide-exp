@@ -14,8 +14,12 @@
   failed strict readiness 7/9**, exactly because activation remains guarded
   and `validation/device-tests.json` is not available. Neither archive is a
   functional jailbreak-enabled IPA for installation.
-- Actions r190 / run `40038034483`: compiling prior source commit `3bf396f`;
-  its final status must be read directly from Actions before making a claim.
+- Actions r190 / run `40038034483` (SHA `3bf396f`): native Build,
+  regression checks, architecture slices and full disabled-IPA inspection
+  **passed**. Workflow conclusion `failure` is the intentional strict 7/9
+  release gate. Neither artifact enables jailbreak. r191 / `40039325319`
+  builds the subsequent `c5e709e` commit; verify its final native result
+  separately from this report.
 
 ## Implemented in this phase
 
@@ -84,3 +88,41 @@ If the bootstrap cannot be activated safely or diagnostics show a launchd
 child suspended/crashing, stop: retain the current installation and log.
 Do not label an untested IPA fully functional, fabricate device results, or
 relax `ROOTHIDE3_BOOTSTRAP_READY` / physical test gates.
+
+## Subsequent scoped source integration (after `c5e709e`)
+
+- `systemhook/main.c`: the non-PID1 pre-spawn policy now requests recursive
+  executable trust **only for an executable lexically and canonically located
+  inside the authenticated current RootHide root**. Symlinks escaping the root,
+  obsolete randomized roots, and failed resolution of a hidden Mach-O are not
+  passed to privileged recursive trust; the active-root Mach-O fails with
+  `EACCES` rather than claiming successful preparation. Outside executables
+  retain their stock path; their legitimate hidden-root inserted libraries
+  are evaluated separately. PID1 receives no new trust XPC or filesystem walk.
+- `systemhook/roothider_port.c`: restores the fork's optional
+  `roothidepatch.dylib` post-executable phase **only for already authenticated
+  hidden-root executables**. Requires root-owned, regular, single-link,
+  nonempty, non-writable-by-group/world library with canonical root confinement.
+  If unavailable it leaves the existing bootstrap untouched. This stage uses
+  the existing dyld trust mechanism, avoiding any extra synchronous trust XPC
+  in the constructor. Loaded handle remains live; it does not imply the
+  library's constructor succeeded or that tweak injection is working.
+- Native mocked C tests extract and execute the actual new policies with
+  positive/negative cases including symlink escape, old roots, unresolvable
+  paths, metadata failures and dlopen failure. These host tests do **not**
+  substitute for an iPhone's private dyld or kernel trustcache execution.
+- `libjailbreak/roothider/common.m`: fixes an unsafe shortcut in the bootstrap
+  spawn helper. `RTLD_NOLOAD(systemhook)` alone was treated as proof that
+  `posix_spawn` was hooked; a failed constructor/check-in could leave the dylib
+  mapped but still bypass all patch-child preparation. `systemhook/main.c`
+  now exports an atomic readiness getter set **only after** `litehook_hook_function`
+  returns `KERN_SUCCESS` for the spawn hook (or after successful iOS 15 filter
+  binding). The helper checks this getter with `dlsym`; unknown/not-ready
+  still uses its existing non-PID1 suspended-child patch path, while ready
+  avoids double patch. Native mocked tests verify loaded+unready, loaded+ready,
+  failed patch cleanup and flags restoration. This changes no PID1 flow.
+- The trust preflight still has a possible rename race between `realpath` and
+  the trust-server request. Server-side inode/identity validation remains a
+  separate hardening task; no attempt was made to add unsafe PID1 synchronous
+  patch-child transactions. No live SSH keys, accounts, packages or data were
+  modified, and strict readiness remains 7/9.

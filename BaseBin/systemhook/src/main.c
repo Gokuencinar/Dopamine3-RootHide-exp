@@ -10,6 +10,7 @@
 #include <string.h>
 #include <util.h>
 #include <ptrauth.h>
+#include <stdatomic.h>
 #include <libjailbreak/jbclient_xpc.h>
 #include <libjailbreak/codesign.h>
 #include <libjailbreak/jbroot.h>
@@ -24,6 +25,13 @@
 #include "common/roothide_trust_policy.h"
 
 bool gFullyDebugged = false;
+// RTLD_NOLOAD proves only that dyld mapped this dylib. Publish readiness only
+// after the actual spawn interception is installed following process check-in.
+static _Atomic bool gRh3SpawnHookReady = false;
+__attribute__((visibility("default"))) bool rh3_systemhook_spawn_hooks_ready(void)
+{
+    return atomic_load_explicit(&gRh3SpawnHookReady, memory_order_acquire);
+}
 static void *gLibSandboxHandle;
 char *JB_BootUUID = NULL;
 char *JB_RootPath = NULL;
@@ -336,20 +344,43 @@ static xpc_object_t rh3_copy_spawn_arch_preferences(struct _posix_spawn_args_des
     return preferences;
 }
 
+// A lexical /var alias check alone accepts a symlink escaping the active root.
+// Keep filesystem resolution strictly outside PID1. This preflight does not
+// replace trust server-side identity checks against a concurrent rename.
+static bool rh3_spawn_canonical_root_child(const char *path, const char *root)
+{
+    if (!rh3_trust_is_active_root_child(path, root)) return false;
+    char resolvedRoot[PATH_MAX] = {0};
+    char resolvedPath[PATH_MAX] = {0};
+    return realpath(root, resolvedRoot) && realpath(path, resolvedPath) &&
+           rh3_trust_is_active_root_child(resolvedPath, resolvedRoot);
+}
+
 static int rh3_trust_before_spawn(const char *path, struct _posix_spawn_args_desc *desc, char *const envp[])
 {
     // Do not introduce jailbreakd XPC in PID 1 or the dyld-patched phase.
     if (!path || getpid() == 1 || !jbclient_roothide_jailbroken() || jbclient_dyld_patch_enabled())
         return 0;
-    xpc_object_t preferredArchs = rh3_copy_spawn_arch_preferences(desc);
-    int trustResult = jbclient_trust_executable_recurse(path, preferredArchs);
-    if (preferredArchs) xpc_release(preferredArchs);
     const char *root = get_jbroot();
-    bool activeRootChild = systemhook_is_roothide_root_path(root) &&
-                           rh3_trust_is_active_root_child(path, root);
-    bool isMachO = activeRootChild && trustResult != 0 && rh3_trust_looks_like_macho(path);
-    int status = rh3_trust_spawn_status(trustResult, activeRootChild, isMachO);
-    if (status) return status;
+    if (!systemhook_is_roothide_root_path(root)) return 0;
+    bool activeRootChild = rh3_trust_is_active_root_child(path, root);
+    if (activeRootChild) {
+        // Only package-owned executables in the *current* hidden root need
+        // recursive trust. Never trust an Apple executable or a symlink into
+        // the stock OS/another root merely because a process spawns it.
+        if (!rh3_spawn_canonical_root_child(path, root)) {
+            if (rh3_trust_looks_like_macho(path)) return EACCES;
+        } else {
+            xpc_object_t preferredArchs = rh3_copy_spawn_arch_preferences(desc);
+            int trustResult = jbclient_trust_executable_recurse(path, preferredArchs);
+            if (preferredArchs) xpc_release(preferredArchs);
+            bool isMachO = trustResult != 0 && rh3_trust_looks_like_macho(path);
+            int status = rh3_trust_spawn_status(trustResult, activeRootChild, isMachO);
+            if (status) return status;
+        }
+    }
+    // Inserted RootHide libraries still require trust when the executable is
+    // an ordinary UIKit app or system service outside the hidden root.
     return roothide_trust_injected_libraries(envp);
 }
 
@@ -553,7 +584,9 @@ __attribute__((constructor)) static void initializer(void)
 
 	// Apply posix_spawn / execve hooks
 	if (__builtin_available(iOS 16.0, *)) {
-		litehook_hook_function(__posix_spawn, __posix_spawn_hook);
+			kern_return_t spawnHookResult = litehook_hook_function(__posix_spawn, __posix_spawn_hook);
+			if (spawnHookResult == KERN_SUCCESS)
+				atomic_store_explicit(&gRh3SpawnHookReady, true, memory_order_release);
 		litehook_hook_function(__execve,      __execve_hook);
 	}
 	else {
@@ -563,8 +596,11 @@ __attribute__((constructor)) static void initializer(void)
 		void **posix_spawn_with_filter = litehook_find_dsc_symbol("/usr/lib/system/libsystem_kernel.dylib", "_posix_spawn_with_filter");
 		void **execve_with_filter      = litehook_find_dsc_symbol("/usr/lib/system/libsystem_kernel.dylib", "_execve_with_filter");
 
-		*posix_spawn_with_filter = __posix_spawn_hook_with_filter;
-		*execve_with_filter      = __execve_hook;
+			if (posix_spawn_with_filter) {
+				*posix_spawn_with_filter = __posix_spawn_hook_with_filter;
+				atomic_store_explicit(&gRh3SpawnHookReady, true, memory_order_release);
+			}
+			if (execve_with_filter) *execve_with_filter = __execve_hook;
 	}
 
 	// Hook the dyld_shared_cache __fcntl to jump to the dyld __fcntl instead

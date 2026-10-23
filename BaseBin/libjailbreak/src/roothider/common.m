@@ -749,9 +749,11 @@ int exec_cmd_roothide_spawn_traced(pid_t* pidp, const char* path, const posix_sp
     bool need_patch_child = exec_patch_enabled;
     void *systemhook = dlopen(JBROOT_PATH("/basebin/systemhook.dylib"), RTLD_NOLOAD | RTLD_LAZY);
     if(systemhook) {
-    /* if systemhook has been loaded into the current process,
-        it means posix_spawn has been hooked and we can skip patching. */
-        need_patch_child = false;
+        // Being mapped does not prove the constructor finished: xpcproxy can
+        // fail check-in, or the hook's code patch can fail. Never resume a
+        // suspended child unpatched just because RTLD_NOLOAD succeeded.
+        bool (*spawnHooksReady)(void) = dlsym(systemhook, "rh3_systemhook_spawn_hooks_ready");
+        if (spawnHooksReady && spawnHooksReady()) need_patch_child = false;
         dlclose(systemhook);
     } else if(argc==3 && strcmp(argv[1],"trollstore")==0 && strcmp(argv[2],"delete-bootstrap")==0) {
         // skip patching for trollstore bootstrap delete
