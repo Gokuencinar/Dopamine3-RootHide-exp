@@ -12,6 +12,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 SOURCE = ROOT / "BaseBin/launchdhook/src/spawn_hook.c"
+MANAGER = ROOT / "BaseBin/launchdhook/src/roothide_manager_spawn.h"
 
 
 class PID1PrivateDyldTests(unittest.TestCase):
@@ -27,6 +28,7 @@ class PID1PrivateDyldTests(unittest.TestCase):
         self.assertNotIn("POSIX_SPAWN_START_SUSPENDED", functions)
         self.assertIn("__posix_spawn_inline(recordedPid", functions)
         self.assertIn("register_job(*recordedPid)", functions)
+        manager_helper = MANAGER.read_text(encoding="utf-8")
         harness = r'''
 #include <stdbool.h>
 #include <stdlib.h>
@@ -62,9 +64,7 @@ static char *test_jbroot_path(const char *suffix) {
     snprintf(buffer,sizeof(buffer),"%s%s",root,suffix);
     return buffer;
 }
-static const char *rh3_manager_spawn_name(const char *p,char *const a[]) {
-    return NULL;
-}
+'''+manager_helper+r'''
 static void rh3_bootlog(const char *line) { (void)line; }
 static int posix_spawnattr_getflags(const posix_spawnattr_t *a,short *flags) {
     if ((*a)->flag_error) return (*a)->flag_error;
@@ -152,6 +152,25 @@ int main(void) {
 
     reset(); strcpy(path,"/usr/libexec/xpcproxy");
     CHECK(__posix_spawn_orig_wrapper(&pid,path,&desc,args,missing)==0);
+    CHECK(!has("DYLD_IN_CACHE=0") && alloc_count==0);
+    const char *managerLabels[]={"UIKitApplication:xyz.willy.Zebra[0x1]",
+        "UIKitApplication:org.coolstar.SileoStore[0x2]",
+        "UIKitApplication:com.roothide.manager[0x3]"};
+    for(int i=0;i<3;i++) {
+        reset(); strcpy(path,"/usr/libexec/xpcproxy");
+        char *proxyArgs[]={"xpcproxy",(char*)managerLabels[i],NULL};
+        CHECK(__posix_spawn_orig_wrapper(&pid,path,&desc,proxyArgs,missing)==0);
+        CHECK(has("DYLD_IN_CACHE=0") && registrations==1);
+    }
+    reset(); strcpy(path,"/usr/libexec/xpcproxy");
+    char *notManager[]={"xpcproxy","UIKitApplication:com.apple.Preferences[0x1]",NULL};
+    CHECK(__posix_spawn_orig_wrapper(&pid,path,&desc,notManager,missing)==0);
+    CHECK(!has("DYLD_IN_CACHE=0") && alloc_count==0);
+    char *spoof[]={"xpcproxy","UIKitApplication:xyz.willy.Zebra.extra[0x1]",NULL};
+    CHECK(__posix_spawn_orig_wrapper(&pid,path,&desc,spoof,missing)==0);
+    CHECK(!has("DYLD_IN_CACHE=0") && alloc_count==0);
+    char *malformed[]={"xpcproxy","xyz.willy.Zebra[0x1]",NULL};
+    CHECK(__posix_spawn_orig_wrapper(&pid,path,&desc,malformed,missing)==0);
     CHECK(!has("DYLD_IN_CACHE=0") && alloc_count==0);
     reset(); strcpy(path,"/usr/sbin/sshd");
     CHECK(__posix_spawn_orig_wrapper(&pid,path,&desc,args,missing)==0);

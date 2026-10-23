@@ -38,6 +38,7 @@
 #import "RootHideAppRegistration.h"
 #import "RootHideScriptWait.h"
 #import "RH3TweakToggle.h"
+#import "RH3ProbeSpawnEnv.h"
 #import <CoreServices/LSApplicationProxy.h>
 #import <libjailbreak/roothider.h>
 #import "NSData+Hex.h"
@@ -1317,17 +1318,44 @@ static BOOL RH3SSHValidateSingleSocket(id entry, NSUInteger *port22, NSUInteger 
         }
     } else if (!result) result = posix_spawn_file_actions_addopen(&actions, STDIN_FILENO, "/dev/null", O_RDONLY, 0);
     __block pid_t pid = -1;
+    __block char **probeEnvironment = NULL;
     NSString *commandName = binary.lastPathComponent;
     [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
         [NSString stringWithFormat:@"RootHide command %@: privilege and trust starting", commandName]];
     if (!result) result = [self rh3PerformPrivilegedAction:^int{
+        if ([commandName isEqualToString:@"rh3tweakprobe"] && [DOBootstrapper rootHidePortEnabled]) {
+            NSError *rootError = nil;
+            NSString *root = [DOBootstrapper rootHideExistingRootWithError:&rootError];
+            const char *activeRoot = jbclient_get_jbroot();
+            if (rootError || !root || !activeRoot ||
+                ![RH3CanonicalAppPath(root) isEqualToString:
+                  RH3CanonicalAppPath([NSString stringWithUTF8String:activeRoot])] ||
+                ![RH3CanonicalAppPath(binary) isEqualToString:
+                  RH3CanonicalAppPath([root stringByAppendingPathComponent:@"basebin/rh3tweakprobe"])])
+                return EPERM;
+            NSString *hook = [root stringByAppendingPathComponent:@"basebin/systemhook.dylib"];
+            struct stat hookInfo = {0};
+            if (lstat(hook.fileSystemRepresentation, &hookInfo) ||
+                !S_ISREG(hookInfo.st_mode) || hookInfo.st_uid != 0 ||
+                hookInfo.st_nlink != 1 || (hookInfo.st_mode & 0022)) return EPERM;
+            // A successful JBD_MSG_SPAWN_PATCH_CHILD alone cannot prove that
+            // systemhook was passed to dyld. Only this disposable probe gets
+            // a private dyld environment. Do not modify the app's environ.
+            int envStatus = rh3_probe_env_build(environ, hook.fileSystemRepresentation,
+                                               &probeEnvironment);
+            if (envStatus) return envStatus;
+            [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
+                @"RootHide tweak probe: verified private systemhook environment prepared"];
+        }
         int trust = jbclient_trust_executable_recurse(binary.fileSystemRepresentation, NULL);
         if (trust) return [self rh3ActionStage:@"command trust" result:trust];
         [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
             [NSString stringWithFormat:@"RootHide command %@: trust complete; spawn starting", commandName]];
-        return exec_cmd_roothide_spawn_traced(&pid, argv[0], &actions, NULL, argv, environ,
+        return exec_cmd_roothide_spawn_traced(&pid, argv[0], &actions, NULL, argv,
+                                             probeEnvironment ? probeEnvironment : environ,
                                              RH3LogCommandSpawnStage, (__bridge void *)commandName);
     }];
+    rh3_probe_env_free(probeEnvironment);
     [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
         [NSString stringWithFormat:@"RootHide command %@: spawn returned=%d pid=%d", binary.lastPathComponent, result, pid]];
     if (initialized) posix_spawn_file_actions_destroy(&actions);

@@ -546,8 +546,12 @@ Para posibles hijos RootHide lanzados directamente por PID 1 se añade un ajuste
 **restringido** de `DYLD_IN_CACHE=0`: solo las rutas exactas `sshd`, `login` y
 los tres gestores dentro de la raíz activa, después de verificar la procedencia
 del hook y la presencia de `systemhook.dylib` en el entorno. Se conserva el resto
-del entorno y quedan fuera `xpcproxy`, hijos de otras raíces y aplicaciones no
-enumeradas. No se suspenden hijos ni se invoca XPC síncrono desde launchd.
+del entorno y quedan fuera hijos de otras raíces y aplicaciones no enumeradas.
+En la revisión posterior a r175 se añade únicamente `xpcproxy` identificado
+por las etiquetas exactas `UIKitApplication:` de Sileo, Zebra o RootHide:
+son los casos que la evidencia física muestra lanzados indirectamente por
+PID 1. No se cambia el entorno de otros trabajos xpcproxy, ni se suspenden
+hijos o se invoca XPC síncrono desde launchd.
 
 **Límites de esta integración:** `xpcproxy` puede arrancar Zebra/Sileo por un
 camino distinto y NewTerm crea `login` desde su propia app, no necesariamente
@@ -573,3 +577,46 @@ directorio secundario y su enlace deben seguir pasando la validación estricta;
 los fallos de I/O o de identidad del bootstrap continúan abortando sin iniciar
 la inyección de PID 1. Una nueva elección sustituye atómicamente solo el nombre
 reservado para la solicitud; no sigue enlaces ni modifica otros archivos.
+
+### Registros físicos r175 (23-10-2026) y corrección posterior
+
+En los dos intentos registrados el flujo de explotación, boomerang, usuariospace
+re-exec, registro de `jailbreakd`, reparación de enlaces de gestores y
+preimportación de `com.openssh.sshd` pasa sus checkpoints. Tras solicitar
+explícitamente tweaks y ejecutar otra activación, `safe_mode=0`, pero el proceso
+`rh3tweakprobe` termina con `81`. El ejecutable define `81` como ausencia de la
+marca del constructor `systemhook`; `82` significaría que ese constructor se
+ejecutó pero no acreditó el `dlopen` de TweakLoader. La respuesta `0` al XPC
+de parchear al hijo NO demuestra inserción de dylib.
+
+La app de Dopamine pasa su entorno sin normalizar a `exec_cmd_roothide_spawn_traced`
+en esa prueba. Esa ruta prepara trust/patch del hijo, pero no añade por sí misma
+`DYLD_INSERT_LIBRARIES`: el verificador daba un falso negativo posible aun con
+modo seguro desactivado. Ahora **únicamente para rh3tweakprobe** se construye
+una copia efímera del entorno con `systemhook.dylib` del root activo verificado,
+`DYLD_IN_CACHE=0` y sin variables de safe mode heredadas de la propia app.
+También se eliminan las dos marcas de éxito heredadas para que nunca se pueda
+fabricar un `exit 0` sin que el constructor las escriba realmente. No cambia
+`environ` de Dopamine, ni los entornos de comandos generales, ni la política
+de inyección de aplicaciones no relacionadas.
+
+Los registros de Zebra muestran un PID válido tras `spawn`, pero el lanzamiento
+físico más reciente pasa por `xpcproxy` y no por el binario directo. La
+preparación de dyld de r175 no incluía ese caso, por lo que se extiende solo a
+`UIKitApplication:` con el identificador exacto de los tres gestores incluidos.
+Esto no prueba que Zebra llegue a `main` ni descarta fallos de dyld en una
+biblioteca obligatoria. Tampoco se ha tocado su base de datos ni las fuentes APT.
+
+El job OpenSSH está importado con programa y rutas esperados, sockets 22/2222,
+pero se observó `state=not_running, runs=0` en `launchctl print`; esto **no
+demuestra que se haya lanzado sshd** ni permite aislar un fallo de banner.
+Conexión efectiva, salida/estado del hijo y contexto de dyld permanecen sin
+evidencia. La alerta del RootHide Manager «SSH Server has been installed» solo
+detecta el paquete, no un servidor atendiendo una conexión. El bootstrap donor
+1900 ya trae `rootfs -> /` y `dev -> /dev`, por lo que no se reescriben esos
+enlaces ni se desinstalan servicios por conjetura.
+
+**Verificación**: las pruebas host del entorno del probe y del wrapper de PID1
+ejercitan ramas reales en un arnés C, incluidos intentos de falsificar marcas,
+etiquetas ajenas, flags de proceso y errores. Ni esas pruebas ni la compilación
+Xcode acreditan comportamiento físico de SSH, tweaks, Zebra o aislamiento.

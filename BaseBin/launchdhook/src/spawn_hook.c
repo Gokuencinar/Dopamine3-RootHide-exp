@@ -109,10 +109,16 @@ void ensure_fakelib_mounted(void)
 // Restore that environment contract only for known executables *inside* the
 // verified hidden root. This does not suspend children or ask PID 1 to make a
 // synchronous jailbreakd/XPC request (which can deadlock launchd).
-static bool rh3_pid1_private_dyld_target(const char *path)
+static bool rh3_pid1_private_dyld_target(const char *path, char *const argv[])
 {
 	if (getpid() != 1 || !path || gInEarlyBoot || launchdhookFirstLoad ||
 	    !roothide_is_active() || !roothide_launchdhook_origin_verified()) return false;
+	// UIKit services are not spawned by their final executable. launchd first
+	// launches /usr/libexec/xpcproxy with an exact UIKitApplication label, and
+	// only then execs the registered bundle. Apply private dyld to the three
+	// bundled RootHide managers only, never to arbitrary xpcproxy jobs.
+	if (!strcmp(path, "/usr/libexec/xpcproxy"))
+		return rh3_manager_spawn_name(path, argv) != NULL;
 	const char *root = get_jbroot();
 	if (!root) return false;
 	size_t rootLen = strlen(root);
@@ -151,12 +157,12 @@ static bool rh3_pid1_has_private_systemhook(char *const envp[])
 
 // Caller owns *ownedEnv when non-NULL. Preserve every unrelated entry and
 // replace any DYLD_IN_CACHE assignments with one unambiguous value.
-static int rh3_pid1_prepare_private_dyld_env(const char *path,
+static int rh3_pid1_prepare_private_dyld_env(const char *path, char *const argv[],
 					      struct _posix_spawn_args_desc *desc,
 					      char *const envp[], char ***ownedEnv)
 {
 	*ownedEnv = NULL;
-	if (!rh3_pid1_private_dyld_target(path) || !envp)
+	if (!rh3_pid1_private_dyld_target(path, argv) || !envp)
 		return 0;
 	// A NULL descriptor or attrp is a valid posix_spawn request with default
 	// attributes, not a reason to skip an otherwise verified RootHide child.
@@ -221,7 +227,7 @@ int __posix_spawn_orig_wrapper(pid_t *restrict pid, const char *restrict path,
 		rh3_bootlog(stage);
 	}
 	char **privateDyldEnv = NULL;
-	int envResult = rh3_pid1_prepare_private_dyld_env(path, desc, envp, &privateDyldEnv);
+	int envResult = rh3_pid1_prepare_private_dyld_env(path, argv, desc, envp, &privateDyldEnv);
 	if (envResult) return envResult;
 	// we need to disable the crash reporter during the orig call
 	// otherwise the child process inherits the exception ports
