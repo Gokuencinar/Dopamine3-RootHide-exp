@@ -1454,8 +1454,20 @@ static BOOL RH3SSHValidateSingleSocket(id entry, NSUInteger *port22, NSUInteger 
             ![RH3CanonicalAppPath(root) isEqual:RH3CanonicalAppPath([NSString stringWithUTF8String:serverRoot])])
             return EPERM;
         struct stat statInfo = {0};
-        BOOL marker = lstat([root stringByAppendingPathComponent:@"basebin/.safe_mode"].fileSystemRepresentation,
-                            &statInfo) == 0 && S_ISREG(statInfo.st_mode);
+        int primaryResult = lstat([root stringByAppendingPathComponent:@"basebin/.safe_mode"].fileSystemRepresentation,
+                                  &statInfo);
+        int primaryReadError = primaryResult == 0 ? 0 : errno;
+        BOOL primarySafeMode = primaryResult == 0;
+        BOOL primaryUnknown = primaryResult == 0
+            ? (!S_ISREG(statInfo.st_mode) || statInfo.st_uid != 0)
+            : primaryReadError != ENOENT;
+        NSString *secondary = [@"/private/var/mobile/Containers/Shared/AppGroup"
+                               stringByAppendingPathComponent:root.lastPathComponent];
+        bool watchdogLatched = true; // Fail closed on an unreadable latch.
+        int latchResult = rh3_tweak_watchdog_latched(root.fileSystemRepresentation,
+                                                    secondary.fileSystemRepresentation, &watchdogLatched);
+        BOOL watchdogUnknown = latchResult != 0;
+        BOOL marker = primarySafeMode || watchdogLatched || primaryUnknown || watchdogUnknown;
         BOOL loader = lstat([root stringByAppendingPathComponent:@"usr/lib/TweakLoader.dylib"].fileSystemRepresentation,
                             &statInfo) == 0 && (S_ISREG(statInfo.st_mode) || S_ISLNK(statInfo.st_mode));
         BOOL newTerm = NO;
@@ -1505,8 +1517,10 @@ static BOOL RH3SSHValidateSingleSocket(id entry, NSUInteger *port22, NSUInteger 
             }
         }
         [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
-            [NSString stringWithFormat:@"runtime: tweak_safe_mode=%d tweak_loader_present=%d newterm_bundle_present=%d sshd_binary_present=%d ssh_plists=%lu daemon_listing_ok=%d; presence is not running state",
-             marker, loader, newTerm, sshd, (unsigned long)sshPlists, daemons != nil && listingError == nil]];
+            [NSString stringWithFormat:@"runtime: tweak_safe_mode=%d tweak_primary_safe_mode=%d tweak_watchdog_latched=%d tweak_status_unknown=%d primary_errno=%d latch_error=%d tweak_loader_present=%d newterm_bundle_present=%d sshd_binary_present=%d ssh_plists=%lu daemon_listing_ok=%d; presence is not running state",
+             marker, primarySafeMode, watchdogLatched, primaryUnknown || watchdogUnknown,
+             primaryReadError, latchResult, loader, newTerm, sshd,
+             (unsigned long)sshPlists, daemons != nil && listingError == nil]];
         [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
             [NSString stringWithFormat:@"runtime: sshd_executable=%d ssh_config_present=%d ssh_host_key_files=%lu ssh_launch_program_rooted=%lu ssh_launch_program_accessible=%lu; no server started",
              sshdExecutable, sshConfig, (unsigned long)hostKeys,

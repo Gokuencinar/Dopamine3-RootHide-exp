@@ -167,18 +167,25 @@ int timespec_compare(struct timespec *t1, struct timespec *t2)
 xpc_object_t xpc_object_from_plist(const char *path)
 {
 	xpc_object_t xObj = NULL;
-	int ldFd = open(path, O_RDONLY);
+	// O_NONBLOCK keeps an unexpected FIFO from stalling process startup
+	// before fstat can reject it; regular files ignore this flag.
+	int ldFd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
 	if (ldFd >= 0) {
 		struct stat s = {};
 		if(fstat(ldFd, &s) != 0) {
 			close(ldFd);
 			return NULL;
 		}
+		// Reject non-regular or implausibly large config before mapping it.
+		// This parser runs in long-lived processes including launchd.
+		if (!S_ISREG(s.st_mode) || s.st_size <= 0 || s.st_size > 4 * 1024 * 1024) {
+			close(ldFd);
+			return NULL;
+		}
 		size_t len = s.st_size;
 		void *addr = mmap(NULL, len, PROT_READ, MAP_FILE | MAP_PRIVATE, ldFd, 0);
+		close(ldFd);
 		if (addr != MAP_FAILED) {
-			close(ldFd);
-
 			xObj = xpc_create_from_plist(addr, len);
 			munmap(addr, len);
 		}
@@ -202,6 +209,9 @@ xpc_object_t jbuserconfig_get_value(const char *key)
 			}
 		}
 
+		// A zero-length or malformed config must not be passed as a dictionary
+		// to XPC when a long-lived hook examines a new process.
+		if (!configDict || xpc_get_type(configDict) != XPC_TYPE_DICTIONARY) return NULL;
 		return xpc_dictionary_get_value(configDict, key);
 	}
 

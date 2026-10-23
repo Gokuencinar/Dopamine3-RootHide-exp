@@ -697,3 +697,33 @@ Esto refuerza seguridad y coherencia del proceso de confianza sin cambiar
 PID 1, permisos CS, claves SSH, gestores o bootstrap instalado. Aún requiere
 compilación macOS y prueba real en dispositivo para comprobar compatibilidad
 con Mach-O/ChOma y determinar si afecta al `EBADEXEC` observado de NewTerm.
+
+### Investigación posterior a r178: lectura de configuración y safe mode
+
+La lectura compartida de `basebin/config.plist` en `systemhook/common.c` dejaba
+un descriptor abierto si fallaba `mmap`; se ejecuta también en procesos de vida
+larga, donde una configuración vacía o errónea repetidamente consultada puede
+agotar los descriptores. Se cierra el descriptor tras cada intento de mapeo;
+`O_NONBLOCK` evita atascarse al abrir una FIFO accidental y `O_CLOEXEC` evita
+heredar el descriptor. Se rechazan archivos no regulares y tamaños nulos o
+superiores a 4 MiB (igual que el lector de launchd) y no se
+pasa al lector XPC un objeto que no sea un diccionario válido. Un arnés C
+ejecuta la función de producción con mapas válidos y fallos de `fstat`/`mmap`,
+tamaño cero/negativo/excesivo y un directorio, sin ningún acceso al teléfono.
+
+La consulta de estado que emitía `runtime: tweak_safe_mode` consideraba solo
+`basebin/.safe_mode` y podía registrar `0` ante `EPERM` o un latch de watchdog
+vigente. Ahora distingue marcador primario, latch de AppGroup y estado
+desconocido; el resultado efectivo es conservador. Se reutiliza la verificación
+de AppGroup ya empleada por Ajustes, sin limpiar ninguno de los dos marcadores.
+Este cambio corrige la fidelidad del diagnóstico, **no habilita los tweaks**.
+
+La auditoría separada ha identificado rutas que todavía exigen datos físicos
+antes de atribuirles un fallo: propagación de errores de trustcache en los hooks
+de spawn/exec, aceptación por launchd de sockets de sshd, posible cambio de
+slice Mach-O en spawn con preferencia de arquitectura y preparación del login
+de NewTerm. También existe un caso de éxito aparente tras fallo de attach en
+`roothider/exec_trace.m`; su reparación requiere un rollback de exception
+ports y pruebas nativas específicas antes de tocar el ciclo de vida de un
+proceso. No se ha intentado alterar globalmente la política de spawn/PID 1,
+arrancar sshd, borrar claves o modificar servicios ya instalados.
