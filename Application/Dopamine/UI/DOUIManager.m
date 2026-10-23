@@ -328,7 +328,12 @@
     _rh3UnifiedReportPath = nil;
     _rh3UnifiedReportID = NSUUID.UUID.UUIDString;
     _rh3UnifiedReportError = 0;
-    _rh3UnifiedReportFD = RH3CreateUnifiedReport(_rh3DiagnosticDirectory, &_rh3UnifiedReportPath);
+    // ARC forbids passing an Objective-C ivar address to an implicit
+    // __autoreleasing out parameter. Use a local strong temporary, then
+    // assign ownership to the ivar after the creator returns.
+    NSString *createdPath = nil;
+    _rh3UnifiedReportFD = RH3CreateUnifiedReport(_rh3DiagnosticDirectory, &createdPath);
+    _rh3UnifiedReportPath = createdPath;
     BOOL created = _rh3UnifiedReportFD >= 0;
     if (created) {
         NSString *revision = @"unknown";

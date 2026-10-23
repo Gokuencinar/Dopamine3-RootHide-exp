@@ -65,6 +65,16 @@ class UnifiedSafetyTests(unittest.TestCase):
         self.assertIn("not_constructor_proof", part)
         self.assertNotIn("dyld mapped successfully", part)
 
+    def test_arc_report_path_writeback_uses_local_strong_variable(self):
+        """Regression for r182 Xcode CompileC DOUIManager.m:331 ARC failure."""
+        source = MANAGER.read_text(encoding="utf-8")
+        begin = source.split("- (BOOL)rh3BeginUnifiedReport", 1)[1].split(
+            "- (NSURL *)rh3FinishUnifiedReportWithResult", 1)[0]
+        self.assertNotIn("&_rh3UnifiedReportPath", begin)
+        self.assertIn("NSString *createdPath = nil;", begin)
+        self.assertIn("RH3CreateUnifiedReport(_rh3DiagnosticDirectory, &createdPath)", begin)
+        self.assertIn("_rh3UnifiedReportPath = createdPath;", begin)
+
 
 if __name__ == "__main__":
     unittest.main()
