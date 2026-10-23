@@ -730,3 +730,46 @@ de NewTerm. También existe un caso de éxito aparente tras fallo de attach en
 ports y pruebas nativas específicas antes de tocar el ciclo de vida de un
 proceso. No se ha intentado alterar globalmente la política de spawn/PID 1,
 arrancar sshd, borrar claves o modificar servicios ya instalados.
+
+### Revisión de ejecución posterior a r179 (candidata r180)
+
+En la ruta de confianza recursiva del `systemhook`, el valor de error se
+descartaba antes de intentar `posix_spawn`. El nuevo control solo devuelve
+`EACCES` cuando falla la confianza de un **Mach-O/FAT legible perteneciente
+a la raíz oculta activa**: verifica la marca de RootHide y el límite de ruta,
+acepta los dos alias iOS `/var/` y `/private/var/`, y distingue explícitamente
+scripts `#!` y formatos no Mach-O. Estos últimos siguen el resultado normal
+del kernel; en el bootstrap existe al menos `usr/bin/apt-key` como script.
+Se evita atribuir `ENOENT` al error `-2` del cliente, pues también engloba
+fallos `access(F_OK)` por permisos o enlaces. PID 1 y rutas del sistema no
+adquieren ninguna solicitud adicional síncrona a jailbreakd.
+
+También se recupera del RootHide 2 compatible el envío de preferencias
+`posix_spawnattr_getarchpref_np` (hasta cuatro pares tipo/subtipo) al cliente
+RootHide 3 ya existente. Esto reduce desajustes de slice de Mach-O FAT,
+sin modificar binarios o instalar otra implementación del protocolo.
+
+En `launchdhook` se normalizan los dos alias del mismo root **solo** para
+los ejecutables permitidos (`sshd`, `login` y managers exactos) y el hook
+auténtico del bootstrap. No amplía los jobs de xpcproxy ni recurre a
+`realpath`, I/O o XPC desde PID 1. El diagnóstico de gestores deja de tratar
+`/evil/systemhook.dylib` como el hook propio: exige la misma coincidencia
+exacta de `DYLD_INSERT_LIBRARIES` que la política de private dyld.
+
+En `execTraceProcess`, un `PT_ATTACHEXC` fallido devolvía éxito por el
+sombreado de `ret` y dejaba puertos de excepción sustituidos. Se devuelve
+fallo, se restaura la configuración previa y se liberan los derechos
+adquiridos; el tamaño de entrada a `task_get_exception_ports` se inicializa
+correctamente. Se rechazan inicialización de servidor fallida, entradas
+duplicadas y respuestas con cantidad de puertos inválida. Las pruebas de
+host ejecutan el helper de restauración real con inyección de errores y
+validan el contrato del registro. La propia ruta de tracing sigue siendo
+de alto riesgo ante fallos irrecuperables de Mach o cambios de PID: **no se
+habilita ninguna ruta nueva de tracing**, ni un fallback genérico de
+`SETEXEC`, hasta contar con evidencia y validación nativa del dispositivo.
+
+Se mantienen sin resolver físicamente: la carga real de systemhook/TweakLoader
+en procesos objetivo, el banner de sshd activado por socket, el `EBADEXEC`
+de NewTerm/login, el arranque visible de Zebra y Sileo y el ocultamiento
+RootHide. Se requiere una sola observación acotada de la instalación ya
+presente; no inferir funcionamiento por CI ni repetir instalaciones.

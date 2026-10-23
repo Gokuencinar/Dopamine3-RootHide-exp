@@ -30,7 +30,7 @@ class PID1PrivateDyldTests(unittest.TestCase):
         if not compiler:
             self.skipTest("No native C compiler")
         text = SOURCE.read_text(encoding="utf-8")
-        functions = text[text.index("static bool rh3_pid1_private_dyld_target("):
+        functions = text[text.index("static const char *rh3_pid1_var_alias_n("):
                          text.index("// launchd commonly spawns UIKit apps")]
         self.assertNotIn("jbdSpawnPatchChild", functions)
         self.assertNotIn("jailbreakdXpcRequest", functions)
@@ -74,7 +74,11 @@ static char *test_jbroot_path(const char *suffix) {
     return buffer;
 }
 '''+manager_helper+r'''
-static void rh3_bootlog(const char *line) { (void)line; }
+static char manager_stage[200];
+static void rh3_bootlog(const char *line) {
+    if (!strncmp(line,"manager launch",14) && strstr(line,"systemhook_insert="))
+        snprintf(manager_stage,sizeof(manager_stage),"%s",line);
+}
 static int posix_spawnattr_getflags(const posix_spawnattr_t *a,short *flags) {
     if ((*a)->flag_error) return (*a)->flag_error;
     *flags=(*a)->flags; return 0;
@@ -119,6 +123,7 @@ static void reset(void) {
     alloc_count=force_alloc_failure=0;
     last_registered=pid_from_kernel=0;
     seen_count=0;
+    manager_stage[0]='\0';
     snprintf(path,sizeof(path),"%s/usr/sbin/sshd",root);
     snprintf(inserted,sizeof(inserted),"DYLD_INSERT_LIBRARIES=%s/basebin/systemhook.dylib",root);
 }
@@ -151,6 +156,22 @@ int main(void) {
     reset(); snprintf(path,sizeof(path),"%s/bin/login",root);
     CHECK(__posix_spawn_orig_wrapper(&pid,path,&desc,args,missing)==0);
     CHECK(has("DYLD_IN_CACHE=0"));
+    // Both paths name the same active root on iOS; do not skip private dyld
+    // because launchd uses /var while get_jbroot is /private/var.
+    reset(); snprintf(path,sizeof(path),"%s/usr/sbin/sshd",root+8);
+    CHECK(__posix_spawn_orig_wrapper(&pid,path,&desc,args,missing)==0);
+    CHECK(has("DYLD_IN_CACHE=0"));
+    reset(); snprintf(path,sizeof(path),"%s/usr/sbin/sshd",root);
+    char alternateInsert[PATH_MAX+64];
+    snprintf(alternateInsert,sizeof(alternateInsert),
+             "DYLD_INSERT_LIBRARIES=%s/basebin/systemhook.dylib",root+8);
+    char *alternateEnv[]={alternateInsert,"OTHER=kept",NULL};
+    CHECK(__posix_spawn_orig_wrapper(&pid,path,&desc,args,alternateEnv)==0);
+    CHECK(has("DYLD_IN_CACHE=0") && has("OTHER=kept"));
+    reset(); snprintf(path,sizeof(path),"%s/usr/sbin/sshd",root);
+    char *wrongBrand[]={"DYLD_INSERT_LIBRARIES=/var/containers/Bundle/Application/.jbroot-AAAAAAAAAAAAAAAA/basebin/systemhook.dylib",NULL};
+    CHECK(__posix_spawn_orig_wrapper(&pid,path,&desc,args,wrongBrand)==0);
+    CHECK(!has("DYLD_IN_CACHE=0"));
     const char *direct[]={"/Applications/Sileo.app/Sileo","/Applications/Zebra.app/Zebra",
                           "/Applications/RootHide.app/RootHide"};
     for(int i=0;i<3;i++) {
@@ -170,7 +191,14 @@ int main(void) {
         char *proxyArgs[]={"xpcproxy",(char*)managerLabels[i],NULL};
         CHECK(__posix_spawn_orig_wrapper(&pid,path,&desc,proxyArgs,missing)==0);
         CHECK(has("DYLD_IN_CACHE=0") && registrations==1);
+        CHECK(strstr(manager_stage,"systemhook_insert=1")!=NULL);
     }
+    reset(); strcpy(path,"/usr/libexec/xpcproxy");
+    char *zebraProxy[]={"xpcproxy","UIKitApplication:xyz.willy.Zebra[0x1]",NULL};
+    char *spoofedHook[]={"DYLD_INSERT_LIBRARIES=/evil/systemhook.dylib",NULL};
+    CHECK(__posix_spawn_orig_wrapper(&pid,path,&desc,zebraProxy,spoofedHook)==0);
+    CHECK(strstr(manager_stage,"systemhook_insert=0")!=NULL);
+    CHECK(!has("DYLD_IN_CACHE=0"));
     reset(); strcpy(path,"/usr/libexec/xpcproxy");
     char *notManager[]={"xpcproxy","UIKitApplication:com.apple.Preferences[0x1]",NULL};
     CHECK(__posix_spawn_orig_wrapper(&pid,path,&desc,notManager,missing)==0);

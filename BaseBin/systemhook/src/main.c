@@ -20,6 +20,7 @@
 #include "sandbox.h"
 #include "common/private.h"
 #include "common/inline.h"
+#include "common/roothide_trust_policy.h"
 
 bool gFullyDebugged = false;
 static void *gLibSandboxHandle;
@@ -291,21 +292,66 @@ bool should_enable_tweaks(void)
 	return true;
 }
 
+// RootHide 2 passed the caller's spawn architecture preferences to recursive
+// trust. Without them, a FAT login/manager binary may be trusted for a slice
+// other than the one the kernel will execute. Keep the existing RootHide 3
+// client/server protocol, and send only the public bounded preference list.
+static xpc_object_t rh3_copy_spawn_arch_preferences(struct _posix_spawn_args_desc *desc)
+{
+    if (!desc || !desc->attrp) return NULL;
+    posix_spawnattr_t attributes = desc->attrp;
+    cpu_type_t types[4] = {0};
+    cpu_subtype_t subtypes[4] = {0};
+    size_t count = 0;
+    if (posix_spawnattr_getarchpref_np(&attributes, 4, types, subtypes, &count) != 0 || count > 4)
+        return NULL;
+    xpc_object_t preferences = NULL;
+    for (size_t i = 0; i < count; ++i) {
+        if (types[i] == 0 || (uint32_t)subtypes[i] == UINT32_MAX) continue;
+        if (!preferences) preferences = xpc_array_create_empty();
+        if (!preferences) return NULL;
+        xpc_object_t arch = xpc_dictionary_create_empty();
+        if (!arch) {
+            xpc_release(preferences);
+            return NULL; // Never send a truncated preference list.
+        }
+        xpc_dictionary_set_uint64(arch, "type", (uint32_t)types[i]);
+        xpc_dictionary_set_uint64(arch, "subtype", (uint32_t)subtypes[i]);
+        xpc_array_set_value(preferences, XPC_ARRAY_APPEND, arch);
+        xpc_release(arch);
+    }
+    return preferences;
+}
+
+static int rh3_trust_before_spawn(const char *path, struct _posix_spawn_args_desc *desc, char *const envp[])
+{
+    // Do not introduce jailbreakd XPC in PID 1 or the dyld-patched phase.
+    if (!path || getpid() == 1 || !jbclient_roothide_jailbroken() || jbclient_dyld_patch_enabled())
+        return 0;
+    xpc_object_t preferredArchs = rh3_copy_spawn_arch_preferences(desc);
+    int trustResult = jbclient_trust_executable_recurse(path, preferredArchs);
+    if (preferredArchs) xpc_release(preferredArchs);
+    const char *root = get_jbroot();
+    bool activeRootChild = systemhook_is_roothide_root_path(root) &&
+                           rh3_trust_is_active_root_child(path, root);
+    bool isMachO = activeRootChild && trustResult != 0 && rh3_trust_looks_like_macho(path);
+    int status = rh3_trust_spawn_status(trustResult, activeRootChild, isMachO);
+    if (status) return status;
+    roothide_trust_injected_libraries(envp);
+    return 0;
+}
+
 int __posix_spawn_hook(pid_t *restrict pid, const char *restrict path, struct _posix_spawn_args_desc *desc, char *const argv[restrict], char * const envp[restrict])
 {
-	if (path && jbclient_roothide_jailbroken() && !jbclient_dyld_patch_enabled()) {
-		jbclient_trust_executable_recurse(path, NULL);
-		roothide_trust_injected_libraries(envp);
-	}
+	int trustStatus = rh3_trust_before_spawn(path, desc, envp);
+	if (trustStatus) return trustStatus;
 	return posix_spawn_hook_shared(pid, path, desc, argv, envp, (void *)__posix_spawn_inline, jbclient_trust_file_by_path, jbclient_platform_set_process_debugged, jbclient_jbsettings_get_double("jetsamMultiplier"));
 }
 
 int __posix_spawn_hook_with_filter(pid_t *restrict pid, const char *restrict path, char *const argv[restrict], char * const envp[restrict], struct _posix_spawn_args_desc *desc, int *ret)
 {
-	if (path && jbclient_roothide_jailbroken() && !jbclient_dyld_patch_enabled()) {
-		jbclient_trust_executable_recurse(path, NULL);
-		roothide_trust_injected_libraries(envp);
-	}
+	int trustStatus = rh3_trust_before_spawn(path, desc, envp);
+	if (trustStatus) { *ret = trustStatus; return 1; }
 	*ret = posix_spawn_hook_shared(pid, path, desc, argv, envp, (void *)__posix_spawn_inline, jbclient_trust_file_by_path, jbclient_platform_set_process_debugged, jbclient_jbsettings_get_double("jetsamMultiplier"));
 	return 1;
 }
@@ -325,10 +371,8 @@ int __execve_hook(const char *path, char *const argv[], char *const envp[])
 		errno = error ? error : EIO;
 		return -1;
 	}
-	if (path && jbclient_roothide_jailbroken() && !jbclient_dyld_patch_enabled()) {
-		jbclient_trust_executable_recurse(path, NULL);
-		roothide_trust_injected_libraries(envp);
-	}
+	int trustStatus = rh3_trust_before_spawn(path, NULL, envp);
+	if (trustStatus) { errno = trustStatus; return -1; }
 	return execve_hook_shared(path, argv, envp, (void *)__execve_inline, jbclient_trust_file_by_path);
 }
 

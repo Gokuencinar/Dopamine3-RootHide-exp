@@ -29,6 +29,24 @@ typedef struct {
     mach_msg_type_number_t saved_exception_types_count;
 } trace_data_t;
 
+// Restores the prior task exception dispatch, then releases rights obtained
+// from task_get_exception_ports. An attach failure must not leave the task
+// routed to jailbreakd without a registered handler. No process signals here.
+static int rh3_exec_trace_restore_saved_ports(mach_port_t task, trace_data_t *trace_data, bool restore)
+{
+    int result = 0;
+    for (uint32_t i = 0; i < trace_data->saved_exception_types_count && i < EXC_TYPES_COUNT; ++i) {
+        if (restore && task_set_exception_ports(task, trace_data->saved_masks[i],
+                trace_data->saved_ports[i], trace_data->saved_behaviors[i],
+                trace_data->saved_flavors[i]) != KERN_SUCCESS) result = -1;
+        if (MACH_PORT_VALID(trace_data->saved_ports[i])) {
+            mach_port_deallocate(mach_task_self(), trace_data->saved_ports[i]);
+            trace_data->saved_ports[i] = MACH_PORT_NULL;
+        }
+    }
+    return result;
+}
+
 static void finish_process_trace(trace_data_t* trace_data, bool success)
 {
     pid_t pid = trace_data->pid;
@@ -219,22 +237,39 @@ static void* exception_server(void* arg)
 int execTraceProcess(pid_t pid, uint64_t traced)
 {
     static mach_port_t exception_port = MACH_PORT_NULL;
+    static bool exception_server_ready = false;
 
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
         trace_data_lock = [[NSLock alloc] init];
         trace_data_record = [[NSMutableDictionary alloc] init];
 
-        mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &exception_port);
-        mach_port_insert_right(mach_task_self(), exception_port, exception_port, MACH_MSG_TYPE_MAKE_SEND);
+        kern_return_t allocated = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &exception_port);
+        if (allocated != KERN_SUCCESS || !MACH_PORT_VALID(exception_port)) return;
+        kern_return_t inserted = mach_port_insert_right(mach_task_self(), exception_port,
+                                                        exception_port, MACH_MSG_TYPE_MAKE_SEND);
+        if (inserted != KERN_SUCCESS) {
+            mach_port_destroy(mach_task_self(), exception_port);
+            exception_port = MACH_PORT_NULL;
+            return;
+        }
 
         pthread_t thread;
-        pthread_create(&thread, NULL, exception_server, (void*)(uintptr_t)exception_port);
+        if (pthread_create(&thread, NULL, exception_server, (void*)(uintptr_t)exception_port) != 0) {
+            mach_port_destroy(mach_task_self(), exception_port);
+            exception_port = MACH_PORT_NULL;
+            return;
+        }
+        exception_server_ready = true;
 
         __uint64_t tid = 0;
         pthread_threadid_np(thread, &tid);
         JBLogDebug("exception_server thread: %x tid=%d", thread, tid);
     });
+
+    // Do not redirect task exceptions to an unserved Mach port. Initialization
+    // failures are reported, never treated as a successful trace registration.
+    if (!exception_server_ready) return -1;
 
     if(!proc_cantrace(pid)) {
         JBLogError("can't be able to trace process: %d", pid);
@@ -251,37 +286,46 @@ int execTraceProcess(pid_t pid, uint64_t traced)
     int ret = 0;
 
     trace_data_t* trace_data = (trace_data_t*)malloc(sizeof(trace_data_t));
+    if (!trace_data) {
+        mach_port_deallocate(mach_task_self(), task);
+        return -1;
+    }
     memset(trace_data, 0, sizeof(trace_data_t));
     trace_data->traced_flag_addr = traced;
     trace_data->pid = pid;
+    // task_get_exception_ports uses an IN/OUT capacity, not an output-only
+    // count. A zero-initialized count could report no previous handlers.
+    trace_data->saved_exception_types_count = EXC_TYPES_COUNT;
+    bool portsInstalled = false;
+    bool traceAttached = false;
+
+    // Reserve this PID before modifying its task exception handler. An older
+    // trace must not be discarded or overwritten by a second START request.
+    [trace_data_lock lock];
+    if ([trace_data_record objectForKey:@(pid)] != nil) {
+        [trace_data_lock unlock];
+        free(trace_data);
+        mach_port_deallocate(mach_task_self(), task);
+        return -1;
+    }
+    [trace_data_record setObject:[NSValue valueWithPointer:trace_data] forKey:@(pid)];
 
     kr = task_get_exception_ports(task, EXC_MASK_SOFTWARE, trace_data->saved_masks, &trace_data->saved_exception_types_count,
                                             trace_data->saved_ports, trace_data->saved_behaviors, trace_data->saved_flavors);
-    if(kr == KERN_SUCCESS) {
+    if(kr == KERN_SUCCESS && trace_data->saved_exception_types_count > 0 &&
+       trace_data->saved_exception_types_count <= EXC_TYPES_COUNT) {
 
         kr = task_set_exception_ports(task, EXC_MASK_SOFTWARE, exception_port, EXCEPTION_DEFAULT|MACH_EXCEPTION_CODES, ARM_THREAD_STATE64);
         if(kr == KERN_SUCCESS) {
+            portsInstalled = true;
 
-            [trace_data_lock lock];
-
-            trace_data_t* existing_trace_data = (trace_data_t*)[[trace_data_record objectForKey:@(pid)] pointerValue];
-            if(existing_trace_data) { // pid reused by kernel?
-                JBLogError("trace data already exists for pid=%d", pid);
-                finish_process_trace(existing_trace_data, true);
-                existing_trace_data = NULL;
-            }
-
-            [trace_data_record setObject:[NSValue valueWithPointer:trace_data] forKey:@(pid)];
-
-            int ret = ptrace(PT_ATTACHEXC, pid, NULL, 0);
-            if(ret != 0) {
+            int attachResult = ptrace(PT_ATTACHEXC, pid, NULL, 0);
+            if(attachResult != 0) {
                 JBLogError("attach error: %d, %s", errno, strerror(errno));
-                [trace_data_record removeObjectForKey:@(pid)];
-                free(trace_data);
                 ret = -1;
+            } else {
+                traceAttached = true;
             }
-
-            [trace_data_lock unlock];
 
         } else {
             JBLogError("task_set_exception_ports error: %x, %s", kr, mach_error_string(kr));
@@ -293,6 +337,13 @@ int execTraceProcess(pid_t pid, uint64_t traced)
         ret = -1;
     }
 
+    if (!traceAttached) {
+        if (rh3_exec_trace_restore_saved_ports(task, trace_data, portsInstalled) != 0)
+            JBLogError("exec trace: exception handler restore failed for pid=%d", pid);
+        [trace_data_record removeObjectForKey:@(pid)];
+        free(trace_data);
+    }
+    [trace_data_lock unlock];
     mach_port_deallocate(mach_task_self(), task);
 
     return ret;

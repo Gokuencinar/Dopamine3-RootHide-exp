@@ -109,6 +109,17 @@ void ensure_fakelib_mounted(void)
 // Restore that environment contract only for known executables *inside* the
 // verified hidden root. This does not suspend children or ask PID 1 to make a
 // synchronous jailbreakd/XPC request (which can deadlock launchd).
+// Normalize only the two names for iOS's same /var mount. Never resolve an
+// untrusted symlink or consult the filesystem/XPC inside PID 1.
+static const char *rh3_pid1_var_alias_n(const char *path, size_t *length)
+{
+    if (path && length && *length >= 13 && !memcmp(path, "/private/var/", 13)) {
+        *length -= 8;
+        return path + 8;
+    }
+    return path;
+}
+
 static bool rh3_pid1_private_dyld_target(const char *path, char *const argv[])
 {
 	if (getpid() != 1 || !path || gInEarlyBoot || launchdhookFirstLoad ||
@@ -122,8 +133,12 @@ static bool rh3_pid1_private_dyld_target(const char *path, char *const argv[])
 	const char *root = get_jbroot();
 	if (!root) return false;
 	size_t rootLen = strlen(root);
-	if (rootLen == 0 || rootLen >= PATH_MAX || strncmp(path, root, rootLen)) return false;
-	const char *relative = path + rootLen;
+    size_t pathLen = strlen(path);
+    root = rh3_pid1_var_alias_n(root, &rootLen);
+    path = rh3_pid1_var_alias_n(path, &pathLen);
+    if (rootLen == 0 || rootLen >= PATH_MAX || pathLen <= rootLen ||
+        strncmp(path, root, rootLen)) return false;
+    const char *relative = path + rootLen;
 	if (*relative != '/') return false;
 	return !strcmp(relative, "/usr/sbin/sshd") ||
 	       !strcmp(relative, "/usr/bin/login") ||
@@ -140,6 +155,7 @@ static bool rh3_pid1_has_private_systemhook(char *const envp[])
 	const char *hook = JBROOT_PATH("/basebin/systemhook.dylib");
 	if (!hook) return false;
 	size_t hookLen = strlen(hook);
+    hook = rh3_pid1_var_alias_n(hook, &hookLen);
 	static const char prefix[] = "DYLD_INSERT_LIBRARIES=";
 	for (size_t i = 0; envp && envp[i] && i < 4096; i++) {
 		if (strncmp(envp[i], prefix, sizeof(prefix) - 1)) continue;
@@ -147,7 +163,8 @@ static bool rh3_pid1_has_private_systemhook(char *const envp[])
 		while (*entry) {
 			const char *end = strchr(entry, ':');
 			size_t length = end ? (size_t)(end - entry) : strlen(entry);
-			if (length == hookLen && !memcmp(entry, hook, hookLen)) return true;
+                const char *equivalent = rh3_pid1_var_alias_n(entry, &length);
+                if (length == hookLen && !memcmp(equivalent, hook, hookLen)) return true;
 			if (!end) break;
 			entry = end + 1;
 		}
@@ -215,12 +232,9 @@ int __posix_spawn_orig_wrapper(pid_t *restrict pid, const char *restrict path,
 	pid_t *recordedPid = pid ? pid : &localPid;
 	const char *manager = roothide_is_active() ? rh3_manager_spawn_name(path, argv) : NULL;
 	if (manager) {
-		bool hook = false;
-		for (unsigned i=0; envp && envp[i]; i++) {
-			static const char key[] = "DYLD_INSERT_LIBRARIES=";
-			if (!strncmp(envp[i], key, sizeof(key)-1))
-				hook = strstr(envp[i]+sizeof(key)-1, "/systemhook.dylib") != NULL;
-		}
+		// The previous substring test counted unrelated /evil/systemhook.dylib
+		// as a successful RootHide injection. Log only the exact active-root hook.
+		bool hook = rh3_pid1_has_private_systemhook(envp);
 		char stage[160];
 		snprintf(stage, sizeof(stage), "manager launch %s: systemhook_insert=%d proxy=%d", manager, hook,
 		         !strcmp(path, "/usr/libexec/xpcproxy"));
