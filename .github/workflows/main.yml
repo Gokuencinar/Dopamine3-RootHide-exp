@@ -359,6 +359,14 @@ jobs:
             [[ " $architectures " == *" arm64 "* ]] || { echo "$binary lacks arm64" >&2; exit 1; }
             [[ " $architectures " == *" arm64e "* ]] || { echo "$binary lacks arm64e" >&2; exit 1; }
           done
+          # PatchLoader's constructor aborts if PLRequiredJIT cannot be found
+          # through RTLD_DEFAULT. RTLD_NOLOAD alone likewise cannot certify
+          # spawn-hook readiness. Verify both exported ABIs in each slice.
+          for arch in arm64 arm64e; do
+            exported="$(xcrun nm -g -arch "$arch" BaseBin/.build/systemhook.dylib)"
+            printf '%s\n' "$exported" | grep -Eq ' [Tt] _PLRequiredJIT$' || { echo "missing PLRequiredJIT ($arch)" >&2; exit 1; }
+            printf '%s\n' "$exported" | grep -Eq ' [Tt] _rh3_systemhook_spawn_hooks_ready$' || { echo "missing spawn-ready ABI ($arch)" >&2; exit 1; }
+          done
 
       # A completed Xcode/ldid build is NOT proof of RootHide functionality.
       # Save it in a plainly quarantined diagnostic artifact so developers can

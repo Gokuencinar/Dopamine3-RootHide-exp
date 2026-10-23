@@ -25,6 +25,13 @@
 #include "common/roothide_trust_policy.h"
 
 bool gFullyDebugged = false;
+// RootHide PatchLoader's constructor dlsym(RTLD_DEFAULT, "PLRequiredJIT")
+// aborts if this exported entry point is absent. Keep the exact 64-bit ABI
+// from roothide/PatchLoader; no JIT entitlement or privilege is conferred.
+__attribute__((visibility("default"))) int64_t PLRequiredJIT(void)
+{
+    return 0;
+}
 // RTLD_NOLOAD proves only that dyld mapped this dylib. Publish readiness only
 // after the actual spawn interception is installed following process check-in.
 static _Atomic bool gRh3SpawnHookReady = false;
@@ -36,8 +43,9 @@ static void *gLibSandboxHandle;
 char *JB_BootUUID = NULL;
 char *JB_RootPath = NULL;
 char *get_jbroot(void) { return JB_RootPath; }
-void roothide_prepare_checked_in_process(const char *root);
+int roothide_prepare_checked_in_process(const char *root);
 void roothide_prepare_process(const char *root, const char *executable);
+int roothide_prepare_patch_for_tweaks(const char *root, const char *executable);
 int roothide_trust_injected_libraries(char *const envp[]);
 
 static char gExecutablePath[PATH_MAX];
@@ -658,10 +666,14 @@ __attribute__((constructor)) static void initializer(void)
 	// succeeded. Keep it independent of executable-path resolution: xpcproxy,
 	// lsd and other services may lack a realpath here. Do not send another
 	// launchd XPC status query; the authenticated check-in already completed.
-	roothide_prepare_checked_in_process(JB_RootPath);
+		int rh3InitStatus = roothide_prepare_checked_in_process(JB_RootPath);
+		// If the pinned RootHide initializer is missing, invalid or cannot
+		// finish its dyld constructors, no later RootHide stage is safe to run.
+		// Keep the process itself alive rather than aborting Apple services.
+		if (rh3InitStatus != 0) return;
 
 		if (load_executable_path() == 0) {
-			roothide_prepare_process(JB_RootPath, gExecutablePath);
+				roothide_prepare_process(JB_RootPath, gExecutablePath);
 			// Load rootlesshooks / watchdoghook when neccessary
 		if (!strcmp(gExecutablePath, "/usr/sbin/cfprefsd") ||
 			!strcmp(gExecutablePath, "/System/Library/CoreServices/SpringBoard.app/SpringBoard") ||
@@ -705,7 +717,13 @@ __attribute__((constructor)) static void initializer(void)
 		// Load tweaks if desired
 				bool rh3Probe = rh3DiagnosticProbe && string_has_suffix(gExecutablePath, "/basebin/rh3tweakprobe");
 			if (rh3Probe) setenv("RH3_TWEAK_PROBE_SYSTEMHOOK", "1", 1);
-			if (should_enable_tweaks()) {
+				bool rh3TweaksRequested = should_enable_tweaks();
+				int rh3PatchStatus = rh3TweaksRequested ?
+					roothide_prepare_patch_for_tweaks(JB_RootPath, gExecutablePath) : 0;
+				// A missing optional PatchLoader is fine. If it was present but
+				// invalid or failed to load, do not run unpatched tweaks in this
+				// process. Preserve normal app execution and installed packages.
+				if (rh3PatchStatus == 0 && rh3TweaksRequested) {
 				const char *tweakLoaderPath = JBROOT_PATH("/usr/lib/TweakLoader.dylib");
 				if (tweakLoaderPath && access(tweakLoaderPath, F_OK) == 0) {
 				void *tweakLoaderHandle = dlopen(tweakLoaderPath, RTLD_NOW);

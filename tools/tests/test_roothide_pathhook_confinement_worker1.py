@@ -19,10 +19,10 @@ class RootHidePathHookConfinement(unittest.TestCase):
     def test_loader_has_no_global_xpc_or_outside_root_fallback(self):
         text = PORT.read_text(encoding="utf-8")
         loader = text.split("static void roothide_call_pathhook(", 1)[1].split(
-            "static void rh3_load_rooted_init(", 1
+            "static int rh3_load_rooted_init(", 1
         )[0]
         process = text.split("void roothide_prepare_process(", 1)[1].split(
-            "void roothide_trust_injected_libraries(", 1
+            "int roothide_trust_injected_libraries(", 1
         )[0]
         self.assertIn("roothide_call_pathhook(root)", process)
         self.assertIn("root_contains_executable(root, executable)", process)
@@ -46,7 +46,7 @@ class RootHidePathHookConfinement(unittest.TestCase):
         source = PORT.read_text(encoding="utf-8")
         loader = "static void roothide_call_pathhook(" + source.split(
             "static void roothide_call_pathhook(", 1
-        )[1].split("static void rh3_load_rooted_init(", 1)[0]
+        )[1].split("static int rh3_load_rooted_init(", 1)[0]
         harness = r'''
 #include <stdbool.h>
 #include <stdlib.h>

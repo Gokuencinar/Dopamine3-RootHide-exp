@@ -126,3 +126,44 @@ relax `ROOTHIDE3_BOOTSTRAP_READY` / physical test gates.
   separate hardening task; no attempt was made to add unsafe PID1 synchronous
   patch-child transactions. No live SSH keys, accounts, packages or data were
   modified, and strict readiness remains 7/9.
+
+## RootHide upstream PatchLoader ABI and constructor recovery (follow-on)
+
+- RootHide's actual `PatchLoader.c` from `roothide/PatchLoader` resolves
+  `PLRequiredJIT` from `RTLD_DEFAULT` during its constructor and aborts if
+  absent. Our preceding port loaded the optional dylib without exporting the
+  symbol. `systemhook/main.c` now exports the exact `int64_t (void)` ABI,
+  returning zero without enabling JIT or elevating process privileges. CI
+  checks the `_PLRequiredJIT` and `_rh3_systemhook_spawn_hooks_ready` defined
+  symbols in **both** arm64 and arm64e slices, not only the library's presence.
+- `roothideinit.dylib` is mandatory on an active hidden bootstrap. Its loader
+  now checks file metadata, canonical confinement, Mach-O magic and the
+  `dlopen(RTLD_NOW)` result. A failed/missing initializer stops subsequent
+  RootHide-only stages without crashing a system service; stock Dopamine
+  remains unaffected. This is not a proof of the initializer's semantics.
+- `roothidepatch.dylib` remains optional, consistent with the bootstrap 1900
+  lacking this file initially. Only a regular, root-owned, non-writable,
+  single-link Mach-O in the active root can be loaded. Before `dlopen`, check
+  the PatchLoader package's expected rooted `/var/jb` symlink; otherwise its
+  own constructor could abort app launches. No package, key or symlink is
+  created, modified, or removed. The library is loaded **only when the
+  existing tweak policy permits injection** (including selected UIKit and
+  system processes such as Settings/SpringBoard), after authenticated
+  check-in and initializer, before TweakLoader. Safe mode bypasses both.
+- `dlopen` failure when the optional library exists returns `EIO`, invalid
+  metadata returns `EACCES`/`ENOEXEC`, and a completely absent optional
+  library returns success. RootHide-aware tweak injection is then skipped
+  for that process only, preserving app boot and the installed packages.
+  The platform's dyld/AMFI and the existing trustcache mechanism still own
+  cryptographic signature and selected-architecture enforcement; a Mach-O
+  magic check or mocked host result is **not** a signature verification.
+- C-executed host tests cover success, missing files, invalid ownership,
+  unsafe permissions, symlink escape, wrong file kind, missing package link,
+  non-Mach-O input and `dlopen` failure. No new synchronous XPC to PID1,
+  systemwide trust grants, password writes, app reinstalls or bootstrap wipes.
+
+Readiness remains **7/9** and this work is not hardware validation. Pending:
+real PID1 child patch-before-run contract, private dyld loaded from the
+expected trustcache, actual `systemhook` constructor and `TweakLoader`
+execution, one unauthenticated SSH banner probe, NewTerm login spawning,
+LaunchServices activation, and a real tweak Settings pane on the same iPhone.

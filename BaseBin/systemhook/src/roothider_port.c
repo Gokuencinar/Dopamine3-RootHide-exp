@@ -70,46 +70,57 @@ static void roothide_call_pathhook(const char *root)
     if (install) install();
 }
 
-static void rh3_load_rooted_init(const char *root)
+static int rh3_load_rooted_init(const char *root)
 {
     // RootHide 2/3 initializes every checked-in process, not just executables
     // located within the hidden bootstrap. Without this, SpringBoard and
     // ordinary apps never initialize RootHide's per-process runtime.
     const char *init = JBROOT_PATH("/usr/lib/roothideinit.dylib");
-    if (!init) return;
+    if (!init) return ENOENT;
     struct stat st = {0};
     if (lstat(init, &st) != 0 || !S_ISREG(st.st_mode) || st.st_uid != 0 ||
-        st.st_nlink != 1 || st.st_size <= 0 || (st.st_mode & 0022)) return;
+        st.st_nlink != 1 || st.st_size <= 0 || (st.st_mode & 0022)) return EACCES;
     char resolvedRoot[PATH_MAX] = {0}, resolvedInit[PATH_MAX] = {0};
-    if (!realpath(root, resolvedRoot) || !realpath(init, resolvedInit)) return;
+    if (!realpath(root, resolvedRoot) || !realpath(init, resolvedInit)) return EACCES;
     if (!rh3_trust_is_active_root_child(init, root) ||
-        !rh3_trust_is_active_root_child(resolvedInit, resolvedRoot)) return;
+        !rh3_trust_is_active_root_child(resolvedInit, resolvedRoot)) return EACCES;
+    if (!rh3_trust_looks_like_macho(init)) return ENOEXEC;
     // Match the upstream loader visibility; never overwrite or re-sign the
     // bootstrap library, and leave stock Dopamine when it is absent.
-    (void)dlopen(init, RTLD_NOW);
+    return dlopen(init, RTLD_NOW) ? 0 : EIO;
 }
 
-static void rh3_load_rooted_patch(const char *root)
+static int rh3_load_rooted_patch(const char *root)
 {
     // RootHide's post-executable runtime is a separate phase from global
     // roothideinit. It is optional in the pinned bootstrap and may arrive
     // later through dpkg; never synthesize/install it in a running process.
-    if (!root || !systemhook_is_roothide_root_path(root)) return;
+    if (!root || !systemhook_is_roothide_root_path(root)) return 0;
     const char *patch = JBROOT_PATH("/usr/lib/roothidepatch.dylib");
-    if (!patch || !rh3_trust_is_active_root_child(patch, root)) return;
+    if (!patch || !rh3_trust_is_active_root_child(patch, root)) return EACCES;
     struct stat st = {0};
-    if (lstat(patch, &st) != 0 || !S_ISREG(st.st_mode) || st.st_uid != 0 ||
-        st.st_nlink != 1 || st.st_size <= 0 || (st.st_mode & 0022)) return;
+    if (lstat(patch, &st) != 0) return errno == ENOENT ? 0 : EACCES;
+    if (!S_ISREG(st.st_mode) || st.st_uid != 0 ||
+        st.st_nlink != 1 || st.st_size <= 0 || (st.st_mode & 0022)) return EACCES;
     char resolvedRoot[PATH_MAX] = {0}, resolvedPatch[PATH_MAX] = {0};
     if (!realpath(root, resolvedRoot) || !realpath(patch, resolvedPatch) ||
-        !rh3_trust_is_active_root_child(resolvedPatch, resolvedRoot)) return;
+        !rh3_trust_is_active_root_child(resolvedPatch, resolvedRoot)) return EACCES;
+    if (!rh3_trust_looks_like_macho(patch)) return ENOEXEC;
+    // PatchLoader's real constructor requires its package-owned var/jb link.
+    // The package may be absent on existing boots; do not assert or repair it
+    // from a constructor, especially while system services are launching.
+    const char *compat = JBROOT_PATH("/var/jb");
+    struct stat compatStat = {0};
+    if (!compat || !rh3_trust_is_active_root_child(compat, root) ||
+        lstat(compat, &compatStat) != 0 || !S_ISLNK(compatStat.st_mode))
+        return EACCES;
     // Trust is mediated by the existing dyld hook when active. Do not add a
     // second synchronous trust XPC request to an executable's constructor:
     // unavailable launchd/jailbreakd services must not stall its startup.
-    (void)dlopen(patch, RTLD_NOW); // Keep the package runtime loaded.
+    return dlopen(patch, RTLD_NOW) ? 0 : EIO; // Keep runtime loaded.
 }
 
-void roothide_prepare_checked_in_process(const char *root)
+int roothide_prepare_checked_in_process(const char *root)
 {
     // The systemhook constructor calls this only AFTER a successful dyld
     // check-in (or its authenticated process_checkin fallback). Do not issue a
@@ -118,13 +129,13 @@ void roothide_prepare_checked_in_process(const char *root)
     // skip RootHide's global initializer in every affected process.
     // Require the actual authenticated root to retain stock Dopamine behavior
     // and avoid treating a lookalike/old randomized path as RootHide.
-    if (!root || !systemhook_is_roothide_root_path(root)) return;
+    if (!root || !systemhook_is_roothide_root_path(root)) return 0;
 
     // RootHide 2 runs roothideinit after authenticated check-in, NOT only if
     // _NSGetExecutablePath + realpath work. On a short-lived xpcproxy job or
     // a process with an inaccessible image path that latter lookup can fail,
     // yet this global initialization is still required for RootHide services.
-    rh3_load_rooted_init(root);
+    return rh3_load_rooted_init(root);
 }
 
 void roothide_prepare_process(const char *root, const char *executable)
@@ -136,9 +147,16 @@ void roothide_prepare_process(const char *root, const char *executable)
     if (root_contains_executable(root, executable)) {
         roothide_redirect_home(root);
         roothide_call_pathhook(root);
-        rh3_load_rooted_patch(root);
     }
+}
 
+int roothide_prepare_patch_for_tweaks(const char *root, const char *executable)
+{
+    // PatchLoader must precede TweakLoader in tweak-enabled UIKit processes
+    // too (SpringBoard/Settings are outside jbroot). Never change HOME or
+    // pathhook for those processes. Safe mode must suppress *both* loaders.
+    if (!root || !executable || !systemhook_is_roothide_root_path(root)) return 0;
+    return rh3_load_rooted_patch(root);
 }
 
 int roothide_trust_injected_libraries(char *const envp[])
