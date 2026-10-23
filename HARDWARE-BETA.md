@@ -773,3 +773,46 @@ en procesos objetivo, el banner de sshd activado por socket, el `EBADEXEC`
 de NewTerm/login, el arranque visible de Zebra y Sileo y el ocultamiento
 RootHide. Se requiere una sola observación acotada de la instalación ya
 presente; no inferir funcionamiento por CI ni repetir instalaciones.
+
+### Ronda de revisión de riesgos después de r180 (solo host, sin IPA nueva)
+
+La candidata publicada de referencia sigue siendo **r180**, commit `b00ad15`
+(Actions `39935306301`, IPA de 104555457 bytes, SHA-256
+`54d87b9f96a376484a9fb973e8bd35c37216d02c1846856ef5b55466346f30d3`).
+Se ha comprobado de nuevo que los pasos Xcode, arquitectura, verificación
+hardware beta y publicación finalizaron correctamente. El workflow global
+conserva su fallo deliberado en la puerta física 7/9.
+
+El servidor `execTrace` contenía dos defectos reproducibles sin hardware:
+si `pid_for_task` fallaba, saltaba a la siguiente recepción sin enviar
+respuesta al hilo que esperaba la excepción, y nunca descartaba los derechos
+Mach de los descriptores `thread` y `task` de la solicitud. Una función de
+producción ahora envía la respuesta y libera los derechos del mensaje una
+sola vez, teniendo en cuenta que el puerto remoto de respuesta fue consumido
+si el envío tuvo éxito. También evita leer `code[1]` si el mensaje declara
+menos de dos códigos y verifica la lectura efectiva del estado del hilo.
+Un arnés C invoca el helper exacto con envío correcto y fallido. La cancelación
+de tracing conserva ahora el estado original si no puede enviar su solicitud
+de señal; otro arnés C comprueba transiciones positivas y negativas.
+
+**Límites de esta corrección:** en RootHide3 no se ha encontrado un llamante
+de producción del par de wrappers `jbdExecTraceStart`/`jbdExecTraceCancel`.
+No se conecta ese mecanismo al login de NewTerm ni se introduce el fallback
+de RootHide2 basado en `ptrace`. Permanecen riesgos ante pérdida de identidad
+del PID y restauración Mach fallida (en el código anterior al nuevo cambio):
+sin un contrato transaccional verificable no es seguro intentar recuperarlos
+automáticamente. Por tanto estas modificaciones de una ruta inactiva no
+justifican por sí solas otra beta de hardware ni otro release. Las pruebas
+host no reemplazan el build de Xcode de los cambios nuevos.
+
+**Única observación física mínima de la instalación actual, sin reinstalar:**
+utilizar el diagnóstico integrado en la app RootHide3 y conservar una sola
+captura de estado del intento existente. Buscar el marcador primario y el
+latch secundario de AppGroup con su estado *conocido/desconocido*, resultado
+de `rh3tweakprobe` (0/81/82), contador `runs` y último error de
+`com.openssh.sshd` antes y después de **una sola** conexión de banner al
+puerto ya configurado, así como el errno del ejecutable `login` y los
+errores concretos de arranque/dyld de Sileo y Zebra. No intentar reinicios,
+reinstalar OpenSSH, cambiar claves, desbloquear servicios, regenerar launchd
+plists ni limpiar `.safe_mode` para recopilar esa evidencia. No recoger ni
+difundir contraseñas, claves privadas, fuentes privadas o datos personales.

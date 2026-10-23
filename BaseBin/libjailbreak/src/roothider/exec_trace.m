@@ -29,6 +29,20 @@ typedef struct {
     mach_msg_type_number_t saved_exception_types_count;
 } trace_data_t;
 
+// A failed request to signal the tracer does not constitute a cancellation.
+// Only update the record if SIGTRAP was successfully queued; completion is
+// still confirmed separately after the actual PT_DETACH.
+static void rh3_exec_trace_revert_unsent_cancel(trace_data_t *trace_data,
+                                                bool previousCancelled,
+                                                uint64_t previousAddress,
+                                                int signalResult)
+{
+    if (signalResult != 0) {
+        trace_data->cancelled = previousCancelled;
+        trace_data->detached_flag_addr = previousAddress;
+    }
+}
+
 // Restores the prior task exception dispatch, then releases rights obtained
 // from task_get_exception_ports. An attach failure must not leave the task
 // routed to jailbreakd without a registered handler. No process signals here.
@@ -73,6 +87,27 @@ static void finish_process_trace(trace_data_t* trace_data, bool success)
     free((void*)trace_data);
 }
 
+// Mach exception raise requests carry task/thread send rights as descriptors.
+// On successful send the reply consumes the request's send-once destination;
+// destroy the remaining received rights exactly once. On send failure,
+// mach_msg_destroy also disposes of the unconsumed reply right.
+static mach_msg_return_t rh3_exec_trace_reply_and_destroy(mach_msg_header_t *msg,
+                                                          __Reply__mach_exception_raise_t *reply)
+{
+    reply->Head.msgh_bits = MACH_MSGH_BITS(MACH_MSGH_BITS_REMOTE(msg->msgh_bits), 0);
+    reply->Head.msgh_size = sizeof(*reply);
+    reply->Head.msgh_remote_port = msg->msgh_remote_port;
+    reply->Head.msgh_local_port = MACH_PORT_NULL;
+    reply->Head.msgh_id = msg->msgh_id + 0x64;
+
+    mach_msg_return_t sent = mach_msg(&reply->Head, MACH_SEND_MSG | MACH_MSG_OPTION_NONE,
+                                     reply->Head.msgh_size, 0, MACH_PORT_NULL,
+                                     MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+    if (sent == MACH_MSG_SUCCESS) msg->msgh_remote_port = MACH_PORT_NULL;
+    mach_msg_destroy(msg);
+    return sent;
+}
+
 static void* exception_server(void* arg)
 {
     mach_port_t port = (mach_port_t)(uintptr_t)arg;
@@ -104,22 +139,25 @@ static void* exception_server(void* arg)
         kern_return_t kr = pid_for_task(request->task.name, &pid);
         if(kr != KERN_SUCCESS || pid<=0) {
             JBLogError("pid_for_task (task=%x pid=%d) failed: %x, %s\n", request->task.name, pid, kr, mach_error_string(kr));
-            continue;
+            reply.RetCode = KERN_FAILURE;
+            goto send_reply;
         }
 
         arm_thread_state64_t threadState={0};
         mach_msg_type_number_t threadStateCount = ARM_THREAD_STATE64_COUNT;
-        thread_get_state(request->thread.name, ARM_THREAD_STATE64, (thread_state_t)&threadState, &threadStateCount);
-
-        arm_exception_state64_t exceptionState;
-        mach_msg_type_number_t exceptionStateCount = ARM_EXCEPTION_STATE64_COUNT;
-        thread_get_state(request->thread.name, ARM_EXCEPTION_STATE64, (thread_state_t)&exceptionState, &exceptionStateCount);
+        kr = thread_get_state(request->thread.name, ARM_THREAD_STATE64,
+                              (thread_state_t)&threadState, &threadStateCount);
+        if (kr != KERN_SUCCESS || threadStateCount != ARM_THREAD_STATE64_COUNT) {
+            reply.RetCode = KERN_FAILURE;
+            goto send_reply;
+        }
 
         __darwin_arm_thread_state64_ptrauth_strip(threadState);
         uint64_t pc = (uint64_t)__darwin_arm_thread_state64_get_pc(threadState);
 
         JBLogDebug("pid=%d exception: type=%d ncode=%d code=0x%llX(%lld) subcode=0x%llX(%lld) thread=%x pc=%p\n", pid, request->exception, request->codeCnt,
-            request->code[0], request->code[0], request->code[1], request->code[1],
+            request->codeCnt >= 1 ? request->code[0] : 0, request->codeCnt >= 1 ? request->code[0] : 0,
+            request->codeCnt >= 2 ? request->code[1] : 0, request->codeCnt >= 2 ? request->code[1] : 0,
             request->thread.name, (void*)pc);
 
         [trace_data_lock lock];
@@ -127,6 +165,7 @@ static void* exception_server(void* arg)
 
         if(!trace_data) {
             JBLogError("no trace data for pid=%d, %s\n", pid, proc_get_path(pid,NULL));
+            reply.RetCode = KERN_FAILURE;
         }
         else if (request->exception == EXC_SOFTWARE && request->codeCnt == 2 && request->code[0] == EXC_SOFT_SIGNAL)
         {
@@ -219,18 +258,15 @@ static void* exception_server(void* arg)
             }
         } else {
             JBLogError("unexpected exception type: %d from %d,%s\n", request->exception, pid, proc_get_path(pid,NULL));
+            reply.RetCode = KERN_FAILURE;
         }
 
         trace_data = NULL;
         [trace_data_lock unlock];
 
-		reply.Head.msgh_bits = MACH_MSGH_BITS(MACH_MSGH_BITS_REMOTE(msg->msgh_bits), 0);
-		reply.Head.msgh_size = sizeof(__Reply__mach_exception_raise_t);
-		reply.Head.msgh_remote_port = msg->msgh_remote_port;
-		reply.Head.msgh_local_port = MACH_PORT_NULL;
-		reply.Head.msgh_id = msg->msgh_id + 0x64;
-
-		mach_msg(&reply.Head, MACH_SEND_MSG | MACH_MSG_OPTION_NONE, reply.Head.msgh_size, 0, MACH_PORT_NULL, MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
+    send_reply:
+        if (rh3_exec_trace_reply_and_destroy(msg, &reply) != MACH_MSG_SUCCESS)
+            JBLogError("exec trace exception reply delivery failed for pid=%d", pid);
 	}
 }
 
@@ -355,9 +391,13 @@ int execTraceCancel(pid_t pid, uint64_t detached)
     [trace_data_lock lock];
     trace_data_t* trace_data = (trace_data_t*)[[trace_data_record objectForKey:@(pid)] pointerValue];
     if(trace_data) {
+        bool previousCancelled = trace_data->cancelled;
+        uint64_t previousAddress = trace_data->detached_flag_addr;
         trace_data->cancelled = true;
         trace_data->detached_flag_addr = detached;
         ret = kill(pid, SIGTRAP);
+        rh3_exec_trace_revert_unsent_cancel(trace_data, previousCancelled,
+                                            previousAddress, ret);
     } else {
         JBLogError("no trace data for pid=%d", pid);
     }
