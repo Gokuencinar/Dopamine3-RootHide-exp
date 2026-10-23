@@ -4,12 +4,14 @@ run-name: "RootHide3 r${{ github.run_number }}.a${{ github.run_attempt }} - ${{ 
 on:
   push:
     branches:
-      - '*'
+      # '*' matches only branch names without '/'. Integration branches such
+      # as fix/roothide3-ssh-preboot-installer-rc never received native CI.
+      - '**'
     paths-ignore:
       - ".gitignore"
   pull_request:
     branches:
-      - '*'
+      - '**'
     paths-ignore:
       - ".gitignore"
   workflow_dispatch:
