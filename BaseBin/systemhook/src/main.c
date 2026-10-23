@@ -30,7 +30,7 @@ char *JB_RootPath = NULL;
 char *get_jbroot(void) { return JB_RootPath; }
 void roothide_prepare_checked_in_process(const char *root);
 void roothide_prepare_process(const char *root, const char *executable);
-void roothide_trust_injected_libraries(char *const envp[]);
+int roothide_trust_injected_libraries(char *const envp[]);
 
 static char gExecutablePath[PATH_MAX];
 static int load_executable_path(void)
@@ -350,8 +350,7 @@ static int rh3_trust_before_spawn(const char *path, struct _posix_spawn_args_des
     bool isMachO = activeRootChild && trustResult != 0 && rh3_trust_looks_like_macho(path);
     int status = rh3_trust_spawn_status(trustResult, activeRootChild, isMachO);
     if (status) return status;
-    roothide_trust_injected_libraries(envp);
-    return 0;
+    return roothide_trust_injected_libraries(envp);
 }
 
 int __posix_spawn_hook(pid_t *restrict pid, const char *restrict path, struct _posix_spawn_args_desc *desc, char *const argv[restrict], char * const envp[restrict])

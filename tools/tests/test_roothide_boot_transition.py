@@ -9,7 +9,10 @@ ROOT=Path(__file__).resolve().parents[2]
 class BootTransition(unittest.TestCase):
     def test_root_hide_self_exec_and_boomerang_preparation_are_paired(self):
         spawn=(ROOT/'BaseBin/launchdhook/src/spawn_hook.c').read_text()
-        handoff=spawn.split('if (!strcmp(path, executablePath))',1)[1].split('#if LOG_PROCESS_LAUNCHES',1)[0]
+        # A failed _NSGetExecutablePath() must never be mistaken for the
+        # userspace-reboot handoff. The matching branch is now doubly gated.
+        handoff=spawn.split('!strcmp(path, executablePath))',1)[1].split('#if LOG_PROCESS_LAUNCHES',1)[0]
+        self.assertIn('_NSGetExecutablePath(&executablePath[0], &bufsize) == 0',spawn)
         self.assertIn('bool rootHideHandoff = roothide_is_active()',handoff)
         self.assertIn('originalFlags & POSIX_SPAWN_SETEXEC',handoff)
         self.assertIn('originalFlags | POSIX_SPAWN_START_SUSPENDED',handoff)

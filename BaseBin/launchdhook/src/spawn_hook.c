@@ -312,10 +312,12 @@ int __posix_spawn_hook(pid_t *restrict pid, const char *restrict path,
 					   char *const envp[restrict])
 {
 	if (path) {
-		char executablePath[1024];
+		char executablePath[1024] = {0};
 		uint32_t bufsize = sizeof(executablePath);
-		_NSGetExecutablePath(&executablePath[0], &bufsize);
-		if (!strcmp(path, executablePath)) {
+		// A failure means the buffer may contain a truncated/unterminated path.
+		// Never confuse an ordinary launchd child with our userspace re-exec.
+		if (_NSGetExecutablePath(&executablePath[0], &bufsize) == 0 &&
+		    !strcmp(path, executablePath)) {
 			bool rootHideHandoff = roothide_is_active();
 			short originalFlags = 0;
 			if (rootHideHandoff) {

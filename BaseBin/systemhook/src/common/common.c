@@ -1,5 +1,6 @@
 #include "common.h"
 #include "roothide_spawn.h"
+#include "roothide_trust_policy.h"
 #include <xpc/xpc.h>
 #include <xpc_private.h>
 #include <mach-o/dyld.h>
@@ -277,8 +278,23 @@ static int spawn_exec_hook_common(bool isExec,
 	const char *hookDylibPath = HOOK_DYLIB_PATH;
 
 	if (spawnConfig & kSpawnConfigTrust) {
-		// Upload binary to trustcache if needed
-		trust_binary(path);
+		// A failed trust-cache operation must not be reported as a successful
+		// spawn/exec of a Mach-O in the authenticated hidden root. Otherwise
+		// NewTerm/login and RootHide binaries fail later with EBADEXEC without
+		// the caller learning that preparation failed. Keep PID1's server-local
+		// behavior unchanged: it cannot synchronously repair via its own XPC.
+		int trustResult = trust_binary(path);
+		if (trustResult != 0 && getpid() != 1) {
+			const char *root = get_jbroot();
+			bool activeRootChild = systemhook_is_roothide_root_path(root) &&
+			                       rh3_trust_is_active_root_child(path, root);
+			bool isMachO = activeRootChild && rh3_trust_looks_like_macho(path);
+			int trustStatus = rh3_trust_spawn_status(trustResult, activeRootChild, isMachO);
+			if (trustStatus) {
+				errno = trustStatus;
+				return isExec ? -1 : trustStatus;
+			}
+		}
 	}
 
 	const char *existingLibraryInserts = envbuf_getenv((const char **)envp, "DYLD_INSERT_LIBRARIES");

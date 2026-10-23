@@ -19,11 +19,12 @@ PORT = ROOT / "BaseBin/systemhook/src/roothider_port.c"
 class DyldVtableReferenceTests(unittest.TestCase):
     def test_inherited_insert_trust_is_limited_to_real_active_root(self):
         source = PORT.read_text(encoding="utf-8")
-        routine = source.split("void roothide_trust_injected_libraries(", 1)[1]
+        routine = source.split("int roothide_trust_injected_libraries(", 1)[1]
         self.assertIn("systemhook_is_roothide_root_path(root)", routine)
         self.assertIn("rh3_trust_is_active_root_child(entry, root)", routine)
         self.assertIn("realpath(entry, resolved)", routine)
         self.assertIn("rh3_trust_is_active_root_child(resolved, resolvedRoot)", routine)
+        self.assertIn("return EACCES;", routine)
 
     def test_libsandbox_resolution_failure_cannot_replace_dlsym(self):
         source = SOURCE.read_text(encoding="utf-8")

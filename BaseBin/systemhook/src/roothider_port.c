@@ -8,6 +8,7 @@
 #include <dlfcn.h>
 #include <pwd.h>
 #include <limits.h>
+#include <errno.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -49,10 +50,20 @@ static void roothide_redirect_home(const char *root)
     setenv("CFFIXED_USER_HOME", redirected, 1);
 }
 
-static void roothide_call_pathhook(void)
+static void roothide_call_pathhook(const char *root)
 {
+    // pathhook installs an in-process CoreFoundation hook. Only load the
+    // package-owned dylib from this process's authenticated hidden root;
+    // access(R_OK) alone would also accept a symlink to a foreign library.
+    if (!root || !systemhook_is_roothide_root_path(root)) return;
     const char *path = JBROOT_PATH("/basebin/roothidehooks.dylib");
-    if (!path || access(path, R_OK) != 0) return;
+    if (!path || !rh3_trust_is_active_root_child(path, root)) return;
+    struct stat st = {0};
+    if (lstat(path, &st) != 0 || !S_ISREG(st.st_mode) || st.st_uid != 0 ||
+        st.st_nlink != 1 || st.st_size <= 0 || (st.st_mode & 0022)) return;
+    char resolvedRoot[PATH_MAX] = {0}, resolvedHook[PATH_MAX] = {0};
+    if (!realpath(root, resolvedRoot) || !realpath(path, resolvedHook) ||
+        !rh3_trust_is_active_root_child(resolvedHook, resolvedRoot)) return;
     void *library = dlopen(path, RTLD_NOW | RTLD_LOCAL);
     if (!library) return;
     void (*install)(void) = dlsym(library, "pathhook");
@@ -104,18 +115,18 @@ void roothide_prepare_process(const char *root, const char *executable)
     // Never rewrite containers for ordinary UIKit apps or Apple daemons.
     if (root_contains_executable(root, executable)) {
         roothide_redirect_home(root);
-        roothide_call_pathhook();
+        roothide_call_pathhook(root);
     }
 
 }
 
-void roothide_trust_injected_libraries(char *const envp[])
+int roothide_trust_injected_libraries(char *const envp[])
 {
-    if (!envp) return;
+    if (!envp) return 0;
     const char *root = get_jbroot();
-    if (!systemhook_is_roothide_root_path(root)) return;
+    if (!systemhook_is_roothide_root_path(root)) return 0;
     char resolvedRoot[PATH_MAX] = {0};
-    if (!realpath(root, resolvedRoot)) return;
+    if (!realpath(root, resolvedRoot)) return 0;
     const char *inserts = NULL;
     for (size_t i = 0; envp[i]; ++i) {
         if (!strncmp(envp[i], "DYLD_INSERT_LIBRARIES=", sizeof("DYLD_INSERT_LIBRARIES=") - 1)) {
@@ -123,9 +134,9 @@ void roothide_trust_injected_libraries(char *const envp[])
             break;
         }
     }
-    if (!inserts || !*inserts) return;
+    if (!inserts || !*inserts) return 0;
     char *copy = strdup(inserts);
-    if (!copy) return;
+    if (!copy) return ENOMEM;
     char *save = NULL;
     for (char *entry = strtok_r(copy, ":", &save); entry; entry = strtok_r(NULL, ":", &save)) {
         if (entry[0] == '/' && strcmp(entry, HOOK_DYLIB_PATH) != 0) {
@@ -136,8 +147,17 @@ void roothide_trust_injected_libraries(char *const envp[])
             char resolved[PATH_MAX] = {0};
             if (!realpath(entry, resolved) ||
                 !rh3_trust_is_active_root_child(resolved, resolvedRoot)) continue;
-            jbclient_trust_library_recurse(entry, NULL);
+            // Trusting a package-owned inserted dylib is part of child
+            // preparation. An unsuccessful trust operation on a real Mach-O
+            // must abort spawn before dyld fails with an opaque EBADEXEC.
+            // Never elevate or trust an insertion outside the active root.
+            int result = jbclient_trust_library_recurse(entry, NULL);
+            if (result != 0 && rh3_trust_looks_like_macho(entry)) {
+                free(copy);
+                return EACCES;
+            }
         }
     }
     free(copy);
+    return 0;
 }
