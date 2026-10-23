@@ -34,7 +34,7 @@ class UniqueIPARelease(unittest.TestCase):
         upload = step('Upload jailbreak-enabled RootHide hardware beta')
         self.assertIn('steps.hardware_beta_package.outputs.asset', upload)
 
-    def test_direct_release_after_verification_before_strict_guard(self):
+    def test_direct_release_requires_strict_validation_gate(self):
         release = step('Publish directly downloadable experimental IPA')
         self.assertIn('gh release create "$TAG"', release)
         self.assertIn('"Application/$ASSET"', release)
@@ -46,8 +46,11 @@ class UniqueIPARelease(unittest.TestCase):
         self.assertIn("env.ROOTHIDE_HARDWARE_TEST == 'YES'", release)
         self.assertLess(MAIN.index('- name: Verify jailbreak-enabled RootHide hardware beta'),
                         MAIN.index('- name: Publish directly downloadable experimental IPA'))
-        self.assertLess(MAIN.index('- name: Publish directly downloadable experimental IPA'),
-                        MAIN.index('- name: Check RootHide port prerequisites before upload'))
+        # r188 published a publicly downloadable IPA while the same workflow
+        # ended with a failing 7/9 prerequisite audit. That is not a valid
+        # release pipeline: hardware evidence must gate public publication.
+        self.assertLess(MAIN.index('- name: Check RootHide prerequisites before public release'),
+                        MAIN.index('- name: Publish directly downloadable experimental IPA'))
         self.assertIn('contents: write', MAIN)
         self.assertNotIn('gh release create', MAIN.split('  device-test:', 1)[1].split('  build:', 1)[0])
 

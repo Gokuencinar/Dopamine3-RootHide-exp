@@ -28,9 +28,9 @@ class RootHideCICache(unittest.TestCase):
         self.assertLess(workflow.index('Save verified Procursus bootstrap downloads'),
                         workflow.index('- name: Build\n'))
         self.assertLess(workflow.index('Save verified Procursus bootstrap downloads'),
-                        workflow.index('- name: Check RootHide port prerequisites before upload'))
+                        workflow.index('- name: Check RootHide prerequisites before public release'))
         self.assertLess(workflow.index('Save RootHide object cache'),
-                        workflow.index('- name: Check RootHide port prerequisites before upload'))
+                        workflow.index('- name: Check RootHide prerequisites before public release'))
         for label in ('Save verified Theos SDK download',
                       'Save verified Procursus bootstrap downloads'):
             block = workflow.split(f'- name: {label}\n', 1)[1].split('\n      - name:', 1)[0]

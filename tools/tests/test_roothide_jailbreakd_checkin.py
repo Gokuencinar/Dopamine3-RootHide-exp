@@ -18,6 +18,18 @@ MAIN = (ROOT / 'BaseBin/launchdhook/src/main.m').read_text(encoding='utf-8')
 
 
 class JailbreakdCheckin(unittest.TestCase):
+    def test_every_daemon_client_must_use_authenticated_launchd_lookup(self):
+        # On r188 the old HOST_LAUNCHCTL_PORT path could expose a valid send
+        # right before jailbreakd received its receive right or checked in.
+        # xpc_pipe_routine would then wait for a daemon that cannot respond.
+        client = JBD.split('mach_port_t jailbreakdClientPort()', 1)[1].split(
+            'xpc_object_t jailbreakdXpcRequest(', 1)[0]
+        self.assertIn('if (!jailbreakd_has_checked_in()) return MACH_PORT_NULL;', client)
+        self.assertIn('port = jbclient_jailbreakd_lookup();', client)
+        self.assertNotIn('jailbreakdClientPortFastGet()', client)
+        self.assertNotIn('host_get_special_port(', JBD)
+        self.assertNotIn('host_set_special_port(', JBD)
+
     def test_clients_cannot_get_unserviced_receive_port(self):
         lookup = DOMAIN.split('static int roothide_jailbreakd_lookup(', 1)[1].split(
             'static int roothide_jailbreakd_checkin(', 1)[0]
@@ -66,7 +78,7 @@ class JailbreakdCheckin(unittest.TestCase):
         if cc is None:
             self.skipTest('No C compiler')
         start = JBD.index('bool jailbreakd_is_ready(void)')
-        end = JBD.index('\n#define JAILBREAKD_CLIENT_PORT_FAST_GET', start)
+        end = JBD.index('\nint registerServerPort()', start)
         functions = JBD[start:end]
         program = r'''
 #include <stdbool.h>

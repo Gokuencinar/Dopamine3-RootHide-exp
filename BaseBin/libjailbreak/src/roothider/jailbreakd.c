@@ -54,8 +54,6 @@ void jailbreakd_mark_checked_in(pid_t pid)
 		__jailbreakd_checked_in_pid = pid;
 }
 
-#define JAILBREAKD_CLIENT_PORT_FAST_GET
-
 int registerServerPort()
 {
 	assert(getpid() == 1);
@@ -79,34 +77,12 @@ int registerServerPort()
 
 	JBLogDebug("jailbreakd server port: %x", gJailbreakdPort);
 
-#ifdef JAILBREAKD_CLIENT_PORT_FAST_GET
-	mach_port_t self_host = mach_host_self();
-	kern_return_t kr = host_set_special_port(self_host, HOST_LAUNCHCTL_PORT, gJailbreakdPort);
-	mach_port_deallocate(mach_task_self(), self_host);
-#endif
-
-	if (kr != KERN_SUCCESS) {
-		mach_port_destroy(mach_task_self(), gJailbreakdPort);
-		gJailbreakdPort = MACH_PORT_NULL;
-		return -1;
-	}
+	// Do not expose a send right through HOST_LAUNCHCTL_PORT yet. The
+	// receive right still lives in PID 1 until the daemon authenticates and
+	// extracts it. A valid fast-port right is not proof of a live receiver;
+	// clients must use the guarded launchd domain lookup instead.
 	return 0;
 }
-
-#ifdef JAILBREAKD_CLIENT_PORT_FAST_GET
-mach_port_t jailbreakdClientPortFastGet()
-{
-	mach_port_t port = MACH_PORT_NULL;
-	mach_port_t self_host = mach_host_self();
-	kern_return_t kr = host_get_special_port(self_host, HOST_LOCAL_NODE, HOST_LAUNCHCTL_PORT, &port);
-	mach_port_deallocate(mach_task_self(), self_host);
-	if(kr != KERN_SUCCESS) {
-		JBLogError("jailbreakdClientPortFastGet failed: %x,%s", kr, mach_error_string(kr));
-		return MACH_PORT_NULL;
-	}
-	return port;
-}
-#endif
 
 void setJailbreakdProcess(pid_t pid)
 {
@@ -300,7 +276,9 @@ mach_port_t jailbreakdClientPort()
 
 	if(getpid() == 1)
 	{
-		if (!jailbreakd_is_ready()) return MACH_PORT_NULL;
+		// A created receive port is not enough: return only after the daemon's
+		// authenticated check-in. Never initiate a self-referential XPC lookup.
+		if (!jailbreakd_has_checked_in()) return MACH_PORT_NULL;
 		kern_return_t kr = mach_port_mod_refs(mach_task_self(), gJailbreakdPort, MACH_PORT_RIGHT_SEND, 1);
 		if(kr == KERN_SUCCESS) {
 			port = gJailbreakdPort;
@@ -311,19 +289,10 @@ mach_port_t jailbreakdClientPort()
 	}
 	else
 	{
-
-#ifdef JAILBREAKD_CLIENT_PORT_FAST_GET
-		port = jailbreakdClientPortFastGet();
-		if(!MACH_PORT_VALID(port))
-		{
-#endif
-
-			port = jbclient_jailbreakd_lookup();
-
-#ifdef JAILBREAKD_CLIENT_PORT_FAST_GET
-		}
-#endif
-
+		// The RootHide launchd domain refuses lookup until jailbreakd has
+		// checked in. Do not bypass its authentication/liveness gate with the
+		// kernel host special-port cache.
+		port = jbclient_jailbreakd_lookup();
 	}
 
 	return port;

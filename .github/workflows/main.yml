@@ -439,9 +439,17 @@ jobs:
             ${{ github.workspace }}/ROOT_HIDE_HARDWARE_BETA_README.txt
             ${{ github.workspace }}/HARDWARE-BETA.md
 
+      # r188 demonstrated that signing and structural checks may succeed while
+      # the jailbreak still fails on a device. Keep manual test artifacts in
+      # Actions, but NEVER publish a public Release before the functional
+      # validation gate. Do not set the gate or invent device evidence.
+      - name: Check RootHide prerequisites before public release
+        if: steps.roothide_port.outputs.is_port == 'true'
+        run: python3 tools/roothide_port_audit.py --strict
+
       # upload-artifact wraps its contents in a ZIP. Publish the verified
-      # IPA itself as a unique prerelease asset for a true direct .ipa URL.
-      # This is deliberately gated to explicit manual hardware beta builds.
+      # IPA itself only after the strict gate, for a true direct .ipa URL.
+      # This is also gated to explicit manual hardware beta builds.
       - name: Publish directly downloadable experimental IPA
         if: steps.roothide_port.outputs.is_port == 'true' && env.ROOTHIDE_HARDWARE_TEST == 'YES' && github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/roothide-dopamine3-integration' || github.ref == 'refs/heads/fix/roothide3-ssh-preboot-installer-rc')
         env:
@@ -467,12 +475,6 @@ jobs:
             echo "[Download IPA directly]($url)"
             echo "SHA-256: \`$(shasum -a 256 "Application/$ASSET" | cut -d ' ' -f 1)\`"
           } >> "$GITHUB_STEP_SUMMARY"
-
-      # Compile first so early RootHide port errors are visible in CI, but
-      # never upload an unverified stock artifact as a RootHide release.
-      - name: Check RootHide port prerequisites before upload
-        if: steps.roothide_port.outputs.is_port == 'true'
-        run: python3 tools/roothide_port_audit.py --strict
 
       - name: Upload Artifact
         # Never label the stock IPA as a verified RootHide build.
