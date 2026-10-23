@@ -7,13 +7,14 @@
 
 static NSString *const RH3LatestDiagnosticName = @".RootHide3-latest-attempt";
 static const size_t RH3DiagnosticLimit = 128 * 1024;
+static const size_t RH3UnifiedReportLimit = 384 * 1024;
 
-static int RH3AppendDiagnostic(int fd, NSData *data)
+static int RH3AppendWithLimit(int fd, NSData *data, size_t limit)
 {
     struct stat st;
     if (fstat(fd, &st)) return errno;
     if (!S_ISREG(st.st_mode) || st.st_nlink != 1) return EINVAL;
-    if (st.st_size < 0 || (uint64_t)st.st_size + data.length > RH3DiagnosticLimit) return EFBIG;
+    if (st.st_size < 0 || (uint64_t)st.st_size + data.length > limit) return EFBIG;
     size_t used = 0;
     while (used < data.length) {
         ssize_t count = write(fd, (const char *)data.bytes + used, data.length - used);
@@ -22,6 +23,65 @@ static int RH3AppendDiagnostic(int fd, NSData *data)
         used += (size_t)count;
     }
     return fsync(fd) == 0 ? 0 : errno;
+}
+
+static int RH3AppendDiagnostic(int fd, NSData *data)
+{
+    return RH3AppendWithLimit(fd, data, RH3DiagnosticLimit);
+}
+
+// An independent report never rotates the boot attempt or its pointer.
+// Both creation and source history reads stay in the original app container.
+// All file names are generated here, never supplied by the bootstrap.
+static int RH3CreateUnifiedReport(NSString *directory, NSString **pathOut)
+{
+    int parent = open(directory.fileSystemRepresentation, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (parent < 0) return -1;
+    struct stat owner = {0};
+    if (fstat(parent, &owner) || !S_ISDIR(owner.st_mode)) {
+        int failure = errno ?: EINVAL; close(parent); errno = failure; return -1;
+    }
+    NSString *name = [NSString stringWithFormat:@"RootHide3-full-diagnostic-%@.log", NSUUID.UUID.UUIDString];
+    int fd = openat(parent, name.UTF8String, O_WRONLY | O_CREAT | O_EXCL | O_APPEND | O_NOFOLLOW | O_CLOEXEC, 0600);
+    int failure = fd < 0 ? errno : 0;
+    if (!failure && geteuid() == 0 && fchown(fd, owner.st_uid, owner.st_gid)) failure = errno;
+    if (!failure && fchmod(fd, 0600)) failure = errno;
+    if (!failure && fsync(parent)) failure = errno;
+    if (failure) {
+        if (fd >= 0) { close(fd); (void)unlinkat(parent, name.UTF8String, 0); }
+        close(parent); errno = failure; return -1;
+    }
+    if (pathOut) *pathOut = [directory stringByAppendingPathComponent:name];
+    close(parent);
+    return fd;
+}
+
+static NSURL *RH3LatestDiagnosticURL(NSString *directory);
+
+static int RH3AppendBootHistoryToReport(NSString *directory, int destination)
+{
+    NSURL *previous = RH3LatestDiagnosticURL(directory);
+    if (!previous) return ENOENT;
+    int source = open(previous.fileSystemRepresentation, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (source < 0) return errno;
+    struct stat st = {0};
+    int failure = 0;
+    if (fstat(source, &st) || !S_ISREG(st.st_mode) || st.st_nlink != 1 ||
+        st.st_size <= 0 || st.st_size > RH3DiagnosticLimit) failure = EINVAL;
+    if (!failure) {
+        char chunk[4096];
+        off_t offset = 0;
+        while (offset < st.st_size) {
+            ssize_t n = pread(source, chunk, MIN((off_t)sizeof(chunk), st.st_size - offset), offset);
+            if (n < 0 && errno == EINTR) continue;
+            if (n <= 0) { failure = n < 0 ? errno : EIO; break; }
+            failure = RH3AppendWithLimit(destination, [NSData dataWithBytes:chunk length:(NSUInteger)n], RH3UnifiedReportLimit);
+            if (failure) break;
+            offset += n;
+        }
+    }
+    close(source);
+    return failure;
 }
 
 // Open while still in the original sandbox. Every later checkpoint uses fd,

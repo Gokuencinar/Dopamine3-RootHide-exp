@@ -12,6 +12,8 @@
 #include <choma/Util.h>
 #include <choma/Host.h>
 #include <mach-o/dyld.h>
+#include <mach-o/loader.h>
+#include "RH3MachOLibraryType.h"
 #include <libkern/OSByteOrder.h>
 #include "trustcache.h"
 #include "util.h"
@@ -36,7 +38,7 @@ bool macho_is_mappable(MachO *macho)
 
 	cpu_type_t cputype = header->cputype;
 	cpu_subtype_t cpusubtype = header->cpusubtype;
-	bool isLibrary = (header->filetype == MH_EXECUTE);
+		bool isLibrary = rh3_macho_is_library_type(header->filetype);
 
 	if (cputype != CPU_TYPE_ARM64) return false;
 

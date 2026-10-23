@@ -324,6 +324,14 @@ static BOOL gRootHideFullDiagnosisInFlight = NO;
                 [sshPreboot setProperty:@"shield.checkered" forKey:@"image"];
                 [sshPreboot setProperty:@"toggleRootHideSSHPrebootRepairPressed" forKey:@"action"];
                 [specifiers addObject:sshPreboot];
+                // Recovery diagnostics remain available after a partial
+                // activation, even when isBootstrapped/isJailbroken is NO.
+                PSSpecifier *diagnoseAll = [PSSpecifier preferenceSpecifierNamed:@"Diagnóstico integral RootHide3 (un botón)" target:self set:defSetter get:defGetter detail:nil cell:PSStaticTextCell edit:nil];
+                [diagnoseAll setProperty:[DOButtonCell class] forKey:@"cellClass"];
+                [diagnoseAll setProperty:buttonHeight forKey:@"height"];
+                [diagnoseAll setProperty:@"stethoscope" forKey:@"image"];
+                [diagnoseAll setProperty:@"diagnoseRootHideAllPressed" forKey:@"action"];
+                [specifiers addObject:diagnoseAll];
             }
 
             if (envManager.isBootstrapped) {
@@ -365,12 +373,6 @@ static BOOL gRootHideFullDiagnosisInFlight = NO;
                         [repairProvider setProperty:@"wrench.adjustable" forKey:@"image"];
                         [repairProvider setProperty:@"repairRootHideLibkrwPressed" forKey:@"action"];
                         [specifiers addObject:repairProvider];
-                        PSSpecifier *diagnoseAll = [PSSpecifier preferenceSpecifierNamed:@"Diagnóstico integral RootHide3 (un botón)" target:self set:defSetter get:defGetter detail:nil cell:PSStaticTextCell edit:nil];
-                        [diagnoseAll setProperty:[DOButtonCell class] forKey:@"cellClass"];
-                        [diagnoseAll setProperty:buttonHeight forKey:@"height"];
-                        [diagnoseAll setProperty:@"stethoscope" forKey:@"image"];
-                        [diagnoseAll setProperty:@"diagnoseRootHideAllPressed" forKey:@"action"];
-                        [specifiers addObject:diagnoseAll];
                         PSSpecifier *repairSSH = [PSSpecifier preferenceSpecifierNamed:@"Reparar OpenSSH en RootHide (con respaldo)" target:self set:defSetter get:defGetter detail:nil cell:PSStaticTextCell edit:nil];
                         [repairSSH setProperty:[DOButtonCell class] forKey:@"cellClass"];
                         [repairSSH setProperty:buttonHeight forKey:@"height"];
@@ -857,18 +859,6 @@ static BOOL gRootHideFullDiagnosisInFlight = NO;
 
 - (void)diagnoseRootHideAllPressed
 {
-    // Without an appendable sandbox log, a successful-looking share would
-    // only return an old attempt with none of the requested new diagnostics.
-    int diagnosticFD = [[DOUIManager sharedInstance] rh3CopyDiagnosticFD];
-    if (diagnosticFD < 0) {
-        UIAlertController *unavailable = [UIAlertController alertControllerWithTitle:@"Registro no disponible"
-            message:@"No se puede añadir un informe a la última captura persistente. Puedes compartir el registro anterior desde el menú principal; no se ejecutará un diagnóstico que no pueda guardarse."
-            preferredStyle:UIAlertControllerStyleAlert];
-        [unavailable addAction:[UIAlertAction actionWithTitle:@"Aceptar" style:UIAlertActionStyleCancel handler:nil]];
-        [self presentViewController:unavailable animated:YES completion:nil];
-        return;
-    }
-    close(diagnosticFD);
     if (gRootHideFullDiagnosisInFlight) {
         UIAlertController *busy = [UIAlertController alertControllerWithTitle:@"Diagnóstico en curso"
             message:@"Ya se está generando el informe. No se ejecutará una segunda recopilación."
@@ -877,29 +867,71 @@ static BOOL gRootHideFullDiagnosisInFlight = NO;
         [self presentViewController:busy animated:YES completion:nil];
         return;
     }
+    // A fresh private snapshot with a distinct run ID also works if the
+    // previous jailbreak attempt never created its boot log.
+    if (![[DOUIManager sharedInstance] rh3BeginUnifiedReport]) {
+        UIAlertController *error = [UIAlertController alertControllerWithTitle:@"Informe no disponible"
+            message:@"No fue posible abrir un archivo nuevo y seguro en Documents. No se ha ejecutado ninguna prueba ni se compartirá un registro antiguo."
+            preferredStyle:UIAlertControllerStyleAlert];
+        [error addAction:[UIAlertAction actionWithTitle:@"Aceptar" style:UIAlertActionStyleCancel handler:nil]];
+        [self presentViewController:error animated:YES completion:nil];
+        return;
+    }
     gRootHideFullDiagnosisInFlight = YES;
+    __block BOOL finished = NO;
+    __block BOOL deadlineReached = NO;
+    __block BOOL partialShared = NO;
     UIAlertController *progress = [UIAlertController alertControllerWithTitle:@"Diagnóstico integral RootHide3"
-        message:@"Recopilando estado de jailbreak, hooks, gestores, NewTerm, tweaks y OpenSSH. Solo se ejecuta una prueba efímera de tweaks cuando el modo seguro lo permite; no se reparan servicios ni se reinicia el teléfono. Al terminar se abrirá un único archivo para compartir."
+        message:@"Recopilando de forma pasiva bootstrap, hooks, registros, apps y OpenSSH. No se añade confianza, no se activan servicios, no se ejecutan tweaks y no se reinicia el teléfono. Se compartirá un único informe nuevo."
         preferredStyle:UIAlertControllerStyleAlert];
-    [self presentViewController:progress animated:YES completion:nil];
+    [self presentViewController:progress animated:YES completion:^{
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 45 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+            if (finished) return;
+            deadlineReached = YES;
+            [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:@"full diag: UI deadline reached after 45 seconds; remaining stages unknown"];
+            NSURL *snapshot = [[DOUIManager sharedInstance] rh3FinishUnifiedReportWithResult:ETIMEDOUT];
+            partialShared = snapshot != nil;
+            [progress dismissViewControllerAnimated:YES completion:^{
+                if (finished && !snapshot) return;
+                if (snapshot) {
+                    UIActivityViewController *share = [[UIActivityViewController alloc]
+                        initWithActivityItems:@[snapshot] applicationActivities:nil];
+                    share.popoverPresentationController.sourceView = self.view;
+                    share.popoverPresentationController.sourceRect = CGRectMake(
+                        CGRectGetMidX(self.view.bounds), CGRectGetMidY(self.view.bounds), 1, 1);
+                    [self presentViewController:share animated:YES completion:nil];
+                    return;
+                }
+                UIAlertController *slow = [UIAlertController alertControllerWithTitle:@"Consulta todavía en curso"
+                    message:@"El tiempo de interfaz ha terminado, pero la consulta puede seguir activa. No repitas la operación: se conserva el bloqueo hasta recibir su resultado. No se ha reiniciado ningún servicio."
+                    preferredStyle:UIAlertControllerStyleAlert];
+                [slow addAction:[UIAlertAction actionWithTitle:@"Aceptar" style:UIAlertActionStyleCancel handler:nil]];
+                [self presentViewController:slow animated:YES completion:nil];
+            }];
+        });
+    }];
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         int result = [[DOEnvironmentManager sharedManager] diagnoseRootHideComprehensive];
-        NSURL *report = [[DOUIManager sharedInstance] rh3PreviousDiagnosticURL];
+        NSURL *report = [[DOUIManager sharedInstance] rh3FinishUnifiedReportWithResult:result];
         dispatch_async(dispatch_get_main_queue(), ^{
+            finished = YES;
             gRootHideFullDiagnosisInFlight = NO;
-            [progress dismissViewControllerAnimated:YES completion:^{
+            if (partialShared) return;
+            UIViewController *presented = self.presentedViewController ?: progress;
+            [presented dismissViewControllerAnimated:YES completion:^{
                 if (!report) {
                     UIAlertController *failed = [UIAlertController alertControllerWithTitle:@"No se pudo exportar el diagnóstico"
-                        message:[NSString stringWithFormat:@"La recopilación devolvió %d y no hay archivo compartible. No se ha modificado el bootstrap.", result]
+                        message:[NSString stringWithFormat:@"La recopilación devolvió %d, pero no se pudo confirmar su escritura íntegra. El registro anterior no se compartirá como si fuera nuevo.", result]
                         preferredStyle:UIAlertControllerStyleAlert];
                     [failed addAction:[UIAlertAction actionWithTitle:@"Aceptar" style:UIAlertActionStyleCancel handler:nil]];
                     [self presentViewController:failed animated:YES completion:nil];
                     return;
                 }
-                // The existing persistent log includes boot history plus all
-                // sections collected now. No manual copying or second button.
+                // A new, bounded snapshot includes the existing boot history
+                // and only this invocation, verified by its END + fsync.
                 UIActivityViewController *share = [[UIActivityViewController alloc]
                     initWithActivityItems:@[report] applicationActivities:nil];
+                (void)deadlineReached;
                 share.popoverPresentationController.sourceView = self.view;
                 share.popoverPresentationController.sourceRect = CGRectMake(
                     CGRectGetMidX(self.view.bounds), CGRectGetMidY(self.view.bounds), 1, 1);

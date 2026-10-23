@@ -12,14 +12,20 @@ mach_port_t jbclient_mach_get_launchd_port(void)
 	mach_port_t launchdPort = MACH_PORT_NULL;
 	task_get_bootstrap_port(mach_task_self(), &launchdPort);
 	if (launchdPort == MACH_PORT_NULL) {
-		mach_port_t *registeredPorts;
+			mach_port_t *registeredPorts = NULL;
 		mach_msg_type_number_t registeredPortsCount = 0;
-		if (mach_ports_lookup(mach_task_self(), &registeredPorts, &registeredPortsCount) == KERN_SUCCESS) {
-			launchdPort = registeredPorts[0];
-			for (mach_msg_type_number_t i = 1; i < registeredPortsCount; i++) {
-				mach_port_deallocate(mach_task_self(), registeredPorts[i]);
+			if (mach_ports_lookup(mach_task_self(), &registeredPorts, &registeredPortsCount) == KERN_SUCCESS &&
+			    registeredPorts && registeredPortsCount > 0) {
+				if (MACH_PORT_VALID(registeredPorts[0])) launchdPort = registeredPorts[0];
+				for (mach_msg_type_number_t i = 0; i < registeredPortsCount; i++) {
+					if (i == 0 && MACH_PORT_VALID(launchdPort)) continue; // Return this right to caller.
+					if (MACH_PORT_VALID(registeredPorts[i]))
+						mach_port_deallocate(mach_task_self(), registeredPorts[i]);
+				}
 			}
-			vm_deallocate(mach_task_self(), (vm_address_t)registeredPorts, registeredPortsCount * sizeof(mach_port_t));
+			if (registeredPorts && registeredPortsCount > 0) {
+				vm_deallocate(mach_task_self(), (vm_address_t)registeredPorts,
+				              registeredPortsCount * sizeof(mach_port_t));
 		}
 	}
 

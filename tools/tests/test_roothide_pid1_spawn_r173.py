@@ -5,6 +5,7 @@ sshd behavior on iOS. It checks the production helper and wrapper together.
 """
 from pathlib import Path
 import shutil
+import re
 import subprocess
 import tempfile
 import unittest
@@ -32,6 +33,15 @@ class PID1PrivateDyldTests(unittest.TestCase):
         text = SOURCE.read_text(encoding="utf-8")
         functions = text[text.index("static const char *rh3_pid1_var_alias_n("):
                          text.index("// launchd commonly spawns UIKit apps")]
+        # Production origin verifier is exercised by its own mocked-dladdr
+        # test. This older harness intentionally supplies a forced origin
+        # result; skip unrelated real PID1 origin and fakelib implementation.
+        functions = re.sub(
+            r"bool roothide_launchdhook_origin_verified\(void\)\s*\{.*?\n\}\s*",
+            "", functions, count=1, flags=re.S)
+        functions = re.sub(
+            r"void ensure_fakelib_mounted\(void\)\s*\{.*?\n\}\s*",
+            "", functions, count=1, flags=re.S)
         self.assertNotIn("jbdSpawnPatchChild", functions)
         self.assertNotIn("jailbreakdXpcRequest", functions)
         self.assertNotIn("POSIX_SPAWN_START_SUSPENDED", functions)

@@ -1469,6 +1469,23 @@ static int RH3DiagnosticNodeKind(NSString *path)
     return 4;
 }
 
+// For the app bundle's direct .jbroot backlink (depth two), inspect the
+// symlink itself without dereferencing it into another container.
+// -1=unreadable, 0=missing, 1=exact ../.., 2=wrong target/type.
+static int RH3DiagnosticAppBacklink(NSString *bundle)
+{
+    NSString *path = [bundle stringByAppendingPathComponent:@".jbroot"];
+    struct stat st = {0};
+    if (lstat(path.fileSystemRepresentation, &st) != 0)
+        return errno == ENOENT ? 0 : -1;
+    if (!S_ISLNK(st.st_mode)) return 2;
+    char target[PATH_MAX] = {0};
+    ssize_t n = readlink(path.fileSystemRepresentation, target, sizeof(target) - 1);
+    if (n < 0) return -1;
+    target[n] = '\0';
+    return strcmp(target, "../..") == 0 ? 1 : 2;
+}
+
 // 1=Mach-O/FAT header; 0=other; -1=unavailable/unsafe to read. Metadata
 // only: this deliberately does not assert CodeDirectory or trustcache validity.
 static int RH3DiagnosticMachMagic(NSString *path)
@@ -1577,10 +1594,10 @@ static int RH3DiagnosticMachMagic(NSString *path)
     return [self rh3ActionStage:@"read-only tweak/terminal/SSH diagnosis" result:result];
 }
 
-// One deliberate action, one persistent report and one share sheet. Never
-// repair, reload, enable or restart a service here. The isolated tweak probe
-// is the only executable behavioral check; it is bounded and optional when
-// safe mode is effective. Keep going when any one section fails.
+// One action and a persistent report. NEVER trustcache, patch, create a
+// test process or modify security state for diagnosis. The interactive
+// tweak injection test is a separate opt-in operation and is not invoked.
+// Keep going if any section returns unavailable, including a failed jailbreak.
 - (int)diagnoseRootHideComprehensive
 {
     if (![DOBootstrapper rootHidePortEnabled]) return ENOTSUP;
@@ -1590,6 +1607,7 @@ static int RH3DiagnosticMachMagic(NSString *path)
         [NSString stringWithFormat:@"full diag: app_jailbroken=%d rootHidePort=1; status is not proof of functional jailbreak",
          (int)self.isJailbroken]];
 
+    __block NSString *inventoryRoot = nil;
     int inventory = [self rh3PerformPrivilegedAction:^int {
         NSError *error = nil;
         NSString *root = [DOBootstrapper rootHideExistingRootWithError:&error];
@@ -1601,12 +1619,15 @@ static int RH3DiagnosticMachMagic(NSString *path)
             return EPERM;
         }
         [log rh3RecordDiagnosticStage:@"full diag: hidden root identity=verified; inventory read-only; no private paths logged"];
+        inventoryRoot = root;
         // Names here are fixed component labels, never filesystem-derived.
         // Classification: -1 unknown, 0 absent, 1 regular, 2 directory,
         // 3 symlink (not followed), 4 other; macho: -1 unavailable, 0 no, 1 yes.
         NSArray<NSArray<NSString *> *> *components = @[
             @[@"launchdhook", @"basebin/launchdhook.dylib"],
-            @[@"dyldhook", @"basebin/dyldhook.dylib"],
+            // dyldhook is linked into the generated private dyld image;
+            // a separate dyldhook.dylib is not required or expected here.
+            @[@"private_dyld", @"basebin/.fakelib/dyld"],
             @[@"systemhook", @"basebin/systemhook.dylib"],
             @[@"jailbreakd", @"basebin/jailbreakd"],
             @[@"tweakprobe", @"basebin/rh3tweakprobe"],
@@ -1619,15 +1640,24 @@ static int RH3DiagnosticMachMagic(NSString *path)
             @[@"RootHide_manager", @"Applications/RootHide.app"],
             @[@"Sileo_bundle", @"Applications/Sileo.app"],
             @[@"Zebra_bundle", @"Applications/Zebra.app"],
-            @[@"NewTerm_bundle", @"Applications/NewTerm.app"]
+            @[@"NewTerm_bundle", @"Applications/NewTerm.app"],
+            @[@"NewTerm2_bundle", @"Applications/NewTerm2.app"],
+            @[@"NewTerm3_bundle", @"Applications/NewTerm3.app"],
+            @[@"LaunchDaemons_directory", @"Library/LaunchDaemons"],
+            @[@"safe_mode_marker", @"basebin/.safe_mode"],
+            @[@"AppGroup_directory", @"var/mobile/Containers/Shared/AppGroup"]
         ];
         for (NSArray<NSString *> *component in components) {
             NSString *path = [root stringByAppendingPathComponent:component[1]];
             int kind = RH3DiagnosticNodeKind(path);
             int macho = kind == 1 ? RH3DiagnosticMachMagic(path) : -1;
+            struct stat st = {0};
+            int metaErr = lstat(path.fileSystemRepresentation, &st) == 0 ? 0 : errno;
             [log rh3RecordDiagnosticStage:[NSString stringWithFormat:
-                @"full diag: component=%@ kind=%d macho_magic=%d (metadata only)",
-                component[0], kind, macho]];
+                @"full diag: component=%@ kind=%d errno=%d uid0=%d gid0=%d mode_octal=%03o nlink_single=%d macho_magic=%d (metadata only; no trust proof)",
+                component[0], kind, metaErr, metaErr ? -1 : st.st_uid == 0,
+                metaErr ? -1 : st.st_gid == 0, metaErr ? 0 : (unsigned)(st.st_mode & 0777),
+                metaErr ? -1 : st.st_nlink == 1, macho]];
         }
         return 0;
     }];
@@ -1635,39 +1665,67 @@ static int RH3DiagnosticMachMagic(NSString *path)
 
     // Launch Services can be queried without re-registering icons or bundles.
     // Failure to observe a proxy is not proof that the app is absent.
-    NSArray<NSArray<NSString *> *> *appIDs = @[
-        @[@"RootHide", @"com.roothide.manager"],
-        @[@"Sileo", @"org.coolstar.SileoStore"],
-        @[@"Zebra", @"xyz.willy.Zebra"],
-        @[@"NewTerm", @"ws.hbang.Terminal"]
+    NSArray<NSArray<NSString *> *> *apps = @[
+        @[@"RootHide", @"RootHide.app"],
+        @[@"Sileo", @"Sileo.app"],
+        @[@"Zebra", @"Zebra.app"],
+        @[@"NewTerm", @"NewTerm.app"],
+        @[@"NewTerm2", @"NewTerm2.app"],
+        @[@"NewTerm3", @"NewTerm3.app"]
     ];
-    for (NSArray<NSString *> *entry in appIDs) {
-        LSApplicationProxy *proxy = [LSApplicationProxy applicationProxyForIdentifier:entry[1]];
+    for (NSArray<NSString *> *entry in apps) {
+        NSString *bundle = inventoryRoot
+            ? [[inventoryRoot stringByAppendingPathComponent:@"Applications"] stringByAppendingPathComponent:entry[1]]
+            : nil;
+        struct stat bundleSt = {0}, plistSt = {0};
+        BOOL bundleVerified = bundle &&
+            lstat(bundle.fileSystemRepresentation, &bundleSt) == 0 &&
+            S_ISDIR(bundleSt.st_mode) && bundleSt.st_uid == 0;
+        NSString *plist = [bundle stringByAppendingPathComponent:@"Info.plist"];
+        BOOL plistVerified = bundleVerified &&
+            lstat(plist.fileSystemRepresentation, &plistSt) == 0 &&
+            S_ISREG(plistSt.st_mode) && plistSt.st_uid == 0 &&
+            plistSt.st_size > 0 && plistSt.st_size <= 65536;
+        NSDictionary *info = plistVerified ? [NSDictionary dictionaryWithContentsOfFile:plist] : nil;
+        NSString *identifier = [info[@"CFBundleIdentifier"] isKindOfClass:NSString.class]
+            ? info[@"CFBundleIdentifier"] : nil;
+        NSString *executable = [info[@"CFBundleExecutable"] isKindOfClass:NSString.class]
+            ? info[@"CFBundleExecutable"] : nil;
+        BOOL validID = identifier.length > 0 && identifier.length <= 256 &&
+            [identifier rangeOfCharacterFromSet:
+                [[NSCharacterSet characterSetWithCharactersInString:
+                    @"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.-_"] invertedSet]].location == NSNotFound;
+        BOOL validExecutable = executable.length > 0 &&
+            executable.length <= 128 && [executable.lastPathComponent isEqualToString:executable];
+        int binaryMagic = validExecutable
+            ? RH3DiagnosticMachMagic([bundle stringByAppendingPathComponent:executable]) : -1;
+        LSApplicationProxy *proxy = validID ? [LSApplicationProxy applicationProxyForIdentifier:identifier] : nil;
+        int registrationMatches = !inventoryRoot || !validID ? -1 :
+            (proxy && [RH3CanonicalAppPath(proxy.bundleURL.path) isEqualToString:RH3CanonicalAppPath(bundle)]) ? 1 : 0;
         [log rh3RecordDiagnosticStage:[NSString stringWithFormat:
-            @"full diag: app=%@ launchservices_proxy_visible=%d (not visibility=absence)",
-            entry[0], proxy != nil]];
+            @"full diag: app=%@ bundle_verified=%d plist_verified=%d id_valid=%d executable_macho=%d backlink=%d registered_active_root=%d (not visibility=absence; no identifiers/paths exported)",
+            entry[0], bundleVerified, plistVerified, validID, binaryMagic,
+            bundleVerified ? RH3DiagnosticAppBacklink(bundle) : -1, registrationMatches]];
     }
 
     int runtime = [self diagnoseRootHideRuntime];
     [log rh3RecordDiagnosticStage:[NSString stringWithFormat:@"full diag: safe-mode/SSH/NewTerm runtime result=%d", runtime]];
     int ssh = [self diagnoseRootHideOpenSSHSocket];
     [log rh3RecordDiagnosticStage:[NSString stringWithFormat:@"full diag: launchd SSH live job result=%d; no connection sent", ssh]];
-    int tweak = EBUSY;
-    if (runtime == 0 && [self isTweakInjectionEnabled]) {
-        [log rh3RecordDiagnosticStage:@"full diag: isolated tweak probe starting; no service/package changes"];
-        tweak = [self verifyRootHideTweakInjection];
-    } else {
-        [log rh3RecordDiagnosticStage:@"full diag: isolated tweak probe skipped (safe mode or unreadable state)"];
-    }
+    [log rh3RecordDiagnosticStage:
+        @"full diag: tweak_load_proof=not_measured probe=skipped_non_mutating "
+        @"(historical probe exit codes, if any, appear in boot history; "
+        @"no trustcache edits or child patching on this action)"];
+    [log rh3RecordDiagnosticStage:
+        @"full diag: signature_cdhash_trustcache=not_measured "
+        @"dyld_mapping=not_measured xpcproxy_exec=not_measured "
+        @"ssh_banner=not_measured login_exec=not_measured "
+        @"manager_ui=not_measured; do not infer success from file presence"];
     [log rh3RecordDiagnosticStage:[NSString stringWithFormat:
-        @"full diag: tweak_probe_result=%d (0=loader, 81=no_constructor_marker, 82=no_loader, 83=constructor_early, 84=path_unresolved, 16=skipped; other=error)",
-        tweak]];
-    [log rh3RecordDiagnosticStage:[NSString stringWithFormat:
-        @"=== RH3 FULL DIAG END: inventory=%d runtime=%d ssh=%d tweak=%d; unmeasured=actual_sshd_accept,managers_UI,NewTerm_login,other_processes ===",
-        inventory, runtime, ssh, tweak]];
+        @"=== RH3 FULL DIAG END: inventory=%d runtime=%d ssh=%d tweak=skipped_readonly; no repair/trustcache/child_patch ===",
+        inventory, runtime, ssh]];
     // Never mark the device validated, even if all local probes succeed.
-    return inventory ? inventory : runtime ? runtime : ssh ? ssh :
-           (tweak == EBUSY ? 0 : tweak);
+    return inventory ? inventory : runtime ? runtime : ssh;
 }
 
 // Explicit, opt-in repair for the OpenSSH socket job installed later by the

@@ -15,6 +15,7 @@
 #import <unistd.h>
 #import <sys/stat.h>
 #import <errno.h>
+#import <UIKit/UIKit.h>
 #import "RH3DiagnosticFile.h"
 
 #ifndef RH3_FULL_APP_EXPERIMENTAL
@@ -42,6 +43,7 @@
         _logLock = [NSLock new];
         _rh3DiagnosticLock = [NSLock new];
         _rh3DiagnosticFD = -1;
+        _rh3UnifiedReportFD = -1;
 #if RH3_FULL_APP_EXPERIMENTAL
         // Cache the ORIGINAL app container, before elevatePrivileges changes
         // HOME to /var/root. The file must survive a SpringBoard/launchd crash.
@@ -264,9 +266,13 @@
 #if RH3_FULL_APP_EXPERIMENTAL
     if (!line) return;
     [_rh3DiagnosticLock lock];
-    if (_rh3DiagnosticFD < 0) { [_rh3DiagnosticLock unlock]; return; }
     NSString *entry = [NSString stringWithFormat:@"%@ %@\n", NSDate.date, line];
-    int result = _rh3DiagnosticFD >= 0 ? RH3AppendDiagnostic(_rh3DiagnosticFD, [entry dataUsingEncoding:NSUTF8StringEncoding]) : EBADF;
+    NSData *bytes = [entry dataUsingEncoding:NSUTF8StringEncoding];
+    // A failed/partial activation may have no previous boot log; the newly
+    // created unified snapshot must still work without a spurious EBADF.
+    int result = _rh3DiagnosticFD >= 0 ? RH3AppendDiagnostic(_rh3DiagnosticFD, bytes) : 0;
+    if (_rh3UnifiedReportFD >= 0 && !_rh3UnifiedReportError)
+        _rh3UnifiedReportError = RH3AppendWithLimit(_rh3UnifiedReportFD, bytes, RH3UnifiedReportLimit);
     BOOL report = result != 0 && !_rh3DiagnosticWriteFailed;
     if (result) _rh3DiagnosticWriteFailed = YES;
     [_rh3DiagnosticLock unlock];
@@ -288,6 +294,11 @@
 {
 #if RH3_FULL_APP_EXPERIMENTAL
     [_rh3DiagnosticLock lock];
+    if (_rh3UnifiedReportFD >= 0) close(_rh3UnifiedReportFD);
+    _rh3UnifiedReportFD = -1;
+    _rh3UnifiedReportPath = nil;
+    _rh3UnifiedReportID = nil;
+    _rh3UnifiedReportError = 0;
     if (_rh3DiagnosticFD >= 0) close(_rh3DiagnosticFD);
     _rh3DiagnosticFD = -1;
     NSString *revision = @"unknown";
@@ -309,6 +320,80 @@
 #endif
 }
 
+- (BOOL)rh3BeginUnifiedReport
+{
+#if RH3_FULL_APP_EXPERIMENTAL
+    [_rh3DiagnosticLock lock];
+    if (_rh3UnifiedReportFD >= 0) { [_rh3DiagnosticLock unlock]; return NO; }
+    _rh3UnifiedReportPath = nil;
+    _rh3UnifiedReportID = NSUUID.UUID.UUIDString;
+    _rh3UnifiedReportError = 0;
+    _rh3UnifiedReportFD = RH3CreateUnifiedReport(_rh3DiagnosticDirectory, &_rh3UnifiedReportPath);
+    BOOL created = _rh3UnifiedReportFD >= 0;
+    if (created) {
+        NSString *revision = @"unknown";
+#ifdef COMMIT_HASH
+        revision = [NSString stringWithUTF8String:COMMIT_HASH];
+#endif
+        NSString *header = [NSString stringWithFormat:
+            @"%@ RH3 UNIFIED BEGIN id=%@ revision=%@ pid=%d ios=%@ phase=read_only; no runtime success implied\n",
+            NSDate.date, _rh3UnifiedReportID, revision, getpid(), UIDevice.currentDevice.systemVersion];
+        _rh3UnifiedReportError = RH3AppendWithLimit(_rh3UnifiedReportFD,
+            [header dataUsingEncoding:NSUTF8StringEncoding], RH3UnifiedReportLimit);
+        if (!_rh3UnifiedReportError) {
+            int historyError = RH3AppendBootHistoryToReport(_rh3DiagnosticDirectory, _rh3UnifiedReportFD);
+            NSString *history = [NSString stringWithFormat:
+                @"%@ RH3 UNIFIED HISTORY_END id=%@ history_error=%d (older boot events only; no execution implied)\n",
+                NSDate.date, _rh3UnifiedReportID, historyError];
+            _rh3UnifiedReportError = RH3AppendWithLimit(_rh3UnifiedReportFD,
+                [history dataUsingEncoding:NSUTF8StringEncoding], RH3UnifiedReportLimit);
+        }
+    }
+    if (!created || _rh3UnifiedReportError) {
+        if (_rh3UnifiedReportFD >= 0) close(_rh3UnifiedReportFD);
+        _rh3UnifiedReportFD = -1;
+        _rh3UnifiedReportPath = nil;
+        _rh3UnifiedReportID = nil;
+        created = NO;
+    }
+    [_rh3DiagnosticLock unlock];
+    return created;
+#else
+    return NO;
+#endif
+}
+
+- (NSURL *)rh3FinishUnifiedReportWithResult:(int)result
+{
+#if RH3_FULL_APP_EXPERIMENTAL
+    [_rh3DiagnosticLock lock];
+    NSURL *report = nil;
+    if (_rh3UnifiedReportFD >= 0) {
+        NSString *footer = [NSString stringWithFormat:
+            @"%@ RH3 UNIFIED END id=%@ result=%d report_write_error=%d; partial results may be unknown; no device acceptance implied\n",
+            NSDate.date, _rh3UnifiedReportID, result, _rh3UnifiedReportError];
+        if (!_rh3UnifiedReportError)
+            _rh3UnifiedReportError = RH3AppendWithLimit(_rh3UnifiedReportFD,
+                [footer dataUsingEncoding:NSUTF8StringEncoding], RH3UnifiedReportLimit);
+        struct stat st = {0};
+        if (!_rh3UnifiedReportError && fstat(_rh3UnifiedReportFD, &st) == 0 &&
+            S_ISREG(st.st_mode) && st.st_nlink == 1 &&
+            st.st_size > 0 && st.st_size <= RH3UnifiedReportLimit)
+            report = [NSURL fileURLWithPath:_rh3UnifiedReportPath];
+        close(_rh3UnifiedReportFD);
+    }
+    _rh3UnifiedReportFD = -1;
+    _rh3UnifiedReportPath = nil;
+    _rh3UnifiedReportID = nil;
+    _rh3UnifiedReportError = 0;
+    [_rh3DiagnosticLock unlock];
+    return report;
+#else
+    (void)result;
+    return nil;
+#endif
+}
+
 - (void)rh3RecordDiagnosticStage:(NSString *)stage
 {
     [self rh3WriteDiagnosticLine:stage];
@@ -325,6 +410,7 @@
 - (void)dealloc
 {
     if (_rh3DiagnosticFD >= 0) close(_rh3DiagnosticFD);
+    if (_rh3UnifiedReportFD >= 0) close(_rh3UnifiedReportFD);
 }
 
 - (void)shareLogRecordFromView:(UIView *)sourceView

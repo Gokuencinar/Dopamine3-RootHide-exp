@@ -909,3 +909,41 @@ reactiva SSH; no se recopilan contraseñas, claves SSH, rutas privadas completas
 ni contenido de aplicaciones. Las sesiones reales de sshd, las interfaces de
 gestores y el error concreto de `login` siguen siendo *no medidos* cuando
 no hay informe de proceso/crash disponible.
+
+### Evidencia r181 y correcciones posteriores (sin validación física nueva)
+
+La captura del iPhone X con iOS 16.7.15 del 23/10/2026, commit `8002092`,
+registró `safe_mode=0`, confianza del `systemhook` de la prueba=0,
+spawn y patch_child=0 y salida `rh3tweakprobe=81` (`raw_wait=20736`).
+Eso no certifica entrada al constructor ni carga de TweakLoader. Con
+`dyld patch inactive`, una respuesta de patch_child satisfactoria puede
+significar solo el parche de `csflags`, no mapeo correcto de dyld. El
+checkpoint del servidor para este probe distingue la configuración de
+dyld y declara que no es prueba del constructor; no activa dyld patch
+global, ni añade derechos a procesos arbitrarios.
+
+El job `com.openssh.sshd` estaba importado y habilitado, con rutas y
+dos sockets declarados, pero `state=not_running`, `runs=0`, sin PID.
+En un servicio inetd activado por socket eso **no demuestra** un fallo
+de arranque sin una prueba de conexión: el log no muestra un intento TCP
+ni el error de exec de sshd. En la instalación existente, una futura
+comprobación única puede recoger una instantánea del job antes y después
+de una conexión al puerto 22, observar presencia de `SSH-2.0` y
+contadores/errors, sin enviar autenticación ni cambiar servicios.
+
+Se reparan tres defectos de código delimitados: la verificación de
+origen del launchdhook acepta las dos formas léxicas conocidas de la
+misma raíz oculta (`/var` y `/private/var`) manteniendo el nombre
+brand y sufijo exactos; el filtro Mach-O deja de interpretar
+`MH_EXECUTE` como una biblioteca old-arm64e; y la consulta Mach de
+puertos registrados no desreferencia arrays vacíos y libera cada
+derecho que pertenece al proceso de forma controlada. Son mejoras
+funcionales con pruebas host, no causas físicas demostradas del `81`.
+
+El diagnóstico de un solo botón de esta ronda es **pasivo**: ya no
+ejecuta el probe, ni actualiza trustcache ni arranca otros procesos
+para inyectar tweaks. Crea un nuevo log privado 0600 con ID/revisión,
+incluye historia del arranque anterior y señala estados desconocidos.
+Si excede 45 segundos, puede exportar un archivo parcial sellado sin
+dar por acabada la consulta que siga en curso. No cambia claves,
+paquetes, base de datos, servicios, `.safe_mode` ni permisos globales.

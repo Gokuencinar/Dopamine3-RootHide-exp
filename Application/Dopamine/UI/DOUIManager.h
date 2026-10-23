@@ -22,6 +22,10 @@ NS_ASSUME_NONNULL_BEGIN
     NSLock *_rh3DiagnosticLock;
     int _rh3DiagnosticFD;
     BOOL _rh3DiagnosticWriteFailed;
+    int _rh3UnifiedReportFD;
+    NSString *_rh3UnifiedReportPath;
+    NSString *_rh3UnifiedReportID;
+    int _rh3UnifiedReportError;
 }
 
 @property (nonatomic, readonly) NSString *bootlogoPath;
@@ -39,6 +43,8 @@ NS_ASSUME_NONNULL_BEGIN
 - (BOOL)rh3BeginDiagnosticAttempt;
 - (int)rh3CopyDiagnosticFD;
 - (void)rh3RecordDiagnosticStage:(NSString *)stage;
+- (BOOL)rh3BeginUnifiedReport;
+- (nullable NSURL *)rh3FinishUnifiedReportWithResult:(int)result;
 - (nullable NSURL *)rh3PreviousDiagnosticURL;
 - (BOOL)isUpdateAvailable;
 - (BOOL)environmentUpdateAvailable;

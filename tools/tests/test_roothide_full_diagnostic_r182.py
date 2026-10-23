@@ -29,7 +29,8 @@ class RootHideFullDiagnosticTests(unittest.TestCase):
         action = ui.split("- (void)diagnoseRootHideAllPressed", 1)[1].split(
             "- (void)diagnoseRootHideRuntimePressed", 1)[0]
         for required in ("gRootHideFullDiagnosisInFlight", "diagnoseRootHideComprehensive",
-                         "rh3PreviousDiagnosticURL", "UIActivityViewController",
+                         "rh3BeginUnifiedReport", "rh3FinishUnifiedReportWithResult",
+                         "dispatch_after", "UIActivityViewController",
                          "presentViewController:share"):
             self.assertIn(required, action)
         for unsafe in ("repairRootHideSSH", "rebootUserspace", "refreshJailbreakApps",
@@ -43,13 +44,13 @@ class RootHideFullDiagnosticTests(unittest.TestCase):
         for stage in ("RH3DiagnosticNodeKind", "RH3DiagnosticMachMagic",
                       "rootHideExistingRootWithError:", "jbclient_get_jbroot()",
                       "diagnoseRootHideRuntime", "diagnoseRootHideOpenSSHSocket",
-                      "verifyRootHideTweakInjection", "FULL DIAG END",
+                      "tweak_load_proof=not_measured", "FULL DIAG END",
                       "component=", "no connection sent"):
             self.assertIn(stage, body)
         self.assertLess(body.index("diagnoseRootHideRuntime"),
                         body.index("diagnoseRootHideOpenSSHSocket"))
-        self.assertLess(body.index("diagnoseRootHideOpenSSHSocket"),
-                        body.index("verifyRootHideTweakInjection"))
+        self.assertNotIn("[self verifyRootHideTweakInjection]", body)
+        self.assertIn("no trustcache edits or child patching", body)
         for forbidden in ("repairRootHideSSH", "ssh-keygen", "kickstart", "bootstrap system",
                           "refreshJailbreakApps", "rebootUserspace", "changeMobilePassword:",
                           "setTweakInjectionEnabled:", "updateBootLogo", "exec_cmd("):

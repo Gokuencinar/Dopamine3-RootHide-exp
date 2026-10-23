@@ -5,6 +5,7 @@
 
 #include <libjailbreak/libjailbreak.h>
 #include <libjailbreak/roothider.h>
+#include <libjailbreak/roothide_bootlog.h>
 
 void jailbreakd_reply_message(JBD_MESSAGE_ID msgId, xpc_object_t reply)
 {
@@ -80,6 +81,9 @@ void jailbreakd_received_message(mach_port_t port)
 					pid_t pid = xpc_dictionary_get_int64(message, "pid");
 					bool resume = xpc_dictionary_get_bool(message, "resume");
 					pid_t ppid = proc_get_ppid(pid);
+					const char *childPath = proc_get_path(pid, NULL);
+					bool probeChild = childPath &&
+						string_has_suffix(childPath, "/basebin/rh3tweakprobe");
 					JBLogDebug("spawn patch: client pid=%d, child pid=%d, child's parent pid=%d, child proc=%s", clientPid, pid, ppid, proc_get_path(pid,NULL));
 					if(ppid == clientPid) {
 						if(ppid==1 && resume==false) {
@@ -102,6 +106,16 @@ void jailbreakd_received_message(mach_port_t port)
 						result = -1;
 					}
 					xpc_dictionary_set_int64(reply, "result", result);
+					// A successful child patch may set only CS_GET_TASK_ALLOW;
+					// it does not certify private dyld or constructor execution.
+					// Record this distinction only for the disposable probe.
+					if (probeChild) {
+						char stage[176];
+						snprintf(stage, sizeof(stage),
+							"jailbreakd: tweakprobe patch result=%lld dyld_patch_flag=%d parent_is_pid1=%d resume=%d; not_constructor_proof",
+							(long long)result, (int)dyld_patch_enabled(), (int)(ppid == 1), (int)resume);
+						rh3_bootlog(stage);
+					}
 					break;
 				}
 

@@ -65,6 +65,8 @@ void early_boot_done(void)
 	gInEarlyBoot = false;
 }
 
+static const char *rh3_pid1_var_alias_n(const char *path, size_t *length);
+
 bool roothide_launchdhook_origin_verified(void)
 {
 	// During userspace reboot the brand may not be restored yet. The root
@@ -75,11 +77,16 @@ bool roothide_launchdhook_origin_verified(void)
 	Dl_info image = {0};
 	if (!dladdr((const void *)&roothide_launchdhook_origin_verified, &image) || !image.dli_fname) return false;
 	static const char suffix[] = "/basebin/launchdhook.dylib";
-	const size_t rootLength = strlen(root);
-	const size_t imageLength = strlen(image.dli_fname);
+	size_t rootLength = strlen(root);
+	size_t imageLength = strlen(image.dli_fname);
+	// The active hidden root may be named /private/var while dyld reports
+	// its loaded image under /var (or vice versa). This is a lexical alias
+	// only, never realpath or an unrestricted symlink traversal in PID 1.
+	root = rh3_pid1_var_alias_n(root, &rootLength);
+	const char *imageName = rh3_pid1_var_alias_n(image.dli_fname, &imageLength);
 	if (rootLength >= PATH_MAX || imageLength != rootLength + sizeof(suffix) - 1) return false;
-	return !memcmp(image.dli_fname, root, rootLength) &&
-	       !strcmp(image.dli_fname + rootLength, suffix);
+	return !memcmp(imageName, root, rootLength) &&
+	       !strcmp(imageName + rootLength, suffix);
 }
 
 void ensure_fakelib_mounted(void)
