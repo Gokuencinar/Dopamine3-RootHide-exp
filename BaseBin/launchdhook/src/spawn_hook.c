@@ -111,11 +111,13 @@ void ensure_fakelib_mounted(void)
 	}
 }
 
-// RootHide 2 used private dyld mappings for injected launchd children. The
-// shared Dopamine 3 spawn helper deliberately omits DYLD_IN_CACHE=0 in PID 1.
-// Restore that environment contract only for known executables *inside* the
-// verified hidden root. This does not suspend children or ask PID 1 to make a
-// synchronous jailbreakd/XPC request (which can deadlock launchd).
+// RootHide 2 used private dyld mappings for *all injected* launchd children.
+// The shared Dopamine 3 spawn helper omits DYLD_IN_CACHE=0 in PID 1. A fixed
+// whitelist of manager/SSH binaries misses lsd, cfprefsd and SpringBoard,
+// even when launchd has already selected RootHide's exact systemhook insert.
+// Restore that dyld contract for any child with the verified active-root hook
+// in its existing environment; never introduce an insert or touch a child
+// without it. Do not suspend children or send jailbreakd/XPC requests in PID 1.
 // Normalize only the two names for iOS's same /var mount. Never resolve an
 // untrusted symlink or consult the filesystem/XPC inside PID 1.
 static const char *rh3_pid1_var_alias_n(const char *path, size_t *length)
@@ -127,32 +129,14 @@ static const char *rh3_pid1_var_alias_n(const char *path, size_t *length)
     return path;
 }
 
-static bool rh3_pid1_private_dyld_target(const char *path, char *const argv[])
+static bool rh3_pid1_private_dyld_target(const char *path)
 {
-	if (getpid() != 1 || !path || gInEarlyBoot || launchdhookFirstLoad ||
-	    !roothide_is_active() || !roothide_launchdhook_origin_verified()) return false;
-	// UIKit services are not spawned by their final executable. launchd first
-	// launches /usr/libexec/xpcproxy with an exact UIKitApplication label, and
-	// only then execs the registered bundle. Apply private dyld to the three
-	// bundled RootHide managers only, never to arbitrary xpcproxy jobs.
-	if (!strcmp(path, "/usr/libexec/xpcproxy"))
-		return rh3_manager_spawn_name(path, argv) != NULL;
-	const char *root = get_jbroot();
-	if (!root) return false;
-	size_t rootLen = strlen(root);
-    size_t pathLen = strlen(path);
-    root = rh3_pid1_var_alias_n(root, &rootLen);
-    path = rh3_pid1_var_alias_n(path, &pathLen);
-    if (rootLen == 0 || rootLen >= PATH_MAX || pathLen <= rootLen ||
-        strncmp(path, root, rootLen)) return false;
-    const char *relative = path + rootLen;
-	if (*relative != '/') return false;
-	return !strcmp(relative, "/usr/sbin/sshd") ||
-	       !strcmp(relative, "/usr/bin/login") ||
-	       !strcmp(relative, "/bin/login") ||
-	       !strcmp(relative, "/Applications/Sileo.app/Sileo") ||
-	       !strcmp(relative, "/Applications/Zebra.app/Zebra") ||
-	       !strcmp(relative, "/Applications/RootHide.app/RootHide");
+	// PID 1 can spawn services through xpcproxy or by their absolute system
+	// paths; neither name is proof that a RootHide injection was requested.
+	// Require the exact active-root systemhook AND verified loaded launchdhook
+	// in the separate checks below. Never resolve paths or query XPC here.
+	return getpid() == 1 && path && !gInEarlyBoot && !launchdhookFirstLoad &&
+	       roothide_is_active();
 }
 
 // Search a colon-delimited dyld insert list by exact path, never substring:
@@ -186,7 +170,8 @@ static int rh3_pid1_prepare_private_dyld_env(const char *path, char *const argv[
 					      char *const envp[], char ***ownedEnv)
 {
 	*ownedEnv = NULL;
-	if (!rh3_pid1_private_dyld_target(path, argv) || !envp)
+	(void)argv;
+	if (!rh3_pid1_private_dyld_target(path) || !envp)
 		return 0;
 	// A NULL descriptor or attrp is a valid posix_spawn request with default
 	// attributes, not a reason to skip an otherwise verified RootHide child.
@@ -201,6 +186,9 @@ static int rh3_pid1_prepare_private_dyld_env(const char *path, char *const argv[
 		    type == POSIX_SPAWN_PROC_TYPE_DRIVER) return 0;
 	}
 	if (!rh3_pid1_has_private_systemhook(envp)) return 0;
+	// dladdr on every unrelated launchd spawn is unnecessary: only prove
+	// origin when the selected environment already contains our own hook.
+	if (!roothide_launchdhook_origin_verified()) return 0;
 
 	static const char cacheKey[] = "DYLD_IN_CACHE=";
 	static char cacheValue[] = "DYLD_IN_CACHE=0";

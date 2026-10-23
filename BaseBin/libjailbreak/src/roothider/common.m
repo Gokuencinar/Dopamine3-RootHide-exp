@@ -46,14 +46,28 @@ bool roothide_is_active(void)
 // To replace dyld patch, make dyld respect DYLD_ environment variables
 int proc_patch_csflags(pid_t pid)
 {
-    int ret = 0;
-    uint64_t proc = proc_find(pid);
-    if(proc) {
-        proc_csflags_set(proc, CS_GET_TASK_ALLOW);
-    } else {
-        ret = -1;
-    }
-    return ret;
+	uint64_t proc = proc_find(pid);
+	if (!proc) return -1;
+	// The old proc_csflags_set() API returns void, even if the kernel write
+	// fails. Never report a child patched without checking the actual CS bit.
+	uint64_t address = 0;
+	if (gSystemInfo.kernelStruct.proc_ro.exists) {
+		uint64_t procRo = kread_ptr(proc + koffsetof(proc, proc_ro));
+		if (!procRo) return -1;
+		address = procRo + koffsetof(proc_ro, csflags);
+	}
+	else {
+		address = proc + koffsetof(proc, csflags);
+	}
+	if (!address) return -1;
+	uint32_t flags = 0;
+	if (kreadbuf(address, &flags, sizeof(flags)) != 0) return -1;
+	if (flags & CS_GET_TASK_ALLOW) return 0;
+	if (kwrite32(address, flags | CS_GET_TASK_ALLOW) != 0) return -1;
+	uint32_t verified = 0;
+	if (kreadbuf(address, &verified, sizeof(verified)) != 0 ||
+	    !(verified & CS_GET_TASK_ALLOW)) return -1;
+	return 0;
 }
 
 #define P_LTRACED       0x00000400      /* */

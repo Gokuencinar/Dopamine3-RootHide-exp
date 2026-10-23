@@ -60,6 +60,49 @@ void _trustcache_list_enumerate(void (^enumerateBlock)(uint64_t tcKaddr, bool *s
 	}
 }
 
+// kread64 returns zero on an I/O error, which is indistinguishable from a
+// legitimate empty list. Mutating a linked list requires checked primitives.
+static int tc_read64_checked(uint64_t address, uint64_t *value)
+{
+	if (!address || !value) return -1;
+	return kreadbuf(address, value, sizeof(*value));
+}
+
+static int tc_write64_checked(uint64_t address, uint64_t value)
+{
+	if (!address) return -1;
+	return kwrite64(address, value);
+}
+
+static int tc_root_location(uint64_t *location)
+{
+	if (!location) return -1;
+	uint64_t pmapRoot = ksymbol(pmap_image4_trust_caches);
+	if (pmapRoot) {
+		*location = pmapRoot;
+		return 0;
+	}
+	uint64_t runtime = ksymbol(ppl_trust_cache_rt);
+	if (!runtime) runtime = ksymbol_txm(txm_trustcache_root);
+	if (!runtime) return -1;
+	if (tc_read64_checked(runtime + 0x20, location) != 0 || !*location) return -1;
+	return 0;
+}
+
+static int tc_list_head_checked(uint64_t *head)
+{
+	uint64_t location = 0;
+	if (tc_root_location(&location) != 0) return -1;
+	return tc_read64_checked(location, head);
+}
+
+static int tc_set_list_head_checked(uint64_t newHead)
+{
+	uint64_t location = 0;
+	if (tc_root_location(&location) != 0) return -1;
+	return tc_write64_checked(location, newHead);
+}
+
 int trustcache_list_insert(uint64_t tcToInsert)
 {
 	if (!tcToInsert) return -1;
@@ -69,60 +112,62 @@ int trustcache_list_insert(uint64_t tcToInsert)
 		// Since TXM will only add trust caches to the start of the list, we simply add ours to the end
 		// We avoid a panic when loading a new trustcache, since we guarantee the first trustcache in the list is always writable
 
-		__block uint64_t lastTC = 0;
-		_trustcache_list_enumerate(^(uint64_t tcKaddr, bool *stop) {
-			lastTC = tcKaddr;
-		});
-
-		if (koffsetof(trustcache, prevptr)) {
-			kwrite64(tcToInsert + koffsetof(trustcache, prevptr), lastTC);
+		uint64_t lastTC = 0;
+		if (tc_list_head_checked(&lastTC) != 0 || !lastTC) return -1;
+		for (unsigned n = 0; n < 4096; n++) {
+			uint64_t nextTC = 0;
+			if (tc_read64_checked(lastTC + koffsetof(trustcache, nextptr), &nextTC) != 0)
+				return -1;
+			if (!nextTC) break;
+			if (nextTC == lastTC || n == 4095) return -1;
+			lastTC = nextTC;
 		}
-		kwrite64(lastTC + koffsetof(trustcache, nextptr), tcToInsert);
+		if (koffsetof(trustcache, prevptr) &&
+		    tc_write64_checked(tcToInsert + koffsetof(trustcache, prevptr), lastTC) != 0)
+			return -1;
+		return tc_write64_checked(lastTC + koffsetof(trustcache, nextptr), tcToInsert);
 	}
 	else {
-		uint64_t previousStartTC = _trustcache_list_get_start();
-		kwrite64(tcToInsert + koffsetof(trustcache, nextptr), previousStartTC);
-		if (koffsetof(trustcache, prevptr)) {
-			kwrite64(previousStartTC + koffsetof(trustcache, prevptr), tcToInsert);
+		uint64_t previousStartTC = 0;
+		if (tc_list_head_checked(&previousStartTC) != 0) return -1;
+		if (tc_write64_checked(tcToInsert + koffsetof(trustcache, nextptr), previousStartTC) != 0)
+			return -1;
+		if (koffsetof(trustcache, prevptr) && previousStartTC &&
+		    tc_write64_checked(previousStartTC + koffsetof(trustcache, prevptr), tcToInsert) != 0)
+			return -1;
+		if (tc_set_list_head_checked(tcToInsert) != 0) {
+			if (koffsetof(trustcache, prevptr) && previousStartTC)
+				(void)tc_write64_checked(previousStartTC + koffsetof(trustcache, prevptr), 0);
+			return -1;
 		}
-		_trustcache_list_set_start(tcToInsert);
+		return 0;
 	}
-
-	return 0;
 }
 
 int trustcache_list_remove(uint64_t tcKaddr)
 {
 	if (!tcKaddr) return -1;
-
-	uint64_t nextTc = kread64(tcKaddr + koffsetof(trustcache, nextptr));
-
-	uint64_t curTc = _trustcache_list_get_start();
-	if (curTc == 0) {
+	uint64_t nextTc = 0, curTc = 0, prevTc = 0;
+	if (tc_read64_checked(tcKaddr + koffsetof(trustcache, nextptr), &nextTc) != 0 ||
+	    tc_list_head_checked(&curTc) != 0) return -1;
+	for (unsigned n = 0; curTc && curTc != tcKaddr && n < 4096; n++) {
+		prevTc = curTc;
+		if (tc_read64_checked(curTc + koffsetof(trustcache, nextptr), &curTc) != 0 ||
+		    curTc == prevTc) return -1;
+	}
+	if (curTc != tcKaddr) return -1;
+	// Update the backlink first. A failed read-only/TXM write must not
+	// unlink the existing cache and leave its neighbour inconsistent.
+	if (nextTc && koffsetof(trustcache, prevptr) &&
+	    tc_write64_checked(nextTc + koffsetof(trustcache, prevptr), prevTc) != 0)
+		return -1;
+	int status = prevTc ? tc_write64_checked(prevTc + koffsetof(trustcache, nextptr), nextTc) :
+	                      tc_set_list_head_checked(nextTc);
+	if (status != 0) {
+		if (nextTc && koffsetof(trustcache, prevptr))
+			(void)tc_write64_checked(nextTc + koffsetof(trustcache, prevptr), tcKaddr);
 		return -1;
 	}
-	else if (curTc == tcKaddr) {
-		_trustcache_list_set_start(nextTc);
-		if (nextTc && koffsetof(trustcache, prevptr)) {
-			kwrite64(nextTc + koffsetof(trustcache, prevptr), 0);
-		}
-	}
-	else {
-		uint64_t prevTc = 0;
-		while (curTc != tcKaddr)
-		{
-			if (curTc == 0) {
-				return -1;
-			}
-			prevTc = curTc;
-			curTc = kread64(curTc);
-		}
-		kwrite64(prevTc + koffsetof(trustcache, nextptr), nextTc);
-		if (nextTc && koffsetof(trustcache, prevptr)) {
-			kwrite64(nextTc + koffsetof(trustcache, prevptr), prevTc);
-		}
-	}
-
 	return 0;
 }
 
@@ -170,7 +215,7 @@ void jb_trustcache_clear(void)
 uint64_t _jb_trustcache_grow(void)
 {
 	uint64_t jbTcKern = 0;
-	if (kalloc(&jbTcKern, 0x4000) != 0) return 0;
+	if (kalloc(&jbTcKern, 0x4000) != 0 || !jbTcKern) return 0;
 
 	jb_trustcache *jbTc = alloca(sizeof(jb_trustcache));
 	memset(jbTc, 0, sizeof(jb_trustcache));
@@ -183,9 +228,57 @@ uint64_t _jb_trustcache_grow(void)
 	if (koffsetof(trustcache, type)) {
 		*(uint64_t *)(jbTc->trustcache + koffsetof(trustcache, type)) = 0x5;
 	}
-	kwritebuf(jbTcKern, jbTc, sizeof(*jbTc));
-	trustcache_list_insert(jbTcKern);
+	if (kwritebuf(jbTcKern, jbTc, sizeof(*jbTc)) != 0) {
+		(void)kfree(jbTcKern, 0x4000);
+		return 0;
+	}
+	jb_trustcache readback = {0};
+	if (kreadbuf(jbTcKern, &readback, sizeof(readback)) != 0 ||
+	    memcmp(&readback, jbTc, sizeof(readback)) != 0) {
+		(void)kfree(jbTcKern, 0x4000);
+		return 0;
+	}
+	if (trustcache_list_insert(jbTcKern) != 0) {
+		// A failed kernel write may still have linked this allocation. Leaking
+		// one page is safer than freeing memory reachable from the trustcache list.
+		return 0;
+	}
 	return jbTcKern;
+}
+
+static int tc_find_free_jb_cache(uint64_t *freeKaddr, uint32_t *freeLength)
+{
+	if (!freeKaddr || !freeLength) return -1;
+	*freeKaddr = 0;
+	*freeLength = 0;
+	uint64_t current = 0;
+	if (tc_list_head_checked(&current) != 0) return -1;
+	for (unsigned n = 0; current && n < 4096; n++) {
+		uint64_t fileAddress = 0;
+		if (tc_read64_checked(current + koffsetof(trustcache, fileptr), &fileAddress) != 0)
+			return -1;
+		if (fileAddress == current + offsetof(jb_trustcache, file)) {
+			uint64_t magic = 0;
+			if (tc_read64_checked(current + offsetof(jb_trustcache, magic), &magic) != 0)
+				return -1;
+			if (magic == JB_MAGIC) {
+				uint32_t length = 0;
+				if (kreadbuf(fileAddress + offsetof(trustcache_file_v1, length),
+				             &length, sizeof(length)) != 0 || length > JB_TRUSTCACHE_ENTRY_COUNT)
+					return -1;
+				if (length < JB_TRUSTCACHE_ENTRY_COUNT) {
+					*freeKaddr = current;
+					*freeLength = length;
+					return 0;
+				}
+			}
+		}
+		uint64_t next = 0;
+		if (tc_read64_checked(current + koffsetof(trustcache, nextptr), &next) != 0 ||
+		    next == current || (next && n == 4095)) return -1;
+		current = next;
+	}
+	return 0;
 }
 
 int jb_trustcache_add_entries(struct trustcache_entry_v1 *entries, uint32_t entryCount)
@@ -194,16 +287,10 @@ int jb_trustcache_add_entries(struct trustcache_entry_v1 *entries, uint32_t entr
 	uint32_t remainingEntryCount = entryCount;
 	uint32_t insertedEntryCount = 0;
 	while (remainingEntryCount > 0) {
-		__block uint64_t freeJbTcKaddr = 0;
-		__block uint32_t freeJbTcCurrentLength = 0;
-		_jb_trustcache_enumerate(^(uint64_t jbTcKaddr, bool *stop) {
-			uint32_t length = kread32(jbTcKaddr + offsetof(jb_trustcache, file.length));
-			if (length < JB_TRUSTCACHE_ENTRY_COUNT) {
-				freeJbTcKaddr = jbTcKaddr;
-				freeJbTcCurrentLength = length;
-				*stop = true;
-			}
-		});
+		uint64_t freeJbTcKaddr = 0;
+		uint32_t freeJbTcCurrentLength = 0;
+		if (tc_find_free_jb_cache(&freeJbTcKaddr, &freeJbTcCurrentLength) != 0)
+			return -1;
 		if (freeJbTcKaddr == 0) {
 			freeJbTcKaddr = _jb_trustcache_grow();
 			if (freeJbTcKaddr == 0) return -1;
@@ -215,7 +302,8 @@ int jb_trustcache_add_entries(struct trustcache_entry_v1 *entries, uint32_t entr
 		}
 
 		jb_trustcache *jbTc = alloca(JB_TRUSTCACHE_SIZE);
-		kreadbuf(freeJbTcKaddr, jbTc, JB_TRUSTCACHE_SIZE);
+		if (kreadbuf(freeJbTcKaddr, jbTc, JB_TRUSTCACHE_SIZE) != 0 ||
+		    jbTc->file.length != freeJbTcCurrentLength) return -1;
 		for (uint32_t i = 0; i < entryCountToInsert; i++) {
 			// The input cursor must advance when this batch spans multiple
 			// trustcache pages, otherwise each page repeats entries[0..N].
@@ -223,7 +311,7 @@ int jb_trustcache_add_entries(struct trustcache_entry_v1 *entries, uint32_t entr
 		}
 		jbTc->file.length += entryCountToInsert;
 		_trustcache_file_sort(&jbTc->file);
-		kwritebuf(freeJbTcKaddr, jbTc, JB_TRUSTCACHE_SIZE);
+		if (kwritebuf(freeJbTcKaddr, jbTc, JB_TRUSTCACHE_SIZE) != 0) return -1;
 		remainingEntryCount -= entryCountToInsert;
 		insertedEntryCount += entryCountToInsert;
 	}
@@ -315,85 +403,130 @@ void jb_trustcache_debug_print(FILE *f)
 
 int trustcache_file_upload(trustcache_file_v1 *tc)
 {
-	uint64_t tcSize = ksizeof(trustcache) + sizeof(trustcache_file_v1) + (tc->length * sizeof(trustcache_entry_v1));
-	if (tcSize > 0x4000) return -1;
+	// Always stage a new immutable cache. In-place writes can partially replace
+	// the ONLY valid cache if the kernel primitive fails midway through a write.
+	const size_t headerSize = ksizeof(trustcache);
+	const size_t fileHeaderSize = sizeof(trustcache_file_v1);
+	if (!tc || tc->version != 1 || headerSize >= 0x4000 ||
+	    fileHeaderSize > 0x4000 - headerSize ||
+	    tc->length > (0x4000 - headerSize - fileHeaderSize) / sizeof(trustcache_entry_v1) ||
+	    koffsetof(trustcache, fileptr) > headerSize - sizeof(uint64_t) ||
+	    (koffsetof(trustcache, size) && koffsetof(trustcache, size) > headerSize - sizeof(uint64_t)) ||
+	    (koffsetof(trustcache, type) && koffsetof(trustcache, type) > headerSize - sizeof(uint64_t)))
+		return -1;
+	const size_t fileSize = fileHeaderSize + (size_t)tc->length * sizeof(trustcache_entry_v1);
+	const size_t tcSize = headerSize + fileSize;
 
-	// Check if there is already a TrustCache with the same UUID
-	__block uint64_t existingTcKaddr = 0;
-	_trustcache_list_enumerate(^(uint64_t tcKaddr, bool *stop) {
-		uint64_t tcFileKaddr = kread64(tcKaddr + koffsetof(trustcache, fileptr));
-		uuid_t tcFileUUID;
-		kreadbuf(tcFileKaddr + offsetof(trustcache_file_v1, uuid), tcFileUUID, sizeof(tcFileUUID));
-		if (memcmp(tcFileUUID, tc->uuid, sizeof(tcFileUUID)) == 0) {
-			existingTcKaddr = tcKaddr;
-			*stop = true;
-		}
-	});
-
-	// If so, we want to either replace it or remove it
-	if (existingTcKaddr != 0) {
-		if (_is_jb_trustcache(existingTcKaddr)) {
-			// There is something terribly wrong, abort
+	uint64_t existingTcKaddr = 0;
+	uint64_t oldTcSize = 0;
+	uint64_t current = 0;
+	if (tc_list_head_checked(&current) != 0) return -1;
+	for (unsigned n = 0; current && n < 4096; n++) {
+		uint64_t fileAddress = 0;
+		uuid_t currentUUID = {0};
+		if (tc_read64_checked(current + koffsetof(trustcache, fileptr), &fileAddress) != 0 ||
+		    !fileAddress ||
+		    kreadbuf(fileAddress + offsetof(trustcache_file_v1, uuid), currentUUID, sizeof(currentUUID)) != 0)
 			return -1;
-		}
-
-		uint64_t prevTcFile = kread64(existingTcKaddr + koffsetof(trustcache, fileptr));
-		uint32_t prevTcLength = kread32(prevTcFile + offsetof(trustcache_file_v1, length));
-		uint64_t prevTcSize = ksizeof(trustcache) + sizeof(trustcache_file_v1) + (prevTcLength * sizeof(trustcache_entry_v1));
-		if (prevTcSize == tcSize) {
-			// If size is the same this is simple, just replace the file data
-			kwritebuf(prevTcFile, tc, tcSize - ksizeof(trustcache));
-			return 0;
-		}
-		else {
-			// If not, it gets more complicated and hacky...
-			// We can't take a lock (at least not yet??) to ensure nothing accesses the original TrustCache after we freed it
-			// So we do the next best thing, we remove it from the linked list and wait a bit before freeing it, hoping that any
-			// outstanding reads on the memory would be done by then
-			if (trustcache_list_remove(existingTcKaddr) != 0) {
-				return -1; // really unlikely error, if this triggers the world is probably upside down
+		if (memcmp(currentUUID, tc->uuid, sizeof(currentUUID)) == 0) {
+			// Never replace the separately allocated dynamic JB trustcache.
+			if (fileAddress == current + offsetof(jb_trustcache, file)) {
+				uint64_t magic = 0;
+				if (tc_read64_checked(current + offsetof(jb_trustcache, magic), &magic) != 0 ||
+				    magic == JB_MAGIC) return -1;
 			}
-			usleep(10000); // hope for current accesses to finish if there are any (new accesses won't come as we removed the list entry)
-			kfree(existingTcKaddr, prevTcSize); // free the original allocation
-			// now just fall through and make this function add the new TrustCache
+			uint32_t oldLength = 0;
+			if (kreadbuf(fileAddress + offsetof(trustcache_file_v1, length),
+			             &oldLength, sizeof(oldLength)) != 0 ||
+			    oldLength > (0x4000 - headerSize - fileHeaderSize) / sizeof(trustcache_entry_v1))
+				return -1;
+			existingTcKaddr = current;
+			oldTcSize = headerSize + fileHeaderSize + (size_t)oldLength * sizeof(trustcache_entry_v1);
+			break;
 		}
+		uint64_t next = 0;
+		if (tc_read64_checked(current + koffsetof(trustcache, nextptr), &next) != 0 ||
+		    next == current || (next && n == 4095)) return -1;
+		current = next;
 	}
+	// TXM's list root is read-only. Do not attempt to unlink an existing
+	// cache using a write primitive that cannot make the transition atomic.
+	if (existingTcKaddr && ksymbol(SPTMArgs)) return -1;
 
+	uint8_t *prepared = calloc(1, tcSize);
+	uint8_t *verified = malloc(tcSize);
+	if (!prepared || !verified) {
+		free(prepared);
+		free(verified);
+		return -1;
+	}
 	uint64_t tcKaddr = 0;
-	if (kalloc(&tcKaddr, tcSize) != 0) return -1;
-
-	// kalloc is not guaranteed to be zeroed, make sure trustcache head is zeroed
-	char nullBuf[ksizeof(trustcache)];
-	memset(nullBuf, 0, sizeof(nullBuf));
-	kwritebuf(tcKaddr, nullBuf, sizeof(nullBuf));
-
-	uint64_t tcFileKaddr = tcKaddr + ksizeof(trustcache);
-	kwritebuf(tcFileKaddr, tc, tcSize - ksizeof(trustcache));
-
-	kwrite64(tcKaddr + koffsetof(trustcache, fileptr), tcFileKaddr);
+	if (kalloc(&tcKaddr, tcSize) != 0 || !tcKaddr) {
+		free(prepared);
+		free(verified);
+		return -1;
+	}
+	const uint64_t fileAddress = tcKaddr + headerSize;
+	memcpy(prepared + koffsetof(trustcache, fileptr), &fileAddress, sizeof(fileAddress));
 	if (koffsetof(trustcache, size)) {
-		kwrite64(tcKaddr + koffsetof(trustcache, size), tcSize);
+		uint64_t sizeField = tcSize;
+		memcpy(prepared + koffsetof(trustcache, size), &sizeField, sizeof(sizeField));
 	}
 	if (koffsetof(trustcache, type)) {
-		kwrite64(tcKaddr + koffsetof(trustcache, type), 0x5);
+		uint64_t type = 0x5;
+		memcpy(prepared + koffsetof(trustcache, type), &type, sizeof(type));
+	}
+	memcpy(prepared + headerSize, tc, fileSize);
+	int result = kwritebuf(tcKaddr, prepared, tcSize);
+	if (result == 0) result = kreadbuf(tcKaddr, verified, tcSize);
+	if (result == 0 && memcmp(prepared, verified, tcSize) != 0) result = -1;
+	free(prepared);
+	free(verified);
+	if (result != 0) {
+		(void)kfree(tcKaddr, tcSize);
+		return -1;
 	}
 
-	trustcache_list_insert(tcKaddr);
+	// First publish the complete replacement; only then unlink the old UUID.
+	// This makes allocation and I/O failures leave the old cache untouched.
+	if (trustcache_list_insert(tcKaddr) != 0) {
+		// A failed primitive could have published a pointer despite returning
+		// error. Avoid freeing a possibly linked allocation (kernel UAF).
+		return -1;
+	}
+	if (existingTcKaddr) {
+		if (trustcache_list_remove(existingTcKaddr) != 0) {
+			// Both caches remain valid when unlinking is denied; never free one
+			// that the kernel may still traverse.
+			return -1;
+		}
+		usleep(10000); // best-effort grace period; NOT a lock against readers
+		if (kfree(existingTcKaddr, oldTcSize) != 0) return -1;
+	}
 	return 0;
 }
 
 int trustcache_file_upload_with_uuid(trustcache_file_v1 *tc, uuid_t uuid)
 {
+	if (!tc || !uuid) return -1;
 	memcpy(tc->uuid, uuid, sizeof(uuid_t));
 	return trustcache_file_upload(tc);
 }
 
 int trustcache_file_build_from_cdhashes(cdhash_t *CDHashes, uint32_t CDHashCount, trustcache_file_v1 **tcOut)
 {
-	if (!CDHashes || CDHashCount == 0 || !tcOut) return -1;
+	if (!tcOut) return -1;
+	*tcOut = NULL;
+	// The uploader accepts a single 16 KiB cache, not an unbounded array.
+	// Reject overlarge counts before allocating or indexing caller hashes.
+	if (!CDHashes || CDHashCount == 0 ||
+	    sizeof(trustcache_file_v1) >= 0x4000 ||
+	    CDHashCount > (0x4000 - sizeof(trustcache_file_v1)) / sizeof(trustcache_entry_v1))
+		return -1;
 
 	size_t tcSize = sizeof(trustcache_file_v1) + (sizeof(trustcache_entry_v1) * CDHashCount);
 	trustcache_file_v1 *file = malloc(tcSize);
+	if (!file) return -1;
 	_trustcache_file_init(file);
 
 	file->length = CDHashCount;

@@ -192,7 +192,9 @@ int main(void) {
 
     reset(); strcpy(path,"/usr/libexec/xpcproxy");
     CHECK(__posix_spawn_orig_wrapper(&pid,path,&desc,args,missing)==0);
-    CHECK(!has("DYLD_IN_CACHE=0") && alloc_count==0);
+    // The new contract follows the exact active-root injection, not an
+    // executable/manager allowlist. Ordinary injected XPC jobs need dyld too.
+    CHECK(has("DYLD_IN_CACHE=0") && alloc_count==1);
     const char *managerLabels[]={"UIKitApplication:xyz.willy.Zebra[0x1]",
         "UIKitApplication:org.coolstar.SileoStore[0x2]",
         "UIKitApplication:com.roothide.manager[0x3]"};
@@ -212,22 +214,22 @@ int main(void) {
     reset(); strcpy(path,"/usr/libexec/xpcproxy");
     char *notManager[]={"xpcproxy","UIKitApplication:com.apple.Preferences[0x1]",NULL};
     CHECK(__posix_spawn_orig_wrapper(&pid,path,&desc,notManager,missing)==0);
-    CHECK(!has("DYLD_IN_CACHE=0") && alloc_count==0);
+    CHECK(has("DYLD_IN_CACHE=0") && alloc_count==1);
     char *spoof[]={"xpcproxy","UIKitApplication:xyz.willy.Zebra.extra[0x1]",NULL};
     CHECK(__posix_spawn_orig_wrapper(&pid,path,&desc,spoof,missing)==0);
-    CHECK(!has("DYLD_IN_CACHE=0") && alloc_count==0);
+    CHECK(has("DYLD_IN_CACHE=0") && alloc_count==2);
     char *malformed[]={"xpcproxy","xyz.willy.Zebra[0x1]",NULL};
     CHECK(__posix_spawn_orig_wrapper(&pid,path,&desc,malformed,missing)==0);
-    CHECK(!has("DYLD_IN_CACHE=0") && alloc_count==0);
+    CHECK(has("DYLD_IN_CACHE=0") && alloc_count==3);
     reset(); strcpy(path,"/usr/sbin/sshd");
     CHECK(__posix_spawn_orig_wrapper(&pid,path,&desc,args,missing)==0);
-    CHECK(!has("DYLD_IN_CACHE=0"));
+    CHECK(has("DYLD_IN_CACHE=0"));
     reset(); snprintf(path,sizeof(path),"%s-copy/usr/sbin/sshd",root);
     CHECK(__posix_spawn_orig_wrapper(&pid,path,&desc,args,missing)==0);
-    CHECK(!has("DYLD_IN_CACHE=0"));
+    CHECK(has("DYLD_IN_CACHE=0"));
     reset(); snprintf(path,sizeof(path),"%s/usr/sbin/sshd-malicious",root);
     CHECK(__posix_spawn_orig_wrapper(&pid,path,&desc,args,missing)==0);
-    CHECK(!has("DYLD_IN_CACHE=0"));
+    CHECK(has("DYLD_IN_CACHE=0"));
 
     reset(); test_pid=2;
     CHECK(__posix_spawn_orig_wrapper(&pid,path,&desc,args,missing)==0);
@@ -263,7 +265,7 @@ int main(void) {
     desc.attrp=&attr;
     reset(); strcpy(path,"/usr/libexec/xpcproxy");
     CHECK(__posix_spawn_orig_wrapper(&pid,path,NULL,args,missing)==0);
-    CHECK(alloc_count==0 && !has("DYLD_IN_CACHE=0"));
+    CHECK(alloc_count==1 && has("DYLD_IN_CACHE=0"));
 
     reset(); char *wrong[]={"DYLD_INSERT_LIBRARIES=/old/basebin/systemhook.dylib",NULL};
     CHECK(__posix_spawn_orig_wrapper(&pid,path,&desc,args,wrong)==0);
