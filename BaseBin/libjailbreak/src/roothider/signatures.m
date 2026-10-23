@@ -4,6 +4,7 @@
 #include <choma/CodeDirectory.h>
 #include <choma/MachOByteOrder.h>
 #include <mach-o/dyld.h>
+#include "signature_validation.h"
 #include "../trustcache.h"
 #include "../roothider.h"
 
@@ -53,7 +54,7 @@ extern bool csd_superblob_is_adhoc_signed(CS_DecodedSuperBlob *superblob);
 // LC_CODE_SIGNATURE allocation before passing it to the decoder. A detached
 // or CMS-signed SuperBlob still needs a usable CodeDirectory; the absence of
 // one must never be confused with a valid non-ad-hoc signature.
-static bool rh3_signature_blob_is_well_formed(const CS_SuperBlob *superblob, uint32_t availableSize)
+bool rh3_signature_blob_is_well_formed(const CS_SuperBlob *superblob, uint32_t availableSize)
 {
 	if (!superblob || availableSize < sizeof(CS_SuperBlob)) return false;
 	uint32_t magic = BIG_TO_HOST(superblob->magic);

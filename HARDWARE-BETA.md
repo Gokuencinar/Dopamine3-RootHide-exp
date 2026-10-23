@@ -672,3 +672,28 @@ Solo una ejecución física posterior puede certificar que `launchd` dispara el
 job SSH, que `sshd` emite el banner SSH-2.0 y que tweaks, Sileo, Zebra y
 NewTerm completan dyld y su inicialización. No se ha intentado desactivar la
 seguridad de Revolut ni utilizar su alerta como una prueba de aislamiento.
+
+### Corrección posterior a r177: validación de firmas Mach-O ya adaptadas
+
+La ruta de lectura introducida en r177 para no reabrir ejecutables en O_RDWR
+tenía dos casos de error verificables al inspeccionar el código. Podía entregar
+un SuperBlob de `LC_CODE_SIGNATURE` a ChOma sin validar antes su rango, índices
+y CodeDirectory; además, aceptaba un `jbrand` de la primera sección `__TEXT`
+sin comprobar que el hash almacenado del slot de código 0 coincidiera con el
+contenido actual. Si una escritura anterior se interrumpía tras cambiar la
+marca, podía reutilizarse un CDHash con el primer slot obsoleto.
+
+Ahora tanto la ruta de lectura como la de escritura validan los límites del
+slice y reutilizan el mismo comprobador de SuperBlob de la recursión de
+confianza. Cuando el fichero ya está marcado, la vía de solo lectura calcula
+el hash de su primera página y exige coincidencia con el slot 0 antes de
+devolver el CDHash. Ante firma malformada o hash discordante, falla cerrado:
+**no intenta corregir en caliente ni reescribir el ejecutable afectado**.
+El arnés host ejercita coincidencia, discrepancia, errores de lectura, hash no
+calculable y parámetros inválidos; la validación estructural del SuperBlob
+también se ejecuta con código C real y entradas negativas.
+
+Esto refuerza seguridad y coherencia del proceso de confianza sin cambiar
+PID 1, permisos CS, claves SSH, gestores o bootstrap instalado. Aún requiere
+compilación macOS y prueba real en dispositivo para comprobar compatibilidad
+con Mach-O/ChOma y determinar si afecta al `EBADEXEC` observado de NewTerm.

@@ -10,6 +10,7 @@
 #include "../libjailbreak.h"
 #include "common.h"
 #include "log.h"
+#include "signature_validation.h"
 
 extern MachO* fat_find_preferred_slice(Fat* fat);
 
@@ -90,6 +91,42 @@ int ensure_randomized_cdhash(const char* inputPath, void* cdhashOut)
 // only binaries that genuinely need rebranding may reach the original writer.
 // Returns 1 for a verified, already-branded CodeDirectory, 0 if mutation may
 // be needed, and -1 if branded metadata is corrupt (never write over it).
+static CS_SuperBlob *rh3_verified_code_signature(MachO *macho)
+{
+    uint32_t signatureOffset = 0, signatureSize = 0;
+    if (!macho ||
+        macho_find_code_signature_bounds(macho, &signatureOffset, &signatureSize) != 0 ||
+        signatureSize < sizeof(CS_SuperBlob) ||
+        signatureOffset > macho->archDescriptor.size ||
+        signatureSize > macho->archDescriptor.size - signatureOffset) return NULL;
+
+    CS_SuperBlob *superblob = macho_read_code_signature(macho);
+    if (!superblob) return NULL;
+    if (!rh3_signature_blob_is_well_formed(superblob, signatureSize)) {
+        free(superblob);
+        return NULL;
+    }
+    return superblob;
+}
+
+// The brand lives inside page 0. A previous rebrand can be interrupted after
+// writing the brand but before committing the updated CodeDirectory slot 0.
+// Reject that partially-written file without opening it for writing again.
+static bool rh3_branded_page_zero_hash_matches(CS_DecodedBlob *best, MachO *macho)
+{
+    if (!best || !macho) return false;
+    CS_CodeDirectory codeDir;
+    if (csd_blob_read(best, 0, sizeof(codeDir), &codeDir) != 0) return false;
+    CODE_DIRECTORY_APPLY_BYTE_ORDER(&codeDir, BIG_TO_HOST_APPLIER);
+    uint8_t computedHash[CC_SHA384_DIGEST_LENGTH] = {0};
+    uint8_t storedHash[CC_SHA384_DIGEST_LENGTH] = {0};
+    return codeDir.nCodeSlots > 0 && codeDir.hashSize > 0 &&
+           codeDir.hashSize <= sizeof(computedHash) &&
+           code_directory_calculate_page_hash(&codeDir, macho, 0, computedHash) &&
+           csd_blob_read(best, codeDir.hashOffset, codeDir.hashSize, storedHash) == 0 &&
+           memcmp(computedHash, storedHash, codeDir.hashSize) == 0;
+}
+
 static int rh3_existing_branded_cdhash(const char *inputPath, uint64_t requestedOffset,
                                       void *cdhashOut)
 {
@@ -123,11 +160,12 @@ static int rh3_existing_branded_cdhash(const char *inputPath, uint64_t requested
         *stop = true;
     });
     if (!branded) { fat_free(fat); return 0; }
-    CS_SuperBlob *superblob = macho_read_code_signature(macho);
+    CS_SuperBlob *superblob = rh3_verified_code_signature(macho);
     if (!superblob) { fat_free(fat); return -1; }
     CS_DecodedSuperBlob *decoded = csd_superblob_decode(superblob);
     CS_DecodedBlob *best = decoded ? csd_superblob_find_best_code_directory(decoded) : NULL;
-    int result = best ? csd_code_directory_calculate_hash(best, cdhashOut) : -1;
+    int result = rh3_branded_page_zero_hash_matches(best, macho)
+        ? csd_code_directory_calculate_hash(best, cdhashOut) : -1;
     if (decoded) csd_superblob_free(decoded);
     free(superblob);
     fat_free(fat);
@@ -216,7 +254,7 @@ int ensure_randomized_cdhash_for_slice(const char* inputPath, uint64_t offset, v
     uint64_t* rd2 = (uint64_t*)&(firstsection.segname[sizeof(firstsection.segname)-sizeof(uint64_t)]);
     JBLogDebug("__TEXT: %llx,%llx, %016llX %016llX\n", textsegoffset, textsegment.fileoff, *rd, *rd2);
 
-    CS_SuperBlob *superblob = macho_read_code_signature(macho);
+    CS_SuperBlob *superblob = rh3_verified_code_signature(macho);
     if (!superblob) {
         JBLogError("Error: failed to read code signature: %s\n", inputPath);
 		fat_free(fat);
@@ -243,7 +281,13 @@ int ensure_randomized_cdhash_for_slice(const char* inputPath, uint64_t offset, v
 		}
 
 		//already patched
-		if(*rd2 == jbinfo(jbrand)) {
+		if(*rd2 == jbinfo(jbrand) && jbinfo(jbrand) != 0) {
+			// The read-only opener can fail transiently while a writable open
+			// succeeds. Do not let this fallback accept an interrupted rebrand.
+			if (!rh3_branded_page_zero_hash_matches(bestCDBlob, macho)) {
+				JBLogError("Error: branded Mach-O has a stale code page hash: %s\n", inputPath);
+				break;
+			}
 			JBLogDebug("macho already patched: %s\n", inputPath);
 			retval = csd_code_directory_calculate_hash(bestCDBlob, cdhashOut);
 			break;
@@ -298,6 +342,10 @@ int ensure_randomized_cdhash_for_slice(const char* inputPath, uint64_t offset, v
 				}
 
 				void* newCDBlob = malloc(codeDir.length);
+				if (!newCDBlob) {
+					JBLogError("Error: failed to allocate code directory: %s\n", inputPath);
+					break;
+				}
 
 				if(memory_stream_read(fat->stream, macho->archDescriptor.offset + linkedit.dataoff + curIndex.offset, codeDir.length, newCDBlob) == 0)
 				{

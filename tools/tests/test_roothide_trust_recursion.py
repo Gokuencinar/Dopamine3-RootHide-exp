@@ -96,7 +96,9 @@ class RootHideTrustRecursionTests(unittest.TestCase):
         if not compiler:
             self.skipTest("C compiler unavailable (source contract tests still run)")
         source = signatures_source()
-        start = source.index("static bool rh3_signature_blob_is_well_formed(")
+        # Shared with recdhash's read-only branded fastpath: the validator is
+        # intentionally exported, rather than a signatures.m-local static.
+        start = source.index("bool rh3_signature_blob_is_well_formed(")
         end = source.index("NSString* resolveLoaderExecutablePaths", start)
         helper = source[start:end]
         harness = textwrap.dedent(r"""
