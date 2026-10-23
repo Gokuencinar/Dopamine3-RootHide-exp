@@ -721,6 +721,19 @@ static BOOL RH3SSHValidateSingleSocket(id entry, NSUInteger *port22, NSUInteger 
                RH3SSHValidateSingleSocket(members[0], port22, port2222);
     }
     if (![entry isKindOfClass:NSDictionary.class]) return NO;
+    // A service name alone does not prove that launchd created a passive
+    // TCP stream listener. A malformed UDP/active socket must not be
+    // rewritten by the optional SSH repair. Omitted launchd keys retain
+    // their native defaults; do not reject standard Procursus jobs.
+    NSDictionary *socket = (NSDictionary *)entry;
+    id sockType = socket[@"SockType"];
+    if (sockType && (![sockType isKindOfClass:NSString.class] ||
+                     ![[sockType lowercaseString] isEqualToString:@"stream"])) return NO;
+    id sockProtocol = socket[@"SockProtocol"];
+    if (sockProtocol && (![sockProtocol isKindOfClass:NSString.class] ||
+                         ![[sockProtocol lowercaseString] isEqualToString:@"tcp"])) return NO;
+    id passive = socket[@"SocketPassive"];
+    if (passive && (![passive isKindOfClass:NSNumber.class] || ![passive boolValue])) return NO;
     id service = ((NSDictionary *)entry)[@"SockServiceName"];
     NSString *name = [service isKindOfClass:NSString.class] ? service :
         ([service isKindOfClass:NSNumber.class] ? [service stringValue] : nil);

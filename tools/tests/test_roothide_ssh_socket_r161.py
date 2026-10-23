@@ -9,6 +9,20 @@ HEADER = (ROOT / "Application/Dopamine/Jailbreak/DOEnvironmentManager.h").read_t
 
 
 class SSHSocketDiagnosisR161(unittest.TestCase):
+    def test_optional_ssh_repair_does_not_accept_udp_or_active_socket(self):
+        validator = ENV.rsplit('static BOOL RH3SSHValidateSingleSocket(', 1)[1].split(
+            '@implementation DOEnvironmentManager', 1
+        )[0]
+        # Defaults remain legal for the package's launchd schema, but an
+        # explicit contradictory key must fail BEFORE counting port 22.
+        self.assertLess(validator.index('socket[@"SockType"]'),
+                        validator.index('((NSDictionary *)entry)[@"SockServiceName"]'))
+        self.assertIn('isEqualToString:@"stream"', validator)
+        self.assertIn('socket[@"SockProtocol"]', validator)
+        self.assertIn('isEqualToString:@"tcp"', validator)
+        self.assertIn('socket[@"SocketPassive"]', validator)
+        self.assertIn('![passive boolValue]', validator)
+
     def setUp(self):
         self.diagnostic = ENV.split("- (int)diagnoseRootHideOpenSSHSocket", 1)[1].split(
             "// Never treat presence of TweakLoader", 1

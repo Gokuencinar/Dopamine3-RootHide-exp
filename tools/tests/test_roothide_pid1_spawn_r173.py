@@ -16,6 +16,15 @@ MANAGER = ROOT / "BaseBin/launchdhook/src/roothide_manager_spawn.h"
 
 
 class PID1PrivateDyldTests(unittest.TestCase):
+    def test_early_boot_null_path_and_failed_manager_spawn_are_bounded(self):
+        text = SOURCE.read_text(encoding="utf-8")
+        hook = text.split("int __posix_spawn_hook(pid_t", 1)[1]
+        self.assertIn('if (path && !strcmp(path, "/usr/libexec/xpcproxy"))', hook)
+        self.assertIn('if (argv && argv[0])', hook)
+        wrapper = text.split('int __posix_spawn_orig_wrapper(pid_t *restrict pid, const char *restrict path,', 2)[-1].split(
+            '// launchd commonly spawns UIKit apps through xpcproxy', 1)[0]
+        self.assertIn('r, r == 0 ? *recordedPid : 0', wrapper)
+
     def test_bounded_pid1_private_dyld_contract(self):
         compiler = shutil.which("gcc") or shutil.which("cc") or shutil.which("clang")
         if not compiler:

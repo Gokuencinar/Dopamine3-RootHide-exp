@@ -83,6 +83,57 @@ int ensure_randomized_cdhash(const char* inputPath, void* cdhashOut)
 	return ensure_randomized_cdhash_for_slice(inputPath, -1, cdhashOut);
 }
 
+// The normal trust recursion often revisits an executable after it has
+// already been rebranded. Reopening such a binary for writing can make iOS 16
+// reject an otherwise valid executable with EBADMACHO while a process holds
+// its vnode. Check the requested Mach-O slice with a READ-ONLY stream first;
+// only binaries that genuinely need rebranding may reach the original writer.
+// Returns 1 for a verified, already-branded CodeDirectory, 0 if mutation may
+// be needed, and -1 if branded metadata is corrupt (never write over it).
+static int rh3_existing_branded_cdhash(const char *inputPath, uint64_t requestedOffset,
+                                      void *cdhashOut)
+{
+    // Never mistake an uninitialized zero brand for a rebranded binary.
+    const uint64_t activeBrand = jbinfo(jbrand);
+    if (activeBrand == 0) return 0;
+    Fat *fat = fat_init_from_path(inputPath);
+    if (!fat) return 0;
+    MachO *macho = requestedOffset == (uint64_t)-1
+        ? fat_find_preferred_slice(fat) : fat_find_slice_by_offset(fat, requestedOffset);
+    if (!macho) { fat_free(fat); return 0; }
+    __block bool branded = false;
+    macho_enumerate_load_commands(macho, ^(struct load_command command, uint64_t off,
+                                           void *data, bool *stop) {
+        (void)off;
+        if (command.cmd != LC_SEGMENT_64 ||
+            command.cmdsize < sizeof(struct segment_command_64)) return;
+        struct segment_command_64 *segment = data;
+        if (memcmp(segment->segname, "__TEXT\0", 7) != 0) return;
+        // The branding slot is in the last eight bytes of the first __TEXT
+        // section name. Match the same structure check as the writer.
+        if (segment->nsects != 0 &&
+            command.cmdsize >= sizeof(struct segment_command_64) + sizeof(struct section_64)) {
+            struct section_64 *first = (struct section_64 *)(segment + 1);
+            if (memcmp(first->segname, "__TEXT\0", 7) == 0) {
+                uint64_t storedBrand = 0;
+                memcpy(&storedBrand, first->segname + 8, sizeof(storedBrand));
+                branded = storedBrand == activeBrand;
+            }
+        }
+        *stop = true;
+    });
+    if (!branded) { fat_free(fat); return 0; }
+    CS_SuperBlob *superblob = macho_read_code_signature(macho);
+    if (!superblob) { fat_free(fat); return -1; }
+    CS_DecodedSuperBlob *decoded = csd_superblob_decode(superblob);
+    CS_DecodedBlob *best = decoded ? csd_superblob_find_best_code_directory(decoded) : NULL;
+    int result = best ? csd_code_directory_calculate_hash(best, cdhashOut) : -1;
+    if (decoded) csd_superblob_free(decoded);
+    free(superblob);
+    fat_free(fat);
+    return result == 0 ? 1 : -1;
+}
+
 /* on ios16(+?)
 1: if an executable has process(es) running it, after opening it with open(O_RDWR),
 		it can no longer be executed (EBADMACHO) until the previous process(es) exits.
@@ -94,6 +145,8 @@ int ensure_randomized_cdhash(const char* inputPath, void* cdhashOut)
 int ensure_randomized_cdhash_for_slice(const char* inputPath, uint64_t offset, void* cdhashOut)
 {
 	JBLogDebug("ensure_randomized_cdhash_for_slice(slice=%llx): %s\n", offset, inputPath);
+	int existing = rh3_existing_branded_cdhash(inputPath, offset, cdhashOut);
+	if (existing != 0) return existing > 0 ? 0 : -1;
 
     Fat* fat = fat_init_for_writing(inputPath);
     if (!fat) {

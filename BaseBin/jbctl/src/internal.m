@@ -6,6 +6,7 @@
 #include <libjailbreak/roothider/common.h>
 #include <sys/wait.h>
 #include <errno.h>
+#include <limits.h>
 
 SInt32 CFUserNotificationDisplayAlert(CFTimeInterval timeout, CFOptionFlags flags, CFURLRef iconURL, CFURLRef soundURL, CFURLRef localizationURL, CFStringRef alertHeader, CFStringRef alertMessage, CFStringRef defaultButtonTitle, CFStringRef alternateButtonTitle, CFStringRef otherButtonTitle, CFOptionFlags *responseFlags) API_AVAILABLE(ios(3.0));
 
@@ -38,7 +39,7 @@ int unmount_unsandboxed(const char *dir, int flags)
 bool is_protected(const char *path)
 {
 	struct statfs sb;
-	statfs(path, &sb);
+	if (statfs(path, &sb) != 0) return false;
 	return strcmp(path, sb.f_mntonname) == 0;
 }
 
@@ -58,8 +59,42 @@ int ensure_unprotected(const char *path)
 	return 0;
 }
 
+// jbctl is a new process: main.m receives the canonical rootPath from the
+// server, but does NOT reconstruct jbinfo(jbrand). Consequently the common
+// roothide_is_active() predicate can be false here even for a real RootHide
+// startup. A checked-in RootHide root shape is sufficient to *refuse* global
+// stock mounts; this check never grants credentials or permits any write.
+static bool rh3_jbctl_hidden_root_from_checked_in_state(void)
+{
+	const char *root = jbinfo(rootPath);
+	if (!root) return false;
+	size_t rootLength = strnlen(root, PATH_MAX);
+	if (rootLength >= PATH_MAX) return false;
+	static const char *const prefixes[] = {
+		"/var/containers/Bundle/Application/.jbroot-",
+		"/private/var/containers/Bundle/Application/.jbroot-"
+	};
+	for (size_t i = 0; i < sizeof(prefixes) / sizeof(prefixes[0]); i++) {
+		size_t n = strlen(prefixes[i]);
+		if (rootLength != n + 16 || strncmp(root, prefixes[i], n)) continue;
+		const char *hex = root + n;
+		for (size_t j = 0; j < 16; j++) {
+			if (!((hex[j] >= '0' && hex[j] <= '9') ||
+			      (hex[j] >= 'A' && hex[j] <= 'F') ||
+			      (hex[j] >= 'a' && hex[j] <= 'f'))) return false;
+		}
+		return hex[16] == '\0';
+	}
+	return false;
+}
+
 int protection_set_active(bool active)
 {
+	// The stock Dopamine bootstrap protects /private/preboot with bindfs.
+	// RootHide uses a randomly branded app-container root instead, and the
+	// official RootHide 2 startup deliberately skipped these stock mounts.
+	// Never create *or unmount* global preboot mounts in RootHide mode.
+	if (roothide_is_active() || rh3_jbctl_hidden_root_from_checked_in_state()) return 0;
 	int r = 0;
 	if (active) {
 		// Protect /private/preboot/UUID/<System, usr> from being modified by bind mounting them on top of themselves
@@ -83,6 +118,10 @@ bool fakelib_is_mounted(void)
 
 int fakelib_set_mounted(bool mounted)
 {
+	// RootHide reinjects from its private bootstrap, not a bindfs overlay on
+	// the global /usr/lib. Refuse either direction to avoid modifying an
+	// unrelated mount, even if a stale/foreign fakelib mount is present.
+	if (roothide_is_active() || rh3_jbctl_hidden_root_from_checked_in_state()) return ENOTSUP;
 	int r = 0;
 	if (mounted != fakelib_is_mounted()) {
 		if (mounted) {

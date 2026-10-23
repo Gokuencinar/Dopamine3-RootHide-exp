@@ -245,7 +245,8 @@ int __posix_spawn_orig_wrapper(pid_t *restrict pid, const char *restrict path,
 	}
 	if (manager) {
 		char stage[160];
-		snprintf(stage, sizeof(stage), "manager launch %s: spawn_result=%d pid=%d", manager, r, *recordedPid);
+		snprintf(stage, sizeof(stage), "manager launch %s: spawn_result=%d pid=%d", manager,
+		         r, r == 0 ? *recordedPid : 0);
 		rh3_bootlog(stage);
 	}
 	if (r == 0 && *recordedPid > 0 && roothide_is_active()) {
@@ -402,7 +403,7 @@ int __posix_spawn_hook(pid_t *restrict pid, const char *restrict path,
 	// We can't support injection into processes that get spawned before the launchd XPC server is up
 	// (Technically we could but there is little reason to, since it requires additional work)
 	if (gInEarlyBoot) {
-		if (!strcmp(path, "/usr/libexec/xpcproxy")) {
+		if (path && !strcmp(path, "/usr/libexec/xpcproxy")) {
 			// The spawned process being xpcproxy indicates that the launchd XPC server is up
 			// All processes spawned including this one should be injected into
 			early_boot_done();
@@ -414,8 +415,8 @@ int __posix_spawn_hook(pid_t *restrict pid, const char *restrict path,
 
 	// If we're drawing a boot logo, free up it's resources before backboardd starts
 	if (gFreeBootLogoBeforeBackboardd) {
-		if (!strcmp(path, "/usr/libexec/xpcproxy")) {
-			if (argv[0]) {
+		if (path && !strcmp(path, "/usr/libexec/xpcproxy")) {
+			if (argv && argv[0]) {
 				if (argv[1]) {
 					if (!strcmp(argv[1], "com.apple.backboardd")) {
 						free_boot_logo();

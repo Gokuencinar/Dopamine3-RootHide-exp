@@ -620,3 +620,55 @@ enlaces ni se desinstalan servicios por conjetura.
 ejercitan ramas reales en un arnés C, incluidos intentos de falsificar marcas,
 etiquetas ajenas, flags de proceso y errores. Ni esas pruebas ni la compilación
 Xcode acreditan comportamiento físico de SSH, tweaks, Zebra o aislamiento.
+
+### Integración posterior a r176: montajes RootHide, reejecución Mach-O y launchd
+
+El estado real de Actions #176 fue `failure`: su Xcode Build, validación de IPA
+con jailbreak habilitado y publicación de release finalizaron con éxito, pero
+la puerta estricta `Check RootHide port prerequisites before upload` falló por
+las comprobaciones deliberadamente no satisfechas. No se interpreta el release
+como validación física del bootstrap, SSH o los gestores.
+
+Se encontró una diferencia funcional frente a RootHide 2 en el `jbctl internal
+startup` heredado de Dopamine 3: volvía a invocar `protection_set_active(true)`
+y montar `bindfs` sobre preboot/System y preboot/usr. El job startup se importa
+desde el bootstrap oculto y está configurado con RunAtLoad. El RootHide Manager
+mostró una alerta de montajes Bindfs desconocidos, pero no existen pruebas
+físicas suficientes para identificar cada montaje de esa alerta. La nueva
+política de `jbctl` impide tanto crear como desmontar estos montajes del sistema
+en RootHide, e impide los comandos globales de fakelib en /usr/lib. **No intenta
+desmontar montajes preexistentes**, que podrían pertenecer a otros componentes.
+La ruta tradicional de Dopamine sigue disponible y se ejercita en pruebas host.
+
+Importante: `jbctl` se lanza como proceso independiente, con `rootPath`
+restaurado por su cliente pero `jbrand` local potencialmente cero. Por ello no
+basta `roothide_is_active()` para el bloqueo de montajes. Se añade un criterio
+de rechazo conservador para raíces con el formato exacto `.jbroot-` más 16
+dígitos hexadecimales en Bundle/Application. Este criterio solo **niega** una
+operación global: no asigna privilegios ni acepta un root nuevo. El arnés host
+prueba RootHide con jbrand no disponible, RootHide completo, ruta malformada y
+comportamiento stock, incluida ausencia de efectos de mount/unmount.
+
+`ensure_randomized_cdhash_for_slice` podía abrir O_RDWR incluso si el Mach-O
+ya contenía el jbrand actual; el propio código upstream advierte que esa
+apertura puede producir EBADMACHO en iOS 16 si el binario sigue en ejecución.
+Se incorpora una comprobación previa de CodeDirectory **solo lectura** para el
+slice concreto. Si jbrand no está inicializado, el binario todavía no ha sido
+adaptado o se requiere modificación, conserva la ruta de escritura existente.
+Si un ejecutable ya marcado tiene firma inválida, falla sin reescribirlo.
+Esto reduce escrituras innecesarias, pero **no demuestra la causa del EBADEXEC
+físico de NewTerm**, ni modifica NewTerm o sus datos.
+
+La ruta de arranque de PID 1 evita dereferenciar `path=NULL` al detectar el
+primer xpcproxy o liberar el boot logo, y deja de registrar un PID de gestor
+no confirmado si falla `posix_spawn`. La reparación SSH opt-in rechaza un
+socket que declara expresamente UDP/no stream o `SocketPassive=false`, sin
+alterar las opciones predeterminadas de los plists estándar. No se cambia la
+activación real de sshd, su clave, la configuración OpenSSH, fuentes APT,
+paquetes, datos de Zebra/Sileo ni los créditos.
+
+La verificación en Windows es un gate de regresión, no una prueba del kernel.
+Solo una ejecución física posterior puede certificar que `launchd` dispara el
+job SSH, que `sshd` emite el banner SSH-2.0 y que tweaks, Sileo, Zebra y
+NewTerm completan dyld y su inicialización. No se ha intentado desactivar la
+seguridad de Revolut ni utilizar su alerta como una prueba de aislamiento.
