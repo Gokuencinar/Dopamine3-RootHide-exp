@@ -28,6 +28,7 @@ static void *gLibSandboxHandle;
 char *JB_BootUUID = NULL;
 char *JB_RootPath = NULL;
 char *get_jbroot(void) { return JB_RootPath; }
+void roothide_prepare_checked_in_process(const char *root);
 void roothide_prepare_process(const char *root, const char *executable);
 void roothide_trust_injected_libraries(char *const envp[]);
 
@@ -617,6 +618,12 @@ __attribute__((constructor)) static void initializer(void)
 		dlopen(JBROOT_PATH("/basebin/forkfix.dylib"), RTLD_NOW);
 	}
 #endif
+
+	// RootHide's per-process runtime must initialize as soon as check-in has
+	// succeeded. Keep it independent of executable-path resolution: xpcproxy,
+	// lsd and other services may lack a realpath here. Do not send another
+	// launchd XPC status query; the authenticated check-in already completed.
+	roothide_prepare_checked_in_process(JB_RootPath);
 
 		if (load_executable_path() == 0) {
 			roothide_prepare_process(JB_RootPath, gExecutablePath);

@@ -78,10 +78,27 @@ static void rh3_load_rooted_init(const char *root)
     (void)dlopen(init, RTLD_NOW);
 }
 
+void roothide_prepare_checked_in_process(const char *root)
+{
+    // The systemhook constructor calls this only AFTER a successful dyld
+    // check-in (or its authenticated process_checkin fallback). Do not issue a
+    // second launchd XPC query here: during userspace reboot that server can
+    // temporarily reject a redundant request and would otherwise silently
+    // skip RootHide's global initializer in every affected process.
+    // Require the actual authenticated root to retain stock Dopamine behavior
+    // and avoid treating a lookalike/old randomized path as RootHide.
+    if (!root || !systemhook_is_roothide_root_path(root)) return;
+
+    // RootHide 2 runs roothideinit after authenticated check-in, NOT only if
+    // _NSGetExecutablePath + realpath work. On a short-lived xpcproxy job or
+    // a process with an inaccessible image path that latter lookup can fail,
+    // yet this global initialization is still required for RootHide services.
+    rh3_load_rooted_init(root);
+}
+
 void roothide_prepare_process(const char *root, const char *executable)
 {
-    if (!root || !systemhook_is_roothide_root_path(root) ||
-        !jbclient_roothide_jailbroken()) return;
+    if (!root || !systemhook_is_roothide_root_path(root) || !executable) return;
 
     // HOME/path redirection is narrower: only the hidden-root executables.
     // Never rewrite containers for ordinary UIKit apps or Apple daemons.
@@ -90,7 +107,6 @@ void roothide_prepare_process(const char *root, const char *executable)
         roothide_call_pathhook();
     }
 
-    rh3_load_rooted_init(root);
 }
 
 void roothide_trust_injected_libraries(char *const envp[])

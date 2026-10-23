@@ -20,20 +20,22 @@ class GlobalRoothideInitialization(unittest.TestCase):
 
     def test_init_is_not_restricted_to_executables_inside_jbroot(self):
         src = PORT.read_text()
-        routine = src.split('void roothide_prepare_process(', 1)[1].split('void roothide_trust_injected_libraries(', 1)[0]
-        self.assertIn('jbclient_roothide_jailbroken()', routine)
+        routine = src.split('void roothide_prepare_checked_in_process(', 1)[1].split('void roothide_prepare_process(', 1)[0]
+        # The constructor has already authenticated the process check-in
+        # before calling this routine. Re-querying launchd here can fail
+        # while services are coming up, silently suppressing roothideinit.
+        self.assertNotIn('jbclient_roothide_jailbroken()', routine)
         self.assertIn('systemhook_is_roothide_root_path(root)', routine)
-        self.assertIn('root_contains_executable(root, executable)', routine)
-        self.assertLess(routine.index('root_contains_executable(root, executable)'),
-                        routine.index('roothide_redirect_home(root)'))
         self.assertIn('rh3_load_rooted_init(root)', routine)
-        self.assertLess(routine.index('roothide_redirect_home(root)'),
-                        routine.index('rh3_load_rooted_init(root)'))
-        self.assertNotIn('!root_contains_executable(root, executable)) return', routine)
+        self.assertNotIn('root_contains_executable(', routine)
+        executable = src.split('void roothide_prepare_process(', 1)[1].split('void roothide_trust_injected_libraries(', 1)[0]
+        self.assertIn('root_contains_executable(root, executable)', executable)
+        self.assertIn('roothide_redirect_home(root)', executable)
+        self.assertNotIn('rh3_load_rooted_init(root)', executable)
 
     def test_load_is_limited_to_verified_signed_root_owned_file(self):
         src = PORT.read_text()
-        routine = src.split('static void rh3_load_rooted_init(', 1)[1].split('void roothide_prepare_process(', 1)[0]
+        routine = src.split('static void rh3_load_rooted_init(', 1)[1].split('void roothide_prepare_checked_in_process(', 1)[0]
         self.assertIn('lstat(', routine)
         self.assertIn('S_ISREG(', routine)
         self.assertIn('st.st_uid != 0', routine)
@@ -46,7 +48,13 @@ class GlobalRoothideInitialization(unittest.TestCase):
     def test_systemhook_initialization_calls_per_process_init_after_checkin(self):
         src = (ROOT / 'BaseBin/systemhook/src/main.c').read_text()
         ctor = src.split('__attribute__((constructor)) static void initializer', 1)[1]
-        self.assertLess(ctor.index('parse_dyldhook_jbinfo'), ctor.index('roothide_prepare_process('))
+        self.assertLess(ctor.index('parse_dyldhook_jbinfo'), ctor.index('roothide_prepare_checked_in_process('))
+        self.assertLess(ctor.index('jbclient_process_checkin('), ctor.index('roothide_prepare_checked_in_process('))
+        self.assertIn('else {', ctor.split('jbclient_process_checkin(', 1)[1].split('roothide_prepare_checked_in_process(', 1)[0])
+        # The donor loads roothideinit before resolving an executable path.
+        # xpcproxy and shortly-lived services may not resolve a realpath.
+        self.assertLess(ctor.index('roothide_prepare_checked_in_process('), ctor.index('if (load_executable_path() == 0)'))
+        self.assertLess(ctor.index('roothide_prepare_checked_in_process('), ctor.index('roothide_prepare_process('))
         self.assertLess(ctor.index('roothide_prepare_process('), ctor.index('should_enable_tweaks()'))
 
 

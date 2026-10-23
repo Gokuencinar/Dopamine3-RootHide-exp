@@ -280,6 +280,33 @@ int main(void) {
     CHECK(__posix_spawn_orig_wrapper(&pid,path,&desc,args,colon)==0);
     CHECK(has("DYLD_IN_CACHE=0"));
 
+    // A duplicated identical insertion is safe to canonicalize to one key.
+    // dyld and envbuf_getenv must not observe conflicting copies.
+    reset(); strcpy(path,"/usr/sbin/sshd");
+    char *duplicates[]={inserted,inserted,"OTHER=kept","DYLD_IN_CACHE=0",NULL};
+    CHECK(__posix_spawn_orig_wrapper(&pid,path,&desc,args,duplicates)==0);
+    CHECK(alloc_count==1 && prefix_count("DYLD_INSERT_LIBRARIES=")==1);
+    CHECK(prefix_count("DYLD_IN_CACHE=")==1 && has("DYLD_IN_CACHE=0"));
+    CHECK(has("OTHER=kept") && duplicates[0]==inserted && duplicates[1]==inserted);
+	reset(); char *thirdpartyDuplicates[]={combo,combo,"DYLD_IN_CACHE=0",NULL};
+	CHECK(__posix_spawn_orig_wrapper(&pid,path,&desc,args,thirdpartyDuplicates)==0);
+	CHECK(alloc_count==1 && prefix_count("DYLD_INSERT_LIBRARIES=")==1);
+	CHECK(has(combo) && has("DYLD_IN_CACHE=0"));
+
+    // Conflicting duplicate keys are ambiguous: do not infer that the
+    // selected systemhook will load or rewrite another child's environment.
+    reset(); strcpy(path,"/usr/libexec/xpcproxy");
+    char *proxyArgs[]={"xpcproxy","UIKitApplication:xyz.willy.Zebra[0x1]",NULL};
+    char *conflicting[]={inserted,"DYLD_INSERT_LIBRARIES=/evil/systemhook.dylib","OTHER=kept",NULL};
+    CHECK(__posix_spawn_orig_wrapper(&pid,path,&desc,proxyArgs,conflicting)==0);
+    CHECK(alloc_count==0 && prefix_count("DYLD_INSERT_LIBRARIES=")==2);
+    CHECK(!has("DYLD_IN_CACHE=0") && strstr(manager_stage,"systemhook_insert=0")!=NULL);
+    reset(); strcpy(path,"/usr/libexec/xpcproxy");
+    char *reverse[]={"DYLD_INSERT_LIBRARIES=/evil/systemhook.dylib",inserted,"OTHER=kept",NULL};
+    CHECK(__posix_spawn_orig_wrapper(&pid,path,&desc,proxyArgs,reverse)==0);
+    CHECK(alloc_count==0 && prefix_count("DYLD_INSERT_LIBRARIES=")==2);
+    CHECK(!has("DYLD_IN_CACHE=0") && strstr(manager_stage,"systemhook_insert=0")!=NULL);
+
     reset(); force_alloc_failure=1;
     CHECK(__posix_spawn_orig_wrapper(&pid,path,&desc,args,missing)==ENOMEM);
     CHECK(spawn_calls==0 && registrations==0 && pauses==0);

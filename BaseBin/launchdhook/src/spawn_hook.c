@@ -148,19 +148,28 @@ static bool rh3_pid1_has_private_systemhook(char *const envp[])
 	size_t hookLen = strlen(hook);
     hook = rh3_pid1_var_alias_n(hook, &hookLen);
 	static const char prefix[] = "DYLD_INSERT_LIBRARIES=";
+	const char *firstInsert = NULL;
+	bool found = false;
 	for (size_t i = 0; envp && envp[i] && i < 4096; i++) {
 		if (strncmp(envp[i], prefix, sizeof(prefix) - 1)) continue;
 		const char *entry = envp[i] + sizeof(prefix) - 1;
+		// envbuf_getenv and dyld need not agree on which duplicate wins.
+		// Never treat a later conflicting value as proof of injection.
+		if (firstInsert) {
+			if (strcmp(firstInsert, entry)) return false;
+			continue;
+		}
+		firstInsert = entry;
 		while (*entry) {
 			const char *end = strchr(entry, ':');
 			size_t length = end ? (size_t)(end - entry) : strlen(entry);
                 const char *equivalent = rh3_pid1_var_alias_n(entry, &length);
-                if (length == hookLen && !memcmp(equivalent, hook, hookLen)) return true;
+			if (length == hookLen && !memcmp(equivalent, hook, hookLen)) found = true;
 			if (!end) break;
 			entry = end + 1;
 		}
 	}
-	return false;
+	return found;
 }
 
 // Caller owns *ownedEnv when non-NULL. Preserve every unrelated entry and
@@ -192,7 +201,7 @@ static int rh3_pid1_prepare_private_dyld_env(const char *path, char *const argv[
 
 	static const char cacheKey[] = "DYLD_IN_CACHE=";
 	static char cacheValue[] = "DYLD_IN_CACHE=0";
-	size_t count = 0, cacheCount = 0;
+	size_t count = 0, cacheCount = 0, insertCount = 0;
 	bool alreadyZero = false;
 	while (envp[count]) {
 		if (++count > 4096) return E2BIG;
@@ -200,13 +209,22 @@ static int rh3_pid1_prepare_private_dyld_env(const char *path, char *const argv[
 			cacheCount++;
 			alreadyZero = !strcmp(envp[count - 1], cacheValue);
 		}
+		if (!strncmp(envp[count - 1], "DYLD_INSERT_LIBRARIES=", sizeof("DYLD_INSERT_LIBRARIES=") - 1))
+			insertCount++;
 	}
-	if (cacheCount == 1 && alreadyZero) return 0;
+	if (cacheCount == 1 && alreadyZero && insertCount <= 1) return 0;
 	char **result = calloc(count + 2, sizeof(*result));
 	if (!result) return ENOMEM;
 	size_t used = 0;
+	bool keptInsert = false;
 	for (size_t i = 0; i < count; i++) {
 		if (!strncmp(envp[i], cacheKey, sizeof(cacheKey) - 1)) continue;
+		// Only identical duplicate inserts reach this point; keep exactly
+		// one without removing any of the caller's unrelated libraries.
+		if (!strncmp(envp[i], "DYLD_INSERT_LIBRARIES=", sizeof("DYLD_INSERT_LIBRARIES=") - 1)) {
+			if (keptInsert) continue;
+			keptInsert = true;
+		}
 		result[used++] = envp[i];
 	}
 	result[used++] = cacheValue;
