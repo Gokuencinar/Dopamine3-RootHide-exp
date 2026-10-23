@@ -1554,11 +1554,27 @@ cleanup_root:
     return [NSBundle.mainBundle.bundlePath stringByAppendingPathComponent:name];
 }
 
-// RootHide 2's bootstrap explicitly registered the new managers with uicache.
-// Merely unpacking their .debs does not guarantee a home-screen icon. Limit
-// this to pinned bundle identifiers inside the active verified bootstrap and
-// bound both spawn and process exit; never re-register every user application.
-static NSError *RH3RegisterPinnedJailbreakApps(NSString *root)
+// User-installed NewTerm is optional. Restrict the repair to the actual
+// NewTerm bundle family, not every root-owned app in /Applications.
+static BOOL RH3IsNewTermBundleIdentifier(NSString *identifier)
+{
+    if (![identifier isKindOfClass:NSString.class] || identifier.length > 128) return NO;
+    for (NSString *prefix in @[@"ws.hbang.Terminal", @"com.hbang.NewTerm"]) {
+        if ([identifier isEqualToString:prefix] ||
+            [identifier hasPrefix:[prefix stringByAppendingString:@"."]])
+            return YES;
+    }
+    return NO;
+}
+
+// RootHide 2 registered package managers with uicache after install. Their
+// LaunchServices records contain absolute .jbroot paths and become stale when
+// RootHide re-randomizes its root on the next jailbreak. Re-submit only our
+// verified manager bundles and the optional, package-owned NewTerm family.
+// uicache -p is idempotent; no dpkg, package scripts or user data are touched.
+// Do not query LaunchServices synchronously while the app is elevated during
+// bootstrap: lsd/XPC may itself be waiting for the userspace reboot.
+static NSError *RH3RegisterPinnedJailbreakApps(NSString *root, BOOL existingBootstrap)
 {
     if (geteuid() != 0 || ![DOBootstrapper rootHideBrandForPath:root] ||
         !RH3IsRealDirectory(root))
@@ -1567,33 +1583,72 @@ static NSError *RH3RegisterPinnedJailbreakApps(NSString *root)
     struct stat toolInfo = {0};
     if (lstat(uicache.fileSystemRepresentation, &toolInfo) != 0 ||
         !S_ISREG(toolInfo.st_mode) || toolInfo.st_uid != 0 ||
-        toolInfo.st_nlink != 1 || (toolInfo.st_mode & 0022))
+        toolInfo.st_nlink != 1 || !(toolInfo.st_mode & S_IXUSR) ||
+        (toolInfo.st_mode & 0022))
         return RH3Error(BootstrapErrorCodeFailedFinalising, @"Untrusted or missing RootHide uicache executable");
     NSDictionary<NSString *, NSString *> *bundles = @{
         @"Sileo": @"org.coolstar.SileoStore", @"Zebra": @"xyz.willy.Zebra",
         @"RootHide": @"com.roothide.manager"
     };
-    for (NSString *name in @[@"Sileo", @"Zebra", @"RootHide"]) {
+    NSArray<NSString *> *names = existingBootstrap
+        ? @[@"Sileo", @"Zebra", @"RootHide", @"NewTerm", @"NewTerm2", @"NewTerm3"]
+        : @[@"Sileo", @"Zebra", @"RootHide"];
+    NSError *firstError = nil;
+    for (NSString *name in names) {
+        BOOL terminal = [name hasPrefix:@"NewTerm"];
         NSString *app = [root stringByAppendingPathComponent:
                          [@"Applications" stringByAppendingPathComponent:[name stringByAppendingString:@".app"]]];
         struct stat appInfo = {0};
         if (lstat(app.fileSystemRepresentation, &appInfo) != 0) {
-            if (errno == ENOENT && ![name isEqualToString:@"RootHide"]) continue;
-            return RH3Error(BootstrapErrorCodeFailedFinalising,
-                            [NSString stringWithFormat:@"RootHide bundle %@ is missing or unreadable", name]);
+            if (errno == ENOENT && (existingBootstrap || ![name isEqualToString:@"RootHide"])) continue;
+            NSError *problem = RH3Error(BootstrapErrorCodeFailedFinalising,
+                                        [NSString stringWithFormat:@"RootHide bundle %@ is missing or unreadable", name]);
+            if (!existingBootstrap) return problem;
+            if (!firstError) firstError = problem;
+            continue;
         }
         NSString *plist = [app stringByAppendingPathComponent:@"Info.plist"];
         struct stat plistInfo = {0};
         NSString *bundleName = [name stringByAppendingString:@".app"];
-        if (!S_ISDIR(appInfo.st_mode) || (appInfo.st_mode & 0022) ||
-            !rh3_bundle_owner_allowed(bundleName.UTF8String, appInfo.st_uid, 0) ||
-            lstat(plist.fileSystemRepresentation, &plistInfo) != 0 ||
-            !S_ISREG(plistInfo.st_mode) || plistInfo.st_nlink != 1 ||
-            plistInfo.st_size <= 0 || plistInfo.st_size > 64 * 1024 ||
-            !rh3_bundle_owner_allowed(bundleName.UTF8String, plistInfo.st_uid, 0) ||
-            ![[NSDictionary dictionaryWithContentsOfFile:plist][@"CFBundleIdentifier"] isEqual:bundles[name]])
-            return RH3Error(BootstrapErrorCodeFailedFinalising,
-                            [NSString stringWithFormat:@"RootHide bundle %@ failed integrity checks", name]);
+        BOOL plistOnDisk = lstat(plist.fileSystemRepresentation, &plistInfo) == 0;
+        BOOL trustedOwner = terminal ? appInfo.st_uid == 0 :
+                            rh3_bundle_owner_allowed(bundleName.UTF8String, appInfo.st_uid, 0);
+        BOOL trustedPlistOwner = plistOnDisk && (terminal ? plistInfo.st_uid == 0 :
+                                 rh3_bundle_owner_allowed(bundleName.UTF8String, plistInfo.st_uid, 0));
+        BOOL metadataSafe = S_ISDIR(appInfo.st_mode) && !(appInfo.st_mode & 0022) &&
+            trustedOwner && plistOnDisk && S_ISREG(plistInfo.st_mode) &&
+            plistInfo.st_nlink == 1 && plistInfo.st_size > 0 &&
+            plistInfo.st_size <= 64 * 1024 && !(plistInfo.st_mode & 0022) &&
+            trustedPlistOwner;
+        // Open the exact inode examined above; a replaced plist or a symlink
+        // must not be read just because its former path passed lstat.
+        NSDictionary *info = nil;
+        int plistFD = metadataSafe ? open(plist.fileSystemRepresentation, O_RDONLY | O_NOFOLLOW | O_CLOEXEC) : -1;
+        if (plistFD >= 0) {
+            struct stat opened = {0};
+            if (fstat(plistFD, &opened) == 0 && S_ISREG(opened.st_mode) &&
+                opened.st_dev == plistInfo.st_dev && opened.st_ino == plistInfo.st_ino &&
+                opened.st_size == plistInfo.st_size && opened.st_uid == plistInfo.st_uid) {
+                NSMutableData *bytes = [NSMutableData dataWithLength:(NSUInteger)opened.st_size];
+                if (bytes && pread(plistFD, bytes.mutableBytes, bytes.length, 0) == (ssize_t)bytes.length) {
+                    id parsed = [NSPropertyListSerialization propertyListWithData:bytes
+                        options:NSPropertyListImmutable format:NULL error:NULL];
+                    if ([parsed isKindOfClass:NSDictionary.class]) info = parsed;
+                }
+            }
+            close(plistFD);
+        }
+        BOOL expectedID = terminal ? RH3IsNewTermBundleIdentifier(info[@"CFBundleIdentifier"]) :
+                            [info[@"CFBundleIdentifier"] isEqual:bundles[name]];
+        if (!metadataSafe || !expectedID) {
+            NSError *problem = RH3Error(BootstrapErrorCodeFailedFinalising,
+                                        [NSString stringWithFormat:@"RootHide bundle %@ failed integrity checks", name]);
+            if (!existingBootstrap) return problem;
+            if (!firstError) firstError = problem;
+            [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
+                [NSString stringWithFormat:@"apps: registration %@ rejected by bundle metadata", name]];
+            continue;
+        }
         __block pid_t child = 0;
         __block int spawnResult = EIO;
         dispatch_group_t launch = dispatch_group_create();
@@ -1602,17 +1657,24 @@ static NSError *RH3RegisterPinnedJailbreakApps(NSString *root)
             spawnResult = trust ? trust : exec_cmd_nowait(&child, uicache.fileSystemRepresentation,
                                                         "-p", app.fileSystemRepresentation, NULL);
         });
-        if (dispatch_group_wait(launch, dispatch_time(DISPATCH_TIME_NOW, 20 * NSEC_PER_SEC)) != 0)
+        if (dispatch_group_wait(launch, dispatch_time(DISPATCH_TIME_NOW, 20 * NSEC_PER_SEC)) != 0) {
+            // The child spawn may still finish. Stop immediately and never
+            // issue a duplicate registration while its outcome is unknown.
             return RH3Error(BootstrapErrorCodeFailedFinalising,
                             [NSString stringWithFormat:@"RootHide uicache launch timed out for %@; outcome unknown", name]);
+        }
         int result = spawnResult ? spawnResult : (child > 1 ? RH3WaitForBootstrapChild(child, 30) : EIO);
         [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
             [NSString stringWithFormat:@"apps: register %@ result=%d", name, result]];
-        if (result)
-            return RH3Error(BootstrapErrorCodeFailedFinalising,
-                            [NSString stringWithFormat:@"RootHide app registration failed for %@ (%d)", name, result]);
+        if (result) {
+            NSError *problem = RH3Error(BootstrapErrorCodeFailedFinalising,
+                                        [NSString stringWithFormat:@"RootHide app registration failed for %@ (%d)", name, result]);
+            if (!existingBootstrap) return problem;
+            if (!firstError) firstError = problem;
+            if (result == -ETIMEDOUT || result == ETIMEDOUT) return problem; // Child may still run.
+        }
     }
-    return nil;
+    return firstError;
 }
 
 static void RH3RecordInstalledAppInventory(NSString *root)
@@ -1893,9 +1955,14 @@ static void RH3RecordInstalledAppInventory(NSString *root)
     RH3RecordInstalledAppInventory(root);
     NSError *appLinksError = [self repairRootHideAppLinks];
     if (appLinksError) return appLinksError;
-    if (!installed) {
-        NSError *registrationError = RH3RegisterPinnedJailbreakApps(root);
-        if (registrationError) return registrationError;
+    NSError *registrationError = RH3RegisterPinnedJailbreakApps(root, installed);
+    if (registrationError) {
+        [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
+            [NSString stringWithFormat:@"apps: %@ registration incomplete; %@; bootstrap preserved",
+             installed ? @"existing-root" : @"first-install", registrationError.localizedDescription]];
+        // Re-registration is a recovery attempt on an already installed root.
+        // Never make an optional icon repair invalidate a working bootstrap.
+        if (!installed) return registrationError;
     }
     if ([self fileOrSymlinkExistsAtPath:@"/var/jb"])
         return RH3Error(BootstrapErrorCodeFailedFinalising,

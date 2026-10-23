@@ -115,8 +115,8 @@ class MobileOwnedBundleBacklinks(unittest.TestCase):
         finalize = src.split('- (NSError *)finalizeRootHideBootstrap\n{', 1)[1].split(
             '- (NSError *)deleteRootHideBootstrap\n{', 1)[0]
         self.assertLess(finalize.index('repairRootHideAppLinks'),
-                        finalize.index('RH3RegisterPinnedJailbreakApps(root)'))
-        self.assertLess(finalize.index('RH3RegisterPinnedJailbreakApps(root)'),
+                        finalize.index('RH3RegisterPinnedJailbreakApps(root, installed)'))
+        self.assertLess(finalize.index('RH3RegisterPinnedJailbreakApps(root, installed)'),
                         finalize.index('writeToFile:marker'))
         self.assertIn('if (!installed)', finalize)
 

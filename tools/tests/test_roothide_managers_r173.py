@@ -156,7 +156,7 @@ class ManagerLifecycleR173(unittest.TestCase):
         with self.assertRaises(ValueError):
             deb_members(blob + blob[8:])
 
-    def test_reactivation_preserves_installed_packages_and_manual_registration(self):
+    def test_reactivation_preserves_packages_and_reregisters_existing_bundles(self):
         finalize = method(BOOTSTRAP, "- (NSError *)finalizeRootHideBootstrap\n{",
                           "- (NSError *)deleteRootHideBootstrap\n{")
         self.assertIn("if (!installed) {", finalize)
@@ -167,10 +167,12 @@ class ManagerLifecycleR173(unittest.TestCase):
         self.assertLess(installing, manager)
         self.assertLess(manager, inventory)
         self.assertLess(inventory, commit)
-        # LaunchServices refresh can block early patched children. It is a
-        # bounded explicit operation, not an implicit finalization side effect.
+        # The old root's LaunchServices paths are stale after re-randomization.
+        # The targeted registration helper is bounded and executes without
+        # replacing packages or regenerating existing APT sources.
         self.assertNotIn('JBROOT_PATH(@"/usr/bin/uicache")', finalize)
         self.assertNotIn('JBROOT_PATH("/usr/bin/uicache")', finalize)
+        self.assertIn('RH3RegisterPinnedJailbreakApps(root, installed)', finalize)
         refresh = method(ENVIRONMENT, "- (int)refreshJailbreakApps",
                          "// Read-only diagnosis for hardware")
         self.assertIn('repairRootHideAppLinks', refresh)

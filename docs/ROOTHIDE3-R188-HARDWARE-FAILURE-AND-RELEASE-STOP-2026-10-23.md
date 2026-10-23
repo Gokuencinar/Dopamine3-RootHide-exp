@@ -25,3 +25,41 @@ Need one complete **r188** read-only RootHide diagnostic export and, if availabl
 ## Validation boundary
 
 The local CI workflow ordering and fast-port checkin tests are host/static regressions. They do not validate launchd's private XPC protocol on iOS, dyld/PAC/SPTM, or the user's installed packages; userspace/hardware validation remains blocked. Preserve the existing untracked `tools/tests/__pycache__/`, package database, RootHide root, package manager choices, settings, SSH keys and accounts.
+
+## Reference fork checked after the r188 failure (24 October 2026)
+
+The proposed "fully working" RootHide/Dopamine 3 donor is
+`https://github.com/devnoname120/Dopamine/tree/roothide-dopamine3`, pinned at
+`3a9c8dc212294f25fc9a03bba3aab38e1cc1a9a3` (12 October 2026 UTC),
+fetched as the read-only git ref
+`refs/remotes/reference/devnoname120-roothide-dopamine3`. Its own README and
+BUILD.md explicitly say **no physical iPhone validation**. It is not evidence
+of a functional replacement IPA. Source comparison is useful nevertheless:
+
+- Donor `BaseBin/launchdhook/src/roothider.m` suspends non-driver children,
+  invokes synchronous `jbdSpawnPatchChild` from PID 1 and resumes or kills.
+  Local launchdhook skips that high-risk round trip. Do not transplant it
+  without an asynchronous, bounded authenticated protocol and PID generation
+  checks. Parent PID matching alone does not protect against PID reuse.
+- Donor `BaseBin/systemhook/src/main.c` and `roothider_main.c` separate
+  `roothide_init`, checked-in process initialization and executable-specific
+  late hooks. Local `roothider_port.c` consolidates these, does not copy
+  sysctl/dyld fallback hooks, and loads `roothideinit.dylib` only after checkin.
+  These are **architecture differences, not proof of runtime causation**.
+- The pinned `roothide_bootstrap_1900.tar.zst` has
+  `./usr/lib/roothideinit.dylib` (verified using native bsdtar) but does not
+  initially carry `TweakLoader.dylib` or `roothidepatch.dylib`. Absence from
+  the *initial* bootstrap alone does not prove absence after installing
+  packages; check the already-installed root read-only before attributing
+  the tweak failure to missing loader.
+- RootHide's official developer guide states that its CLI tools operate in
+  a virtual bootstrap root. In particular, the explicit `pw -V <physical
+  hidden/etc>` argument in the current password change deserves verification
+  against the on-device `pw`/vroot implementation, not an unguarded replacement
+  with host `/etc`. Changing an account database before proving confinement
+  could modify the wrong user records. Keep the existing guard until a
+  read-only account lookup verifies the virtual path model.
+
+Do not push an untested reference-fork merge to devices. First compile
+source changes and run native CI regressions, then obtain one device log for
+the five physical acceptance gates before publishing a "functional" build.
