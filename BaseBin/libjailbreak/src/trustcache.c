@@ -148,6 +148,7 @@ int trustcache_list_remove(uint64_t tcKaddr)
 {
 	if (!tcKaddr) return -1;
 	uint64_t nextTc = 0, curTc = 0, prevTc = 0;
+	const uint64_t prevOffset = koffsetof(trustcache, prevptr);
 	if (tc_read64_checked(tcKaddr + koffsetof(trustcache, nextptr), &nextTc) != 0 ||
 	    tc_list_head_checked(&curTc) != 0) return -1;
 	for (unsigned n = 0; curTc && curTc != tcKaddr && n < 4096; n++) {
@@ -158,14 +159,14 @@ int trustcache_list_remove(uint64_t tcKaddr)
 	if (curTc != tcKaddr) return -1;
 	// Update the backlink first. A failed read-only/TXM write must not
 	// unlink the existing cache and leave its neighbour inconsistent.
-	if (nextTc && koffsetof(trustcache, prevptr) &&
-	    tc_write64_checked(nextTc + koffsetof(trustcache, prevptr), prevTc) != 0)
+	if (nextTc && prevOffset &&
+	    tc_write64_checked(nextTc + prevOffset, prevTc) != 0)
 		return -1;
 	int status = prevTc ? tc_write64_checked(prevTc + koffsetof(trustcache, nextptr), nextTc) :
 	                      tc_set_list_head_checked(nextTc);
 	if (status != 0) {
-		if (nextTc && koffsetof(trustcache, prevptr))
-			(void)tc_write64_checked(nextTc + koffsetof(trustcache, prevptr), tcKaddr);
+		if (nextTc && prevOffset)
+			(void)tc_write64_checked(nextTc + prevOffset, tcKaddr);
 		return -1;
 	}
 	return 0;
