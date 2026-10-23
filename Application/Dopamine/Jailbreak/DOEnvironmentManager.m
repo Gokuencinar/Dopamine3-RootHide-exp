@@ -1467,6 +1467,7 @@ static BOOL RH3SSHValidateSingleSocket(id entry, NSUInteger *port22, NSUInteger 
         int latchResult = rh3_tweak_watchdog_latched(root.fileSystemRepresentation,
                                                     secondary.fileSystemRepresentation, &watchdogLatched);
         BOOL watchdogUnknown = latchResult != 0;
+        BOOL effectiveUnknown = primaryUnknown || (!primarySafeMode && watchdogUnknown);
         BOOL marker = primarySafeMode || watchdogLatched || primaryUnknown || watchdogUnknown;
         BOOL loader = lstat([root stringByAppendingPathComponent:@"usr/lib/TweakLoader.dylib"].fileSystemRepresentation,
                             &statInfo) == 0 && (S_ISREG(statInfo.st_mode) || S_ISLNK(statInfo.st_mode));
@@ -1518,7 +1519,7 @@ static BOOL RH3SSHValidateSingleSocket(id entry, NSUInteger *port22, NSUInteger 
         }
         [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
             [NSString stringWithFormat:@"runtime: tweak_safe_mode=%d tweak_primary_safe_mode=%d tweak_watchdog_latched=%d tweak_status_unknown=%d primary_errno=%d latch_error=%d tweak_loader_present=%d newterm_bundle_present=%d sshd_binary_present=%d ssh_plists=%lu daemon_listing_ok=%d; presence is not running state",
-             marker, primarySafeMode, watchdogLatched, primaryUnknown || watchdogUnknown,
+             marker, primarySafeMode, watchdogUnknown ? -1 : (int)watchdogLatched, effectiveUnknown,
              primaryReadError, latchResult, loader, newTerm, sshd,
              (unsigned long)sshPlists, daemons != nil && listingError == nil]];
         [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:

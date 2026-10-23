@@ -714,7 +714,10 @@ tamaño cero/negativo/excesivo y un directorio, sin ningún acceso al teléfono.
 La consulta de estado que emitía `runtime: tweak_safe_mode` consideraba solo
 `basebin/.safe_mode` y podía registrar `0` ante `EPERM` o un latch de watchdog
 vigente. Ahora distingue marcador primario, latch de AppGroup y estado
-desconocido; el resultado efectivo es conservador. Se reutiliza la verificación
+desconocido; un error de lectura del latch se informa como `-1`, no como
+presencia demostrada. Si el marcador primario válido ya impone safe mode,
+el resultado efectivo sigue siendo conocido aunque el latch no pueda leerse.
+La política es conservadora. Se reutiliza la verificación
 de AppGroup ya empleada por Ajustes, sin limpiar ninguno de los dos marcadores.
 Este cambio corrige la fidelidad del diagnóstico, **no habilita los tweaks**.
 

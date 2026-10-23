@@ -20,7 +20,8 @@ class EffectiveSafeModeDiagnosisTests(unittest.TestCase):
         self.assertIn("tweak_status_unknown=", diagnose)
         self.assertIn("tweak_safe_mode=", diagnose)
         self.assertIn("primaryReadError != ENOENT", diagnose)
-        self.assertIn("primaryUnknown || watchdogUnknown", diagnose)
+        self.assertIn("primaryUnknown || (!primarySafeMode && watchdogUnknown)", diagnose)
+        self.assertIn("watchdogUnknown ? -1 : (int)watchdogLatched", diagnose)
         self.assertNotIn("BOOL marker = lstat(", diagnose)
 
 
