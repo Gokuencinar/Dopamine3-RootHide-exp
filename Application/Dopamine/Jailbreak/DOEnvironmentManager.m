@@ -1411,13 +1411,38 @@ static BOOL RH3SSHValidateSingleSocket(id entry, NSUInteger *port22, NSUInteger 
     if ([DOBootstrapper rootHidePortEnabled]) {
         [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:@"apps: refresh starting; acquiring privileges"];
         __block NSArray *apps = nil;
+        NSMutableDictionary<NSString *, NSString *> *identifiers = [NSMutableDictionary dictionary];
         int result = [self rh3PerformPrivilegedAction:^int{
             NSError *error = [self->_bootstrapper repairRootHideAppLinks];
             if (error) return [self rh3ActionStage:@"app links" result:(int)error.code];
             apps = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:JBROOT_PATH(@"/Applications") error:&error];
             [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
                 [NSString stringWithFormat:@"apps: owned Applications directory read; entries=%lu error=%ld", (unsigned long)apps.count, (long)error.code]];
-            return apps ? 0 : EIO;
+            if (!apps) return EIO;
+            // The app loses root/sandbox privileges when this block returns.
+            // Resolve only bounded, regular Info.plists while the active root
+            // is still readable. Later LaunchServices queries stay unprivileged.
+            for (NSString *name in apps) {
+                if (![name.pathExtension isEqualToString:@"app"] ||
+                    ![name.lastPathComponent isEqualToString:name]) continue;
+                NSString *bundle = [JBROOT_PATH(@"/Applications") stringByAppendingPathComponent:name];
+                NSString *plist = [bundle stringByAppendingPathComponent:@"Info.plist"];
+                struct stat appSt = {0}, plistSt = {0};
+                if (lstat(bundle.fileSystemRepresentation, &appSt) || !S_ISDIR(appSt.st_mode) ||
+                    lstat(plist.fileSystemRepresentation, &plistSt) || !S_ISREG(plistSt.st_mode) ||
+                    plistSt.st_size <= 0 || plistSt.st_size > 65536 || plistSt.st_nlink != 1) continue;
+                // Vendor-owned UID 501 bundles are valid for read-only parsing;
+                // this does not grant them root trust or modify their ownership.
+                NSDictionary *info = [NSDictionary dictionaryWithContentsOfFile:plist];
+                NSString *identifier = [info[@"CFBundleIdentifier"] isKindOfClass:NSString.class]
+                    ? info[@"CFBundleIdentifier"] : nil;
+                if (identifier.length && identifier.length <= 256 &&
+                    [identifier rangeOfCharacterFromSet:
+                        [[NSCharacterSet characterSetWithCharactersInString:
+                            @"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.-_"] invertedSet]].location == NSNotFound)
+                    identifiers[name] = identifier;
+            }
+            return 0;
         }];
         // Refresh only the jailbreak's own bundles, not every system app.
         NSUInteger alreadyRegistered = 0, refreshed = 0;
@@ -1425,10 +1450,7 @@ static BOOL RH3SSHValidateSingleSocket(id entry, NSUInteger *port22, NSUInteger 
             if (result) break;
             if (![app.pathExtension isEqualToString:@"app"] || ![app.lastPathComponent isEqualToString:app]) continue;
             NSString *path = [JBROOT_PATH(@"/Applications") stringByAppendingPathComponent:app];
-            NSDictionary *bundleInfo = [NSDictionary dictionaryWithContentsOfFile:
-                [path stringByAppendingPathComponent:@"Info.plist"]];
-            NSString *bundleID = [bundleInfo[@"CFBundleIdentifier"] isKindOfClass:NSString.class]
-                ? bundleInfo[@"CFBundleIdentifier"] : nil;
+            NSString *bundleID = identifiers[app];
             if (bundleID.length) {
                 LSApplicationProxy *registered = [LSApplicationProxy applicationProxyForIdentifier:bundleID];
                 if (registered.installed &&
@@ -1607,7 +1629,15 @@ static int RH3DiagnosticMachMagic(NSString *path)
         [NSString stringWithFormat:@"full diag: app_jailbroken=%d rootHidePort=1; status is not proof of functional jailbreak",
          (int)self.isJailbroken]];
 
-    __block NSString *inventoryRoot = nil;
+    NSArray<NSArray<NSString *> *> *apps = @[
+        @[@"RootHide", @"RootHide.app"],
+        @[@"Sileo", @"Sileo.app"],
+        @[@"Zebra", @"Zebra.app"],
+        @[@"NewTerm", @"NewTerm.app"],
+        @[@"NewTerm2", @"NewTerm2.app"],
+        @[@"NewTerm3", @"NewTerm3.app"]
+    ];
+    NSMutableArray<NSDictionary *> *appSnapshots = [NSMutableArray array];
     int inventory = [self rh3PerformPrivilegedAction:^int {
         NSError *error = nil;
         NSString *root = [DOBootstrapper rootHideExistingRootWithError:&error];
@@ -1619,7 +1649,6 @@ static int RH3DiagnosticMachMagic(NSString *path)
             return EPERM;
         }
         [log rh3RecordDiagnosticStage:@"full diag: hidden root identity=verified; inventory read-only; no private paths logged"];
-        inventoryRoot = root;
         // Names here are fixed component labels, never filesystem-derived.
         // Classification: -1 unknown, 0 absent, 1 regular, 2 directory,
         // 3 symlink (not followed), 4 other; macho: -1 unavailable, 0 no, 1 yes.
@@ -1659,54 +1688,67 @@ static int RH3DiagnosticMachMagic(NSString *path)
                 metaErr ? -1 : st.st_gid == 0, metaErr ? 0 : (unsigned)(st.st_mode & 0777),
                 metaErr ? -1 : st.st_nlink == 1, macho]];
         }
+        // Capture app filesystem evidence BEFORE drop_root/restore-sandbox.
+        // Keep LaunchServices IPC outside this privileged callback. An app's
+        // vendor UID (often mobile=501) is not a reason to claim a missing
+        // bundle, nor permission to trust it for privileged execution.
+        for (NSArray<NSString *> *entry in apps) {
+            NSString *bundle = [[root stringByAppendingPathComponent:@"Applications"]
+                                stringByAppendingPathComponent:entry[1]];
+            NSString *plist = [bundle stringByAppendingPathComponent:@"Info.plist"];
+            struct stat bundleSt = {0}, plistSt = {0};
+            int bundleError = lstat(bundle.fileSystemRepresentation, &bundleSt) == 0 ? 0 : errno;
+            BOOL bundleVerified = bundleError == 0 && S_ISDIR(bundleSt.st_mode);
+            int plistError = bundleVerified
+                ? (lstat(plist.fileSystemRepresentation, &plistSt) == 0 ? 0 : errno) : -1;
+            BOOL plistRegular = plistError == 0 && S_ISREG(plistSt.st_mode) &&
+                plistSt.st_size > 0 && plistSt.st_size <= 65536 && plistSt.st_nlink == 1;
+            NSDictionary *info = plistRegular ? [NSDictionary dictionaryWithContentsOfFile:plist] : nil;
+            BOOL plistVerified = info != nil;
+            NSString *identifier = [info[@"CFBundleIdentifier"] isKindOfClass:NSString.class]
+                ? info[@"CFBundleIdentifier"] : nil;
+            NSString *executable = [info[@"CFBundleExecutable"] isKindOfClass:NSString.class]
+                ? info[@"CFBundleExecutable"] : nil;
+            BOOL validID = identifier.length > 0 && identifier.length <= 256 &&
+                [identifier rangeOfCharacterFromSet:
+                    [[NSCharacterSet characterSetWithCharactersInString:
+                        @"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.-_"] invertedSet]].location == NSNotFound;
+            BOOL validExecutable = executable.length > 0 && executable.length <= 128 &&
+                [executable.lastPathComponent isEqualToString:executable];
+            int binaryMagic = validExecutable
+                ? RH3DiagnosticMachMagic([bundle stringByAppendingPathComponent:executable]) : -1;
+            int backlink = bundleVerified ? RH3DiagnosticAppBacklink(bundle) : -1;
+            [appSnapshots addObject:@{
+                @"name": entry[0], @"bundle": bundle, @"identifier": validID ? identifier : @"",
+                @"bundle_verified": @(bundleVerified), @"plist_verified": @(plistVerified),
+                @"bundle_errno": @(bundleError), @"plist_errno": @(plistError),
+                @"bundle_uid0": @(bundleVerified ? (int)(bundleSt.st_uid == 0) : -1),
+                @"plist_uid0": @(plistError == 0 ? (int)(plistSt.st_uid == 0) : -1),
+                @"id_valid": @(validID), @"macho": @(binaryMagic), @"backlink": @(backlink)
+            }];
+        }
         return 0;
     }];
     [log rh3RecordDiagnosticStage:[NSString stringWithFormat:@"full diag: inventory result=%d", inventory]];
 
     // Launch Services can be queried without re-registering icons or bundles.
     // Failure to observe a proxy is not proof that the app is absent.
-    NSArray<NSArray<NSString *> *> *apps = @[
-        @[@"RootHide", @"RootHide.app"],
-        @[@"Sileo", @"Sileo.app"],
-        @[@"Zebra", @"Zebra.app"],
-        @[@"NewTerm", @"NewTerm.app"],
-        @[@"NewTerm2", @"NewTerm2.app"],
-        @[@"NewTerm3", @"NewTerm3.app"]
-    ];
-    for (NSArray<NSString *> *entry in apps) {
-        NSString *bundle = inventoryRoot
-            ? [[inventoryRoot stringByAppendingPathComponent:@"Applications"] stringByAppendingPathComponent:entry[1]]
-            : nil;
-        struct stat bundleSt = {0}, plistSt = {0};
-        BOOL bundleVerified = bundle &&
-            lstat(bundle.fileSystemRepresentation, &bundleSt) == 0 &&
-            S_ISDIR(bundleSt.st_mode) && bundleSt.st_uid == 0;
-        NSString *plist = [bundle stringByAppendingPathComponent:@"Info.plist"];
-        BOOL plistVerified = bundleVerified &&
-            lstat(plist.fileSystemRepresentation, &plistSt) == 0 &&
-            S_ISREG(plistSt.st_mode) && plistSt.st_uid == 0 &&
-            plistSt.st_size > 0 && plistSt.st_size <= 65536;
-        NSDictionary *info = plistVerified ? [NSDictionary dictionaryWithContentsOfFile:plist] : nil;
-        NSString *identifier = [info[@"CFBundleIdentifier"] isKindOfClass:NSString.class]
-            ? info[@"CFBundleIdentifier"] : nil;
-        NSString *executable = [info[@"CFBundleExecutable"] isKindOfClass:NSString.class]
-            ? info[@"CFBundleExecutable"] : nil;
-        BOOL validID = identifier.length > 0 && identifier.length <= 256 &&
-            [identifier rangeOfCharacterFromSet:
-                [[NSCharacterSet characterSetWithCharactersInString:
-                    @"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.-_"] invertedSet]].location == NSNotFound;
-        BOOL validExecutable = executable.length > 0 &&
-            executable.length <= 128 && [executable.lastPathComponent isEqualToString:executable];
-        int binaryMagic = validExecutable
-            ? RH3DiagnosticMachMagic([bundle stringByAppendingPathComponent:executable]) : -1;
+    for (NSDictionary *facts in appSnapshots) {
+        NSString *identifier = facts[@"identifier"];
+        NSString *bundle = facts[@"bundle"];
+        BOOL validID = [facts[@"id_valid"] boolValue];
         LSApplicationProxy *proxy = validID ? [LSApplicationProxy applicationProxyForIdentifier:identifier] : nil;
-        int registrationMatches = !inventoryRoot || !validID ? -1 :
+        int registrationMatches = inventory || !validID ? -1 :
             (proxy && [RH3CanonicalAppPath(proxy.bundleURL.path) isEqualToString:RH3CanonicalAppPath(bundle)]) ? 1 : 0;
         [log rh3RecordDiagnosticStage:[NSString stringWithFormat:
-            @"full diag: app=%@ bundle_verified=%d plist_verified=%d id_valid=%d executable_macho=%d backlink=%d registered_active_root=%d (not visibility=absence; no identifiers/paths exported)",
-            entry[0], bundleVerified, plistVerified, validID, binaryMagic,
-            bundleVerified ? RH3DiagnosticAppBacklink(bundle) : -1, registrationMatches]];
+            @"full diag: app=%@ bundle_verified=%d plist_verified=%d bundle_errno=%d plist_errno=%d bundle_uid0=%d plist_uid0=%d id_valid=%d executable_macho=%d backlink=%d registered_active_root=%d (not visibility=absence; no identifiers/paths exported)",
+            facts[@"name"], [facts[@"bundle_verified"] intValue], [facts[@"plist_verified"] intValue],
+            [facts[@"bundle_errno"] intValue], [facts[@"plist_errno"] intValue],
+            [facts[@"bundle_uid0"] intValue], [facts[@"plist_uid0"] intValue],
+            validID, [facts[@"macho"] intValue], [facts[@"backlink"] intValue], registrationMatches]];
     }
+    if (appSnapshots.count == 0)
+        [log rh3RecordDiagnosticStage:@"full diag: app inventory=unavailable; active root or privilege validation failed (not absence)"];
 
     int runtime = [self diagnoseRootHideRuntime];
     [log rh3RecordDiagnosticStage:[NSString stringWithFormat:@"full diag: safe-mode/SSH/NewTerm runtime result=%d", runtime]];

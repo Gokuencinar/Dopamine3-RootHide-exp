@@ -1,6 +1,7 @@
 // RootHide userspace integration for Dopamine 3's existing systemhook.
 // Keep the 3.x spawn/exec and hookd paths authoritative.
 #include "common/common.h"
+#include "common/roothide_trust_policy.h"
 #include <libjailbreak/jbclient_xpc.h>
 #include <libjailbreak/jbroot.h>
 #include <mach-o/dyld.h>
@@ -74,6 +75,10 @@ void roothide_prepare_process(const char *root, const char *executable)
 void roothide_trust_injected_libraries(char *const envp[])
 {
     if (!envp) return;
+    const char *root = get_jbroot();
+    if (!systemhook_is_roothide_root_path(root)) return;
+    char resolvedRoot[PATH_MAX] = {0};
+    if (!realpath(root, resolvedRoot)) return;
     const char *inserts = NULL;
     for (size_t i = 0; envp[i]; ++i) {
         if (!strncmp(envp[i], "DYLD_INSERT_LIBRARIES=", sizeof("DYLD_INSERT_LIBRARIES=") - 1)) {
@@ -87,6 +92,13 @@ void roothide_trust_injected_libraries(char *const envp[])
     char *save = NULL;
     for (char *entry = strtok_r(copy, ":", &save); entry; entry = strtok_r(NULL, ":", &save)) {
         if (entry[0] == '/' && strcmp(entry, HOOK_DYLIB_PATH) != 0) {
+            // The parent's DYLD_INSERT_LIBRARIES is untrusted input. Trust
+            // neither a stock-system path nor another root's insertion, even
+            // when a symlink inside this root resolves outside of it.
+            if (!rh3_trust_is_active_root_child(entry, root)) continue;
+            char resolved[PATH_MAX] = {0};
+            if (!realpath(entry, resolved) ||
+                !rh3_trust_is_active_root_child(resolved, resolvedRoot)) continue;
             jbclient_trust_library_recurse(entry, NULL);
         }
     }

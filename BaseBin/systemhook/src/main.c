@@ -71,20 +71,30 @@ void *sandbox_apply_hook(void *a1)
 
 int dyld_hook_routine(void **dyld, int idx, void *hook, void **orig, uint16_t pacSalt)
 {
-	if (!dyld) return -1;
+	if (!dyld || !hook || !orig || idx < 0) return -1;
 
 	uint64_t dyldPacDiversifier = ((uint64_t)dyld & ~(0xFFFFull << 48)) | (0x63FAull << 48);
 	void **dyldFuncPtrs = ptrauth_auth_data(*dyld, ptrauth_key_process_independent_data, dyldPacDiversifier);
 	if (!dyldFuncPtrs) return -1;
 
-	if (vm_protect(mach_task_self_, (mach_vm_address_t)&dyldFuncPtrs[idx], sizeof(void *), false, VM_PROT_READ | VM_PROT_WRITE) == 0) {
+	// dyld's shared-cache vtable needs a process-private COW page on iOS 16.
+	// A plain RW request can fail, silently leaving all dlopen hooks absent.
+	if (vm_protect(mach_task_self_, (mach_vm_address_t)&dyldFuncPtrs[idx], sizeof(void *), false,
+	               VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY) == 0) {
 		uint64_t location = (uint64_t)&dyldFuncPtrs[idx];
 		uint64_t pacDiversifier = (location & ~(0xFFFFull << 48)) | ((uint64_t)pacSalt << 48);
 
-		*orig = ptrauth_auth_and_resign(dyldFuncPtrs[idx], ptrauth_key_process_independent_code, pacDiversifier, ptrauth_key_function_pointer, 0);
+		void *previousSigned = dyldFuncPtrs[idx];
+		*orig = ptrauth_auth_and_resign(previousSigned, ptrauth_key_process_independent_code,
+		                                pacDiversifier, ptrauth_key_function_pointer, 0);
 		dyldFuncPtrs[idx] = ptrauth_auth_and_resign(hook, ptrauth_key_function_pointer, 0, ptrauth_key_process_independent_code, pacDiversifier);
-		vm_protect(mach_task_self_, (mach_vm_address_t)&dyldFuncPtrs[idx], sizeof(void *), false, VM_PROT_READ);
-		return 0;
+		if (vm_protect(mach_task_self_, (mach_vm_address_t)&dyldFuncPtrs[idx], sizeof(void *), false,
+		               VM_PROT_READ) == 0) return 0;
+		// Do not publish a replacement when the protection transition failed.
+		dyldFuncPtrs[idx] = previousSigned;
+		*orig = NULL;
+		(void)vm_protect(mach_task_self_, (mach_vm_address_t)&dyldFuncPtrs[idx], sizeof(void *), false,
+		                 VM_PROT_READ | VM_PROT_COPY);
 	}
 
 	return -1;
@@ -131,7 +141,8 @@ bool dyld_dlopen_preflight_hook(void *dyld, const char *path)
 void *(*dyld_dlsym_orig)(void *dyld, void *handle, const char *name);
 void *dyld_dlsym_hook(void *dyld, void *handle, const char *name)
 {
-	if (handle == gLibSandboxHandle && !strcmp(name, "sandbox_apply")) {
+	if (gLibSandboxHandle && sandbox_apply_orig && name &&
+	    handle == gLibSandboxHandle && !strcmp(name, "sandbox_apply")) {
 		// We abuse the fact that libsystem_sandbox will call dlsym to get the sandbox_apply pointer here
 		// Because we can just return a different pointer, we avoid doing instruction replacements
 		return sandbox_apply_hook;
@@ -569,7 +580,7 @@ __attribute__((constructor)) static void initializer(void)
 
 	// Initialize stuff neccessary for sandbox_apply hook
 	gLibSandboxHandle = dlopen("/usr/lib/libsandbox.1.dylib", RTLD_FIRST | RTLD_LOCAL | RTLD_LAZY);
-	sandbox_apply_orig = dlsym(gLibSandboxHandle, "sandbox_apply");
+	if (gLibSandboxHandle) sandbox_apply_orig = dlsym(gLibSandboxHandle, "sandbox_apply");
 
 	// Apply dyld hooks
 	void ***gDyldPtr = litehook_find_dsc_symbol("/usr/lib/system/libdyld.dylib", "__ZN5dyld45gDyldE");
@@ -586,6 +597,16 @@ __attribute__((constructor)) static void initializer(void)
 		void ***gAPIsPtr = litehook_find_dsc_symbol("/usr/lib/system/libdyld.dylib", "__ZN5dyld45gAPIsE");
 		if (gAPIsPtr) {
 			dyld_hook_routine(*gAPIsPtr, 16, (void *)&dyld_dlsym_hook, (void **)&dyld_dlsym_orig, 0x839D);
+			// The arm64 dyld4 gAPIs table has different offsets from gDyld.
+			// Keep arm64e and iOS 18+ out of this unverified layout.
+			#ifndef __arm64e__
+			if (!__builtin_available(iOS 18.0, *) && jbclient_roothide_jailbroken()) {
+				dyld_hook_routine(*gAPIsPtr, 13, (void *)&dyld_dlopen_hook, (void **)&dyld_dlopen_orig, 0xBF31);
+				dyld_hook_routine(*gAPIsPtr, 17, (void *)&dyld_dlopen_preflight_hook, (void **)&dyld_dlopen_preflight_orig, 0xB1B6);
+				dyld_hook_routine(*gAPIsPtr, 92, (void *)&dyld_dlopen_from_hook, (void **)&dyld_dlopen_from_orig, 0xD48C);
+				dyld_hook_routine(*gAPIsPtr, 93, (void *)&dyld_dlopen_audited_hook, (void **)&dyld_dlopen_audited_orig, 0xD2A5);
+			}
+			#endif
 		}
 	}
 
