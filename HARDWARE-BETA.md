@@ -816,3 +816,56 @@ errores concretos de arranque/dyld de Sileo y Zebra. No intentar reinicios,
 reinstalar OpenSSH, cambiar claves, desbloquear servicios, regenerar launchd
 plists ni limpiar `.safe_mode` para recopilar esa evidencia. No recoger ni
 difundir contraseñas, claves privadas, fuentes privadas o datos personales.
+
+### Revisión adicional de ownership Mach posterior a `0953980` (solo host)
+
+Al contrastar el helper de respuesta de `execTrace` con
+`libsyscall/mach/mach_msg.c` de XNU, se corrigió un caso de liberación
+potencialmente duplicada: después de `MACH_SEND_INVALID_DEST`,
+`MACH_SEND_TIMED_OUT` o `MACH_SEND_INTERRUPTED` la respuesta no enviada todavía
+conserva su destino, pero **otros fallos de envío pueden haber consumido parte
+de sus derechos en el kernel**. Se libera el destino solo en los tres casos
+recuperables y se destruyen siempre los descriptores recibidos del request.
+Para el resto de errores se evita adivinar el ownership; XNU reconoce que
+puede existir una fuga no recuperable. El arnés C del helper real inyecta ahora
+éxito, tres errores recuperables y dos no recuperables; no simula Mach de iOS.
+
+`thread_get_state` únicamente se utilizaba para imprimir el PC, pero en
+`0953980` su error se convirtió inadvertidamente en `KERN_FAILURE` sin
+desregistrar el trazado ni completar `ptrace`. Ahora un fallo de telemetría
+registra PC desconocido y deja que la excepción siga el manejo habitual; una
+prueba de contrato comprueba que no se abandona ese camino. La validación
+de identificadores y descriptores MIG para mensajes malformados, así como la
+restauración de handlers tras fallos asíncronos, siguen pendientes de una
+revisión con entorno Darwin real. No se activa ningún nuevo consumidor de
+`execTrace`. Estos ajustes **no constituyen una solución física probada** para
+OpenSSH, NewTerm, tweaks ni gestores, y no justifican por sí solos otra IPA.
+
+### Corrección activa del constructor `systemhook` tras r180
+
+El análisis encontró un fallo de memoria comprobable en una ruta real de
+inicialización: `parse_dyldhook_jbinfo` pasa el `uuid_t` binario de 16 bytes de
+dyld a `string_has_prefix`, cuya implementación invoca `strlen` y puede leer
+fuera del array si el UUID no contiene NUL. La comparación del marcador
+`DOPA` se hace ahora mediante `memcmp` de cuatro bytes. Un test compila y
+ejecuta el predicado C de producción con UUID válidos e inválidos, incluyendo
+16 bytes no terminados y un prefijo incompleto. No cambia la marca de dyld ni
+se introduce una operación privilegiada nueva en el constructor.
+
+La corrección elimina ese acceso potencialmente inválido, pero **no acredita**
+por sí misma la carga de `systemhook` en el iPhone. En particular, el código
+actual del probe devuelve 81 si falta el marcador que se escribe *después* de
+check-in y de obtener la ruta ejecutable; ese mismo código puede aparecer si
+el constructor entró y abandonó prematuramente por alguno de esos dos pasos.
+Por tanto, tratar 81 como «constructor no acreditado», no como demostración
+inequívoca de que dyld nunca cargó la biblioteca. La distinción real exige
+evidencia del dispositivo, no otro cambio global de inyección.
+
+En la reparación voluntaria del plist OpenSSH se corrigió también la
+validación del listener: el esquema de `launch.h` utiliza `SockPassive`,
+pero el verificador consultaba `SocketPassive`. Antes se podía aceptar un
+socket declarado expresamente `SockPassive=false`; ahora se rechaza, igual
+que UDP o un socket ajeno. La ausencia de esa clave sigue permitida para los
+plists Procursus normales. El test de contrato contrasta el nombre con el
+header incluido en el repositorio. No modifica ningún plist instalado salvo
+que el usuario invoque explícitamente la reparación tras sus otras guardas.

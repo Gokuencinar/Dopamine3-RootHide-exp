@@ -88,9 +88,11 @@ static void finish_process_trace(trace_data_t* trace_data, bool success)
 }
 
 // Mach exception raise requests carry task/thread send rights as descriptors.
-// On successful send the reply consumes the request's send-once destination;
-// destroy the remaining received rights exactly once. On send failure,
-// mach_msg_destroy also disposes of the unconsumed reply right.
+// On successful send the reply consumes the request's send-once destination.
+// XNU only guarantees that the destination is still ours after INVALID_DEST,
+// TIMED_OUT or INTERRUPTED. Other send errors may have consumed it in-kernel:
+// never guess and deallocate that right twice. Request body rights are always
+// ours to destroy, regardless of the reply's send result.
 static mach_msg_return_t rh3_exec_trace_reply_and_destroy(mach_msg_header_t *msg,
                                                           __Reply__mach_exception_raise_t *reply)
 {
@@ -103,7 +105,10 @@ static mach_msg_return_t rh3_exec_trace_reply_and_destroy(mach_msg_header_t *msg
     mach_msg_return_t sent = mach_msg(&reply->Head, MACH_SEND_MSG | MACH_MSG_OPTION_NONE,
                                      reply->Head.msgh_size, 0, MACH_PORT_NULL,
                                      MACH_MSG_TIMEOUT_NONE, MACH_PORT_NULL);
-    if (sent == MACH_MSG_SUCCESS) msg->msgh_remote_port = MACH_PORT_NULL;
+    if (sent != MACH_SEND_INVALID_DEST && sent != MACH_SEND_TIMED_OUT &&
+        sent != MACH_SEND_INTERRUPTED) {
+        msg->msgh_remote_port = MACH_PORT_NULL;
+    }
     mach_msg_destroy(msg);
     return sent;
 }
@@ -143,17 +148,21 @@ static void* exception_server(void* arg)
             goto send_reply;
         }
 
+        // Reading the PC is diagnostic only. A failed state query must not
+        // turn an otherwise handleable SIGSTOP/SIGTRAP into an unhandled
+        // exception, leaving the existing trace record and ptrace state stale.
+        uint64_t pc = 0;
         arm_thread_state64_t threadState={0};
         mach_msg_type_number_t threadStateCount = ARM_THREAD_STATE64_COUNT;
         kr = thread_get_state(request->thread.name, ARM_THREAD_STATE64,
                               (thread_state_t)&threadState, &threadStateCount);
-        if (kr != KERN_SUCCESS || threadStateCount != ARM_THREAD_STATE64_COUNT) {
-            reply.RetCode = KERN_FAILURE;
-            goto send_reply;
+        if (kr == KERN_SUCCESS && threadStateCount == ARM_THREAD_STATE64_COUNT) {
+            __darwin_arm_thread_state64_ptrauth_strip(threadState);
+            pc = (uint64_t)__darwin_arm_thread_state64_get_pc(threadState);
+        } else {
+            JBLogDebug("exec trace: diagnostic thread_get_state unavailable pid=%d kr=%x count=%d\n",
+                       pid, kr, threadStateCount);
         }
-
-        __darwin_arm_thread_state64_ptrauth_strip(threadState);
-        uint64_t pc = (uint64_t)__darwin_arm_thread_state64_get_pc(threadState);
 
         JBLogDebug("pid=%d exception: type=%d ncode=%d code=0x%llX(%lld) subcode=0x%llX(%lld) thread=%x pc=%p\n", pid, request->exception, request->codeCnt,
             request->codeCnt >= 1 ? request->code[0] : 0, request->codeCnt >= 1 ? request->code[0] : 0,

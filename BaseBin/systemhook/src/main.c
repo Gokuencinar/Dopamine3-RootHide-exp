@@ -7,6 +7,7 @@
 #include <sys/stat.h>
 #include <paths.h>
 #include <errno.h>
+#include <string.h>
 #include <util.h>
 #include <ptrauth.h>
 #include <libjailbreak/jbclient_xpc.h>
@@ -446,6 +447,14 @@ const struct mach_header_64 *get_dyld_mach_header(void)
 	return dyldMachHeader;
 }
 
+// LC_UUID is exactly 16 binary bytes, not a NUL-terminated C string. The
+// Dopamine marker occupies only its first four bytes. Do not use strlen (or
+// any string helper) on the UUID during every systemhook constructor call.
+static bool rh3_is_dopamine_dyld_uuid(const uuid_t uuid)
+{
+    return memcmp(uuid, "DOPA", 4) == 0;
+}
+
 int parse_dyldhook_jbinfo(char **jbRootPathOut, char **bootUUIDOut, char **sandboxExtensionsOut, bool *fullyDebuggedOut)
 {
 	// Get dyld header
@@ -455,7 +464,7 @@ int parse_dyldhook_jbinfo(char **jbRootPathOut, char **bootUUIDOut, char **sandb
 	// Check if dyld LC_UUID contains dopamine magic
 	uuid_t dyldUUID;
 	if (!_dyld_get_image_uuid((const struct mach_header *)dyldHeader, dyldUUID)) return -2;
-	if (!string_has_prefix((char *)dyldUUID, "DOPA")) return -3;
+	if (!rh3_is_dopamine_dyld_uuid(dyldUUID)) return -3;
 
 	// If so, get __jbinfo section
 	size_t jbInfoSize = 0;

@@ -6,6 +6,7 @@ ROOT = Path(__file__).resolve().parents[2]
 ENV = (ROOT / "Application/Dopamine/Jailbreak/DOEnvironmentManager.m").read_text(encoding="utf-8")
 UI = (ROOT / "Application/Dopamine/UI/Settings/DOSettingsController.m").read_text(encoding="utf-8")
 HEADER = (ROOT / "Application/Dopamine/Jailbreak/DOEnvironmentManager.h").read_text(encoding="utf-8")
+LAUNCH_HEADER = (ROOT / "BaseBin/_external/include/launch.h").read_text(encoding="utf-8")
 
 
 class SSHSocketDiagnosisR161(unittest.TestCase):
@@ -20,7 +21,11 @@ class SSHSocketDiagnosisR161(unittest.TestCase):
         self.assertIn('isEqualToString:@"stream"', validator)
         self.assertIn('socket[@"SockProtocol"]', validator)
         self.assertIn('isEqualToString:@"tcp"', validator)
-        self.assertIn('socket[@"SocketPassive"]', validator)
+        self.assertIn('#define LAUNCH_JOBSOCKETKEY_PASSIVE "SockPassive"', LAUNCH_HEADER)
+        self.assertIn('socket[@"SockPassive"]', validator)
+        self.assertNotIn('socket[@"SocketPassive"]', validator)
+        self.assertLess(validator.index('socket[@"SockPassive"]'),
+                        validator.index('((NSDictionary *)entry)[@"SockServiceName"]'))
         self.assertIn('![passive boolValue]', validator)
 
     def setUp(self):

@@ -732,7 +732,9 @@ static BOOL RH3SSHValidateSingleSocket(id entry, NSUInteger *port22, NSUInteger 
     id sockProtocol = socket[@"SockProtocol"];
     if (sockProtocol && (![sockProtocol isKindOfClass:NSString.class] ||
                          ![[sockProtocol lowercaseString] isEqualToString:@"tcp"])) return NO;
-    id passive = socket[@"SocketPassive"];
+    // launch.h specifies SockPassive (not SocketPassive). Reject an
+    // explicitly active listener before opting in to rewrite its SSH job.
+    id passive = socket[@"SockPassive"];
     if (passive && (![passive isKindOfClass:NSNumber.class] || ![passive boolValue])) return NO;
     id service = ((NSDictionary *)entry)[@"SockServiceName"];
     NSString *name = [service isKindOfClass:NSString.class] ? service :

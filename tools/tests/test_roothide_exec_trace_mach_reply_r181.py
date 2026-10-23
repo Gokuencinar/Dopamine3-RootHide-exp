@@ -39,20 +39,24 @@ typedef struct {mach_msg_header_t Head;} __Reply__mach_exception_raise_t;
 #define MACH_SEND_MSG 1
 #define MACH_MSG_OPTION_NONE 0
 #define MACH_MSG_TIMEOUT_NONE 0
+#define MACH_SEND_INVALID_DEST 0x10000003
+#define MACH_SEND_TIMED_OUT 0x10000004
+#define MACH_SEND_INTERRUPTED 0x10000007
+#define MACH_SEND_INVALID_RIGHT 0x1000000a
+#define MACH_SEND_TOO_LARGE 0x1000000e
 #define MACH_MSGH_BITS_REMOTE(x) ((x)&0xff)
 #define MACH_MSGH_BITS(r,l) ((r)|((l)<<8))
-static int message_sends, message_destroys, fail_send, wrong_destroy_port;
-static mach_port_t destination, destroyed_port;
+static int message_sends, message_destroys, error_code, wrong_destroy_port;
+static mach_port_t destination, destroyed_port, expected_destroyed_port;
 static mach_msg_return_t mach_msg(mach_msg_header_t *m,int options,unsigned send,
                   unsigned rcv,mach_port_t name,int timeout,mach_port_t notify) {
  (void)options;(void)send;(void)rcv;(void)name;(void)timeout;(void)notify;
  message_sends++;destination=m->msgh_remote_port;
- return fail_send?15:MACH_MSG_SUCCESS;
+ return error_code;
 }
 static void mach_msg_destroy(mach_msg_header_t *m) {
  message_destroys++; destroyed_port=m->msgh_remote_port;
- if ((!fail_send && destroyed_port!=0) || (fail_send && destroyed_port!=17))
-   wrong_destroy_port=1;
+ if (destroyed_port!=expected_destroyed_port) wrong_destroy_port=1;
 }
 #define CHECK(x) do {if(!(x)){fprintf(stderr,"line %d: %s\n",__LINE__,#x);return 1;}}while(0)
 '''
@@ -64,10 +68,19 @@ int main(void) {
  CHECK(message_sends==1 && message_destroys==1 && !wrong_destroy_port);
  CHECK(destination==17 && destroyed_port==0 && request.msgh_remote_port==0);
  CHECK(reply.Head.msgh_id==2500 && reply.Head.msgh_remote_port==17);
- request.msgh_remote_port=17;request.msgh_bits=19;fail_send=1;
- CHECK(rh3_exec_trace_reply_and_destroy(&request,&reply)!=MACH_MSG_SUCCESS);
- CHECK(message_sends==2 && message_destroys==2 && !wrong_destroy_port);
- CHECK(destination==17 && destroyed_port==17 && request.msgh_remote_port==17);
+ const int recoverable[]={MACH_SEND_INVALID_DEST,MACH_SEND_TIMED_OUT,MACH_SEND_INTERRUPTED};
+ for(unsigned i=0;i<sizeof(recoverable)/sizeof(recoverable[0]);i++) {
+   request.msgh_remote_port=17;error_code=recoverable[i];expected_destroyed_port=17;
+   CHECK(rh3_exec_trace_reply_and_destroy(&request,&reply)==error_code);
+   CHECK(destination==17 && destroyed_port==17 && request.msgh_remote_port==17);
+ }
+ const int nonrecoverable[]={MACH_SEND_INVALID_RIGHT,MACH_SEND_TOO_LARGE};
+ for(unsigned i=0;i<sizeof(nonrecoverable)/sizeof(nonrecoverable[0]);i++) {
+   request.msgh_remote_port=17;error_code=nonrecoverable[i];expected_destroyed_port=0;
+   CHECK(rh3_exec_trace_reply_and_destroy(&request,&reply)==error_code);
+   CHECK(destination==17 && destroyed_port==0 && request.msgh_remote_port==0);
+ }
+ CHECK(message_sends==6 && message_destroys==6 && !wrong_destroy_port);
  return 0;
 }
 '''
@@ -90,6 +103,15 @@ int main(void) {
         self.assertIn("send_reply:", server)
         self.assertIn("rh3_exec_trace_reply_and_destroy(msg, &reply)", server)
         self.assertIn("request->codeCnt >= 2", server)
+
+    def test_thread_state_diagnostics_never_abandon_trace_before_handling_signal(self):
+        source = SRC.read_text(encoding="utf-8")
+        server = source.split("static void* exception_server(", 1)[1].split(
+            "int execTraceProcess(pid_t pid, uint64_t traced)", 1)[0]
+        state_section = server.split("kr = thread_get_state(", 1)[1].split("[trace_data_lock lock]", 1)[0]
+        self.assertIn("kr == KERN_SUCCESS && threadStateCount == ARM_THREAD_STATE64_COUNT", state_section)
+        self.assertNotIn("goto send_reply;", state_section)
+        self.assertNotIn("reply.RetCode = KERN_FAILURE;", state_section)
 
 
 if __name__ == "__main__":
