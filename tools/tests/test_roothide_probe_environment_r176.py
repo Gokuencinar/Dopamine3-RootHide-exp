@@ -53,11 +53,13 @@ int main(void) {
     char *parent[]={"A=one","DISABLE_TWEAKS=1","DYLD_IN_CACHE=1",
         "DYLD_INSERT_LIBRARIES=/unrelated.dylib", "_SafeMode=1", "_MSSafeMode=1",
         "DYLD_IN_CACHE=4", "Z=two", "RH3_TWEAK_PROBE_SYSTEMHOOK=1",
-        "RH3_TWEAK_PROBE_LOADER=1",NULL};
+        "RH3_TWEAK_PROBE_LOADER=1", "RH3_TWEAK_PROBE_TARGET=bad",
+        "RH3_TWEAK_PROBE_ENTERED=1", "RH3_TWEAK_PROBE_CHECKIN=1", NULL};
     char **e=NULL;
     const char *hook="/var/containers/Bundle/Application/.jbroot-0123456789ABCDEF/basebin/systemhook.dylib";
     CHECK(rh3_probe_env_build(parent,hook,&e)==0 && e);
     CHECK(has(e,"DYLD_IN_CACHE=0"));
+    CHECK(has(e,"RH3_TWEAK_PROBE_TARGET=1"));
     CHECK(has(e,"A=one") && has(e,"Z=two"));
     CHECK(count_prefix(e,"DYLD_IN_CACHE=")==1);
     CHECK(count_prefix(e,"DYLD_INSERT_LIBRARIES=")==1);
@@ -66,6 +68,9 @@ int main(void) {
     CHECK(count_prefix(e,"_MSSafeMode=")==0);
     CHECK(count_prefix(e,"RH3_TWEAK_PROBE_SYSTEMHOOK=")==0);
     CHECK(count_prefix(e,"RH3_TWEAK_PROBE_LOADER=")==0);
+    CHECK(count_prefix(e,"RH3_TWEAK_PROBE_TARGET=")==1);
+    CHECK(count_prefix(e,"RH3_TWEAK_PROBE_ENTERED=")==0);
+    CHECK(count_prefix(e,"RH3_TWEAK_PROBE_CHECKIN=")==0);
     CHECK(strstr(e[0],hook)!=NULL && !strcmp(parent[2],"DYLD_IN_CACHE=1"));
     rh3_probe_env_free(e);
     e=(char**)0x1;

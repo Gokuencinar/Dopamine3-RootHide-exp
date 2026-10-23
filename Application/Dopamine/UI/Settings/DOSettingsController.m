@@ -21,6 +21,7 @@
 #import "DOPSJetsamListItemsController.h"
 #import "DOButtonCell.h"
 #include <errno.h>
+#include <unistd.h>
 
 #ifndef RH3_FULL_APP_EXPERIMENTAL
 #define RH3_FULL_APP_EXPERIMENTAL 0
@@ -30,6 +31,7 @@
 // still be running, so closing its progress alert must not permit a duplicate.
 static BOOL gRootHideAppsRefreshInFlight = NO;
 static BOOL gRootHideProviderRepairInFlight = NO;
+static BOOL gRootHideFullDiagnosisInFlight = NO;
 
 @interface DOSettingsController ()
 
@@ -363,30 +365,18 @@ static BOOL gRootHideProviderRepairInFlight = NO;
                         [repairProvider setProperty:@"wrench.adjustable" forKey:@"image"];
                         [repairProvider setProperty:@"repairRootHideLibkrwPressed" forKey:@"action"];
                         [specifiers addObject:repairProvider];
-                        PSSpecifier *diagnoseRuntime = [PSSpecifier preferenceSpecifierNamed:@"Diagnosticar tweaks, NewTerm y SSH" target:self set:defSetter get:defGetter detail:nil cell:PSStaticTextCell edit:nil];
-                        [diagnoseRuntime setProperty:[DOButtonCell class] forKey:@"cellClass"];
-                        [diagnoseRuntime setProperty:buttonHeight forKey:@"height"];
-                        [diagnoseRuntime setProperty:@"stethoscope" forKey:@"image"];
-                        [diagnoseRuntime setProperty:@"diagnoseRootHideRuntimePressed" forKey:@"action"];
-                        [specifiers addObject:diagnoseRuntime];
-                        PSSpecifier *probeTweaks = [PSSpecifier preferenceSpecifierNamed:@"Verificar carga real de tweaks" target:self set:defSetter get:defGetter detail:nil cell:PSStaticTextCell edit:nil];
-                        [probeTweaks setProperty:[DOButtonCell class] forKey:@"cellClass"];
-                        [probeTweaks setProperty:buttonHeight forKey:@"height"];
-                        [probeTweaks setProperty:@"checkmark.shield" forKey:@"image"];
-                        [probeTweaks setProperty:@"verifyRootHideTweaksPressed" forKey:@"action"];
-                        [specifiers addObject:probeTweaks];
+                        PSSpecifier *diagnoseAll = [PSSpecifier preferenceSpecifierNamed:@"Diagnóstico integral RootHide3 (un botón)" target:self set:defSetter get:defGetter detail:nil cell:PSStaticTextCell edit:nil];
+                        [diagnoseAll setProperty:[DOButtonCell class] forKey:@"cellClass"];
+                        [diagnoseAll setProperty:buttonHeight forKey:@"height"];
+                        [diagnoseAll setProperty:@"stethoscope" forKey:@"image"];
+                        [diagnoseAll setProperty:@"diagnoseRootHideAllPressed" forKey:@"action"];
+                        [specifiers addObject:diagnoseAll];
                         PSSpecifier *repairSSH = [PSSpecifier preferenceSpecifierNamed:@"Reparar OpenSSH en RootHide (con respaldo)" target:self set:defSetter get:defGetter detail:nil cell:PSStaticTextCell edit:nil];
                         [repairSSH setProperty:[DOButtonCell class] forKey:@"cellClass"];
                         [repairSSH setProperty:buttonHeight forKey:@"height"];
                         [repairSSH setProperty:@"key.horizontal" forKey:@"image"];
                         [repairSSH setProperty:@"repairRootHideSSHPressed" forKey:@"action"];
                         [specifiers addObject:repairSSH];
-                        PSSpecifier *sshSocket = [PSSpecifier preferenceSpecifierNamed:@"Diagnosticar arranque de OpenSSH (solo lectura)" target:self set:defSetter get:defGetter detail:nil cell:PSStaticTextCell edit:nil];
-                        [sshSocket setProperty:[DOButtonCell class] forKey:@"cellClass"];
-                        [sshSocket setProperty:buttonHeight forKey:@"height"];
-                        [sshSocket setProperty:@"waveform.path.ecg" forKey:@"image"];
-                        [sshSocket setProperty:@"diagnoseRootHideOpenSSHSocketPressed" forKey:@"action"];
-                        [specifiers addObject:sshSocket];
                     }
                 }
 
@@ -863,6 +853,60 @@ static BOOL gRootHideProviderRepairInFlight = NO;
             [self presentViewController:done animated:YES completion:nil];
         }]];
     [self presentViewController:confirm animated:YES completion:nil];
+}
+
+- (void)diagnoseRootHideAllPressed
+{
+    // Without an appendable sandbox log, a successful-looking share would
+    // only return an old attempt with none of the requested new diagnostics.
+    int diagnosticFD = [[DOUIManager sharedInstance] rh3CopyDiagnosticFD];
+    if (diagnosticFD < 0) {
+        UIAlertController *unavailable = [UIAlertController alertControllerWithTitle:@"Registro no disponible"
+            message:@"No se puede añadir un informe a la última captura persistente. Puedes compartir el registro anterior desde el menú principal; no se ejecutará un diagnóstico que no pueda guardarse."
+            preferredStyle:UIAlertControllerStyleAlert];
+        [unavailable addAction:[UIAlertAction actionWithTitle:@"Aceptar" style:UIAlertActionStyleCancel handler:nil]];
+        [self presentViewController:unavailable animated:YES completion:nil];
+        return;
+    }
+    close(diagnosticFD);
+    if (gRootHideFullDiagnosisInFlight) {
+        UIAlertController *busy = [UIAlertController alertControllerWithTitle:@"Diagnóstico en curso"
+            message:@"Ya se está generando el informe. No se ejecutará una segunda recopilación."
+            preferredStyle:UIAlertControllerStyleAlert];
+        [busy addAction:[UIAlertAction actionWithTitle:@"Aceptar" style:UIAlertActionStyleCancel handler:nil]];
+        [self presentViewController:busy animated:YES completion:nil];
+        return;
+    }
+    gRootHideFullDiagnosisInFlight = YES;
+    UIAlertController *progress = [UIAlertController alertControllerWithTitle:@"Diagnóstico integral RootHide3"
+        message:@"Recopilando estado de jailbreak, hooks, gestores, NewTerm, tweaks y OpenSSH. Solo se ejecuta una prueba efímera de tweaks cuando el modo seguro lo permite; no se reparan servicios ni se reinicia el teléfono. Al terminar se abrirá un único archivo para compartir."
+        preferredStyle:UIAlertControllerStyleAlert];
+    [self presentViewController:progress animated:YES completion:nil];
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        int result = [[DOEnvironmentManager sharedManager] diagnoseRootHideComprehensive];
+        NSURL *report = [[DOUIManager sharedInstance] rh3PreviousDiagnosticURL];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            gRootHideFullDiagnosisInFlight = NO;
+            [progress dismissViewControllerAnimated:YES completion:^{
+                if (!report) {
+                    UIAlertController *failed = [UIAlertController alertControllerWithTitle:@"No se pudo exportar el diagnóstico"
+                        message:[NSString stringWithFormat:@"La recopilación devolvió %d y no hay archivo compartible. No se ha modificado el bootstrap.", result]
+                        preferredStyle:UIAlertControllerStyleAlert];
+                    [failed addAction:[UIAlertAction actionWithTitle:@"Aceptar" style:UIAlertActionStyleCancel handler:nil]];
+                    [self presentViewController:failed animated:YES completion:nil];
+                    return;
+                }
+                // The existing persistent log includes boot history plus all
+                // sections collected now. No manual copying or second button.
+                UIActivityViewController *share = [[UIActivityViewController alloc]
+                    initWithActivityItems:@[report] applicationActivities:nil];
+                share.popoverPresentationController.sourceView = self.view;
+                share.popoverPresentationController.sourceRect = CGRectMake(
+                    CGRectGetMidX(self.view.bounds), CGRectGetMidY(self.view.bounds), 1, 1);
+                [self presentViewController:share animated:YES completion:nil];
+            }];
+        });
+    });
 }
 
 - (void)diagnoseRootHideRuntimePressed

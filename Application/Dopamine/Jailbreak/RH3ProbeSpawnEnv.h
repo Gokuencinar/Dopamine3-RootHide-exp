@@ -17,7 +17,8 @@ static inline int rh3_probe_env_is_override(const char *entry)
     static const char *const keys[] = {
         "DYLD_INSERT_LIBRARIES=", "DYLD_IN_CACHE=", "DISABLE_TWEAKS=",
         "_SafeMode=", "_MSSafeMode=", "RH3_TWEAK_PROBE_SYSTEMHOOK=",
-        "RH3_TWEAK_PROBE_LOADER="
+        "RH3_TWEAK_PROBE_LOADER=", "RH3_TWEAK_PROBE_TARGET=",
+        "RH3_TWEAK_PROBE_ENTERED=", "RH3_TWEAK_PROBE_CHECKIN="
     };
     for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
         if (!strncmp(entry, keys[i], strlen(keys[i]))) return 1;
@@ -26,7 +27,7 @@ static inline int rh3_probe_env_is_override(const char *entry)
 }
 
 // The caller must verify the absolute systemhook path is a trusted file
-// within the active hidden root. Only the two first elements are owned; all
+// within the active hidden root. Only the three first elements are owned; all
 // other strings point at the parent's immutable environment values.
 static inline int rh3_probe_env_build(char *const parent[], const char *systemhook,
                                       char ***environmentOut)
@@ -42,18 +43,19 @@ static inline int rh3_probe_env_build(char *const parent[], const char *systemho
         if (++count > 4096) return E2BIG;
         if (!rh3_probe_env_is_override(parent[i])) kept++;
     }
-    char **result = calloc(kept + 3, sizeof(*result));
+    char **result = calloc(kept + 4, sizeof(*result));
     if (!result) return ENOMEM;
     static const char prefix[] = "DYLD_INSERT_LIBRARIES=";
     result[0] = malloc(sizeof(prefix) + pathLen);
     result[1] = strdup("DYLD_IN_CACHE=0");
-    if (!result[0] || !result[1]) {
-        free(result[0]); free(result[1]); free(result);
+    result[2] = strdup("RH3_TWEAK_PROBE_TARGET=1");
+    if (!result[0] || !result[1] || !result[2]) {
+        free(result[0]); free(result[1]); free(result[2]); free(result);
         return ENOMEM;
     }
     memcpy(result[0], prefix, sizeof(prefix) - 1);
     memcpy(result[0] + sizeof(prefix) - 1, systemhook, pathLen + 1);
-    size_t out = 2;
+    size_t out = 3;
     for (size_t i = 0; parent && parent[i]; i++) {
         if (!rh3_probe_env_is_override(parent[i])) result[out++] = parent[i];
     }
@@ -67,6 +69,7 @@ static inline void rh3_probe_env_free(char **environment)
     if (!environment) return;
     free(environment[0]);
     free(environment[1]);
+    free(environment[2]);
     free(environment);
 }
 

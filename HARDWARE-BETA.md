@@ -869,3 +869,43 @@ que UDP o un socket ajeno. La ausencia de esa clave sigue permitida para los
 plists Procursus normales. El test de contrato contrasta el nombre con el
 header incluido en el repositorio. No modifica ningún plist instalado salvo
 que el usuario invoque explícitamente la reparación tras sus otras guardas.
+
+### Diagnóstico integral de un solo botón a partir de los registros físicos r180
+
+Los tres registros del mismo intento `b00ad15` del 23/10/2026 demuestran que
+launchdhook de PID 1 completó el reinicio y jailbreakd autenticó su check-in.
+En cambio, `rh3tweakprobe` tuvo resultado `81` después de preparar el entorno,
+confiar el ejecutable y obtener éxito del parcheo del hijo: eso **no** demuestra
+que dyld cargara el constructor. OpenSSH mostraba el programa del plist esperado,
+`disabled_override=enabled`, `state=not_running`, `runs=0` y sin PID, aun cuando
+la sustitución atómica del plist de disco se completó antes del reinicio.
+`CS_INSTALLER=0` corresponde a la app abierta tras el reinicio y **no** revierte
+la preparación previa. Zebra informó `spawn=0`, PID válido y hook en entorno,
+pero no hay prueba de carga efectiva ni de UI. No se ha descubierto aún el
+fallo físico exacto de SSH, Zebra, Sileo o NewTerm.
+
+En **Ajustes → Diagnóstico integral RootHide3 (un botón)** se reúnen en la
+captura persistente existente la identidad del bootstrap activo, presencia y
+cabecera Mach-O de BaseBin, dyldhook/systemhook, TweakLoader, SSH y `login`,
+base de datos dpkg, bundles, visibilidad del registro de aplicaciones, estado
+safe-mode/watchdog/AppGroup, metadatos de sshd y lectura acotada del trabajo
+real `com.openssh.sshd` de launchd. El probe firmado se ejecuta una sola vez
+únicamente si el modo seguro efectivo lo permite: **esto crea/parchea un hijo
+efímero** para medir el hook; las demás secciones son observaciones pasivas.
+Si falla una sección se conservan las posteriores. La app abre **directamente
+la hoja Compartir** con el único `.log` que contiene tanto el arranque como
+el diagnóstico actual, sin copiar resultados de cada botón. Si no está
+disponible un descriptor persistente escribible, se avisa y no se comparte
+falsamente un archivo antiguo como resultado nuevo.
+
+El probe diferencia ahora `81` (sin marca de entrada), `83` (entró al
+constructor, no confirmó check-in), `84` (confirmó check-in pero no alcanzó
+la fase del ejecutable), `82` (llegó a systemhook, falta confirmar TweakLoader)
+y `0` (cargador abierto). Además, confía específicamente el dylib inyectado
+del bootstrap verificado antes del spawn, sin ampliar políticas globales.
+Estas marcas solo prueban etapas en el hijo efímero: el resultado 81 **aún no
+garantiza** que el dylib no se haya mapeado. No se fuerzan tweaks ni se
+reactiva SSH; no se recopilan contraseñas, claves SSH, rutas privadas completas
+ni contenido de aplicaciones. Las sesiones reales de sshd, las interfaces de
+gestores y el error concreto de `login` siguen siendo *no medidos* cuando
+no hay informe de proceso/crash disponible.

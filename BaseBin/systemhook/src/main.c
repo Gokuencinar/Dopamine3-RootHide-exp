@@ -485,6 +485,12 @@ int parse_dyldhook_jbinfo(char **jbRootPathOut, char **bootUUIDOut, char **sandb
 
 __attribute__((constructor)) static void initializer(void)
 {
+	// A marker set solely on the disposable, verified probe tells us whether
+	// dyld entered this constructor at all. Keep it separate from check-in and
+	// executable-path resolution; result 81 previously conflated all three.
+	const char *probeTarget = getenv("RH3_TWEAK_PROBE_TARGET");
+	bool rh3DiagnosticProbe = probeTarget && !strcmp(probeTarget, "1");
+	if (rh3DiagnosticProbe) setenv("RH3_TWEAK_PROBE_ENTERED", "1", 1);
 	// Under normal circumstances, dyldhook will have already handled the check-in, so get the check-in information from the __jbinfo section
 	// For more information on the check-in process, check the comments in dyldhook
 	if (parse_dyldhook_jbinfo(&JB_RootPath, &JB_BootUUID, &JB_SandboxExtensions, &gFullyDebugged) != 0) {
@@ -500,7 +506,8 @@ __attribute__((constructor)) static void initializer(void)
 		}
 	}
 
-	// Unset DYLD_INSERT_LIBRARIES, but only if systemhook itself is the only thing contained in it
+		if (rh3DiagnosticProbe) setenv("RH3_TWEAK_PROBE_CHECKIN", "1", 1);
+		// Unset DYLD_INSERT_LIBRARIES, but only if systemhook itself is the only thing contained in it
 	// Feeable attempt at making jailbreak detection harder
 	const char *dyldInsertLibraries = getenv("DYLD_INSERT_LIBRARIES");
 	if (dyldInsertLibraries) {
@@ -633,7 +640,7 @@ __attribute__((constructor)) static void initializer(void)
 		}
 #endif
 		// Load tweaks if desired
-			bool rh3Probe = string_has_suffix(gExecutablePath, "/basebin/rh3tweakprobe");
+				bool rh3Probe = rh3DiagnosticProbe && string_has_suffix(gExecutablePath, "/basebin/rh3tweakprobe");
 			if (rh3Probe) setenv("RH3_TWEAK_PROBE_SYSTEMHOOK", "1", 1);
 			if (should_enable_tweaks()) {
 				const char *tweakLoaderPath = JBROOT_PATH("/usr/lib/TweakLoader.dylib");

@@ -57,7 +57,7 @@ class RuntimeTweakSwitch(unittest.TestCase):
     def test_runtime_diagnostics_are_read_only_and_exclude_private_values(self):
         env = (ROOT / "Application/Dopamine/Jailbreak/DOEnvironmentManager.m").read_text(encoding="utf-8")
         body = env.split("- (int)diagnoseRootHideRuntime", 1)[1].split(
-            "// Explicit, opt-in repair for the OpenSSH", 1)[0]
+            "- (int)diagnoseRootHideComprehensive", 1)[0]
         self.assertIn('rootHideExistingRootWithError:&rootError', body)
         self.assertIn('jbclient_get_jbroot()', body)
         for name in ("tweak_safe_mode", "tweak_loader_present", "newterm_bundle_present",
@@ -72,8 +72,8 @@ class RuntimeTweakSwitch(unittest.TestCase):
                           "password", "sshd -D"):
             self.assertNotIn(forbidden, body)
         ui = (ROOT / "Application/Dopamine/UI/Settings/DOSettingsController.m").read_text(encoding="utf-8")
-        self.assertIn('@"Diagnosticar tweaks, NewTerm y SSH"', ui)
-        self.assertIn('diagnoseRootHideRuntimePressed', ui)
+        self.assertIn('Diagnóstico integral RootHide3 (un botón)', ui)
+        self.assertIn('diagnoseRootHideAllPressed', ui)
 
 
 if __name__ == "__main__":

@@ -34,10 +34,13 @@ class SSHSocketDiagnosisR161(unittest.TestCase):
         )[0]
 
     def test_ui_is_separate_explicit_action(self):
-        self.assertIn('@"Diagnosticar arranque de OpenSSH (solo lectura)"', UI)
-        self.assertIn('@"diagnoseRootHideOpenSSHSocketPressed"', UI)
+        # The unified UI runs the same bounded, read-only SSH diagnosis
+        # internally. The separately opt-in SSH *repair* remains distinct.
+        self.assertIn('Diagnóstico integral RootHide3 (un botón)', UI)
+        self.assertIn('@"diagnoseRootHideAllPressed"', UI)
+        self.assertIn('diagnoseRootHideOpenSSHSocket]', ENV)
         self.assertIn("diagnoseRootHideOpenSSHSocket;", HEADER)
-        self.assertIn("diagnoseRootHideOpenSSHSocket]", UI)
+        self.assertIn('@"repairRootHideSSHPressed"', UI)
 
     def test_only_readonly_fixed_launchctl_print(self):
         body = self.diagnostic
