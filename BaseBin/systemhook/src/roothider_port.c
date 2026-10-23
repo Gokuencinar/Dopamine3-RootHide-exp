@@ -112,7 +112,8 @@ static int rh3_load_rooted_patch(const char *root)
     const char *compat = JBROOT_PATH("/var/jb");
     struct stat compatStat = {0};
     if (!compat || !rh3_trust_is_active_root_child(compat, root) ||
-        lstat(compat, &compatStat) != 0 || !S_ISLNK(compatStat.st_mode))
+        lstat(compat, &compatStat) != 0 || !S_ISLNK(compatStat.st_mode) ||
+        compatStat.st_uid != 0 || compatStat.st_nlink != 1)
         return EACCES;
     // Trust is mediated by the existing dyld hook when active. Do not add a
     // second synchronous trust XPC request to an executable's constructor:

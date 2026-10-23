@@ -28,6 +28,7 @@ class RootHidePatchRuntimeLoader(unittest.TestCase):
         self.assertNotIn('jbclient_trust_library_recurse(', loader)
         self.assertIn('rh3_trust_looks_like_macho(patch)', loader)
         self.assertIn('S_ISLNK(compatStat.st_mode)', loader)
+        self.assertIn('compatStat.st_uid != 0', loader)
         self.assertIn('return dlopen(patch, RTLD_NOW) ? 0 : EIO', loader)
         main = (ROOT / 'BaseBin/systemhook/src/main.c').read_text(encoding='utf-8')
         self.assertIn('roothide_prepare_process(', main)
@@ -83,6 +84,8 @@ static int fake_lstat(const char *p, struct stat *st) {
         if (scenario == 11) {errno = ENOENT;return -1;}
         memset(st,0,sizeof(*st));
         st->st_mode = (scenario == 12 ? S_IFREG : S_IFLNK) | 0755;
+        st->st_uid = scenario == 14 ? 501 : 0;
+        st->st_nlink = scenario == 15 ? 2 : 1;
         return 0;
     }
     if (strcmp(p, patchPath) || scenario == 5) {errno = ENOENT;return -1;}
@@ -118,7 +121,7 @@ int main(void) {
         if ((scenario==5 && result!=0) || (scenario!=5 && result==0)) return 50+scenario;
         if (opened) return 10 + scenario;
     }
-    for (scenario = 9; scenario <= 13; scenario++) {
+    for (scenario = 9; scenario <= 15; scenario++) {
         opened = 0;if (rh3_load_rooted_patch(root)==0) return 60+scenario;
         if (opened) return 20 + scenario;
     }
