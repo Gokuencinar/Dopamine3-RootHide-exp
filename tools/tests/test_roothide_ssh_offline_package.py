@@ -69,7 +69,7 @@ class OfflineRootHideSSH(unittest.TestCase):
         self.assertIn('KbdInteractiveAuthentication no', build)
         self.assertIn('PermitEmptyPasswords no', build)
 
-    def test_inspect_receipts_no_reinstall_on_existing_or_partial_roots(self):
+    def test_inspect_receipts_resumes_only_verified_partial_packages(self):
         env = source("Application/Dopamine/Jailbreak/DOEnvironmentManager.m")
         section = env.split('- (int)rh3InstallPinnedOpenSSHBeforeImport', 1)[1].split(
             '- (int)rh3GenerateMissingOpenSSHHostKeyBeforeImport', 1)[0]
@@ -78,7 +78,12 @@ class OfflineRootHideSSH(unittest.TestCase):
         self.assertIn('Status: install ok installed', section)
         self.assertIn('if (installed == packages.count)', section)
         self.assertIn('if (installed != 0)', section)
-        self.assertIn('return EEXIST;', section)
+        self.assertIn('state == RH3SSHAbsent ?', section)
+        self.assertIn('if (state == RH3SSHInstalled) continue;', section)
+        self.assertIn('openat(infoDirectory, listName.fileSystemRepresentation', section)
+        self.assertIn('inventoryError = EEXIST', section)
+        self.assertIn('RH3SSHReadInstalledReceiptMask(root, &finalMask)', section)
+        self.assertIn('if (checkResult || finalMask != 7)', section)
         self.assertIn('CommonCrypto/CommonDigest', env)
         self.assertNotIn('curl', section)
         self.assertNotIn('apt-get', section)

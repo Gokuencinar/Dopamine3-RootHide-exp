@@ -1855,49 +1855,154 @@ static int RH3DiagnosticMachMagic(NSString *path)
         @{ @"name":@"roothide_ssh_server_safe_1900.deb", @"package":@"openssh-server",
            @"sha":@"ccd27b95690071f181dfb3869d59b721efa1e27e0ab6f0c8c5937f29e9bd7bfd" },
     ];
+    // The r211 attempt can leave client installed and the next package
+    // unpacked/absent. Dpkg owns the recovery state; reinstalling all three
+    // packages could overwrite an existing sshd_config or user-owned files.
+    // Permit only exact pinned receipts and validate the package's OWN files
+    // and dpkg .list before deciding how to complete each package.
+    enum { RH3SSHAbsent = 0, RH3SSHInstalled = 1,
+           RH3SSHUnpacked = 2, RH3SSHHalfConfigured = 3 };
+    NSArray<NSArray<NSString *> *> *footprints = @[
+        @[@"etc/ssh/ssh_config", @"usr/bin/ssh-keygen"],
+        @[@"usr/libexec/sftp-server"],
+        @[@"usr/sbin/sshd", @"etc/ssh/sshd_config",
+          @"Library/LaunchDaemons/com.openssh.sshd.plist"]
+    ];
+    // Existing host keys are NEVER package payloads. They remain authoritative
+    // and are checked separately before any absent key is generated.
+    NSString *infoDirectoryPath = [root stringByAppendingPathComponent:@"Library/dpkg/info"];
+    for (NSString *suffix in @[@"Library", @"Library/dpkg", @"Library/dpkg/info",
+                               @"etc", @"usr", @"usr/bin", @"usr/libexec", @"usr/sbin",
+                               @"Library/LaunchDaemons", @"etc/ssh"]) {
+        int dir = open([root stringByAppendingPathComponent:suffix].fileSystemRepresentation,
+                       O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        if (dir < 0) {
+            // etc/ssh is absent on a pristine 1900 bootstrap.
+            if (errno == ENOENT && [suffix isEqualToString:@"etc/ssh"]) continue;
+            return errno;
+        }
+        struct stat st = {0};
+        int err = fstat(dir, &st) ? errno : 0;
+        close(dir);
+        BOOL trustedLibrary = [suffix isEqualToString:@"Library"] &&
+                              st.st_gid == 0 && (st.st_mode & 0777) == 0775;
+        if (err) return err;
+        if (!S_ISDIR(st.st_mode) || st.st_uid != 0 || (st.st_mode & S_IWOTH) ||
+            ((st.st_mode & S_IWGRP) && !trustedLibrary)) return EPERM;
+    }
+    int infoDirectory = open(infoDirectoryPath.fileSystemRepresentation,
+                             O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (infoDirectory < 0) return errno;
+    // All reads use O_NOFOLLOW and bounded, root-owned inputs. Fail closed on
+    // any duplicate stanza, another package version, or an ambiguous dpkg
+    // state such as half-installed, triggers-pending or config-files.
+    NSMutableArray<NSNumber *> *states = [NSMutableArray new];
     NSString *statusPath = [root stringByAppendingPathComponent:@"Library/dpkg/status"];
     int statusFD = open(statusPath.fileSystemRepresentation, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
-    if (statusFD < 0) return errno;
+    if (statusFD < 0) { int err = errno; close(infoDirectory); return err; }
     struct stat statusInfo = {0};
     int statusError = fstat(statusFD, &statusInfo) ? errno : 0;
     if (!statusError && (!S_ISREG(statusInfo.st_mode) || statusInfo.st_uid != 0 ||
         statusInfo.st_nlink != 1 || (statusInfo.st_mode & 022) ||
         statusInfo.st_size < 128 || statusInfo.st_size > 512 * 1024)) statusError = EPERM;
     NSMutableData *statusBytes = statusError ? nil : [NSMutableData dataWithLength:(NSUInteger)statusInfo.st_size];
-    if (!statusError && (!statusBytes ||
-        pread(statusFD, statusBytes.mutableBytes, statusBytes.length, 0) != (ssize_t)statusBytes.length))
-        statusError = EIO;
+    if (!statusError && !statusBytes) statusError = ENOMEM;
+    NSUInteger offset = 0;
+    while (!statusError && offset < statusBytes.length) {
+        ssize_t amount = pread(statusFD, (uint8_t *)statusBytes.mutableBytes + offset,
+                               statusBytes.length - offset, (off_t)offset);
+        if (amount > 0) offset += (NSUInteger)amount;
+        else if (amount < 0 && errno == EINTR) continue;
+        else statusError = amount == 0 ? EIO : errno;
+    }
     close(statusFD);
-    if (statusError) return statusError;
+    if (statusError) { close(infoDirectory); return statusError; }
     NSString *status = [[NSString alloc] initWithData:statusBytes encoding:NSUTF8StringEncoding];
-    if (!status) return EILSEQ;
+    if (!status) { close(infoDirectory); return EILSEQ; }
     NSArray<NSString *> *records = [status componentsSeparatedByString:@"\n\n"];
     NSUInteger installed = 0;
-    for (NSDictionary *package in packages) {
+    int inventoryError = 0;
+    for (NSUInteger i = 0; i < packages.count && !inventoryError; i++) {
+        NSDictionary *package = packages[i];
         NSString *prefix = [@"Package: " stringByAppendingFormat:@"%@\n", package[@"package"]];
+        NSUInteger matches = 0;
+        NSInteger state = RH3SSHAbsent;
         for (NSString *record in records) {
             if (![record hasPrefix:prefix]) continue;
-            if ([record containsString:@"\nStatus: install ok installed"]) installed++;
-            break;
+            if (++matches != 1) { inventoryError = EEXIST; break; }
+            NSString *fields = [record stringByAppendingString:@"\n"];
+            if (![fields containsString:@"\nVersion: 9.2p1\n"] ||
+                ![fields containsString:@"\nArchitecture: iphoneos-arm64e\n"]) {
+                inventoryError = EEXIST; break;
+            }
+            if ([fields containsString:@"\nStatus: install ok installed\n"])
+                state = RH3SSHInstalled;
+            else if ([fields containsString:@"\nStatus: install ok unpacked\n"])
+                state = RH3SSHUnpacked;
+            else if ([fields containsString:@"\nStatus: install ok half-configured\n"])
+                state = RH3SSHHalfConfigured;
+            else { inventoryError = EEXIST; break; }
         }
+        if (inventoryError) break;
+        if (state == RH3SSHInstalled) installed++;
+        NSString *listName = [package[@"package"] stringByAppendingString:@".list"];
+        int listFD = openat(infoDirectory, listName.fileSystemRepresentation,
+                            O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+        NSData *listBytes = nil;
+        if (state == RH3SSHAbsent) {
+            if (listFD >= 0) inventoryError = EEXIST;
+            else if (errno != ENOENT) inventoryError = errno;
+        } else {
+            struct stat listInfo = {0};
+            if (listFD < 0) inventoryError = EEXIST;
+            else if (fstat(listFD, &listInfo) || !S_ISREG(listInfo.st_mode) ||
+                     listInfo.st_uid != 0 || listInfo.st_nlink != 1 ||
+                     (listInfo.st_mode & 022) || listInfo.st_size < 32 ||
+                     listInfo.st_size > 65536) inventoryError = EEXIST;
+            else listBytes = RH3SSHReadBounded(listFD, listInfo.st_size);
+            if (!inventoryError && !listBytes) inventoryError = EIO;
+        }
+        if (listFD >= 0) close(listFD);
+        NSString *list = listBytes ?
+            [[[NSString alloc] initWithData:listBytes encoding:NSUTF8StringEncoding]
+                stringByAppendingString:@"\n"] : nil;
+        if (state != RH3SSHAbsent && !list) inventoryError = EILSEQ;
+        for (NSString *suffix in footprints[i]) {
+            if (inventoryError) break;
+            NSString *path = [root stringByAppendingPathComponent:suffix];
+            struct stat file = {0};
+            int found = lstat(path.fileSystemRepresentation, &file);
+            if (state == RH3SSHAbsent) {
+                if (found == 0) inventoryError = EEXIST;
+                else if (errno != ENOENT) inventoryError = errno;
+            } else {
+                // Require a complete manifest line; a substring inside some
+                // other filename is not evidence that dpkg owns this inode.
+                NSString *listed = [NSString stringWithFormat:@"\n/%@\n", suffix];
+                BOOL executable = [suffix hasSuffix:@"/sshd"] ||
+                    [suffix hasSuffix:@"/ssh-keygen"] || [suffix hasSuffix:@"/sftp-server"];
+                if (found != 0 || !S_ISREG(file.st_mode) || file.st_uid != 0 ||
+                    (file.st_mode & 022) || (executable && !(file.st_mode & S_IXUSR)) ||
+                    file.st_size < 32 || ![list containsString:listed]) inventoryError = EEXIST;
+            }
+        }
+        if (!inventoryError) [states addObject:@(state)];
+    }
+    close(infoDirectory);
+    if (inventoryError) {
+        [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
+            [NSString stringWithFormat:@"SSH packages: partial-state inventory conflict (%d); existing files preserved",
+             inventoryError]];
+        return inventoryError;
     }
     if (installed == packages.count) {
         [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:@"SSH packages: already installed; existing configuration preserved"];
         return 0;
     }
     if (installed != 0) {
-        [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:@"SSH packages: partial installed state; refusing automatic retry"];
-        return EEXIST;
-    }
-    // A pre-existing daemon, config, key or service plist may be user-owned or
-    // from a previous incomplete setup. Never replace it by accident.
-    for (NSString *suffix in @[@"etc/ssh", @"usr/sbin/sshd",
-                               @"usr/bin/ssh-keygen",
-                               @"Library/LaunchDaemons/com.openssh.sshd.plist"]) {
-        struct stat existing = {0};
-        if (lstat([root stringByAppendingPathComponent:suffix].fileSystemRepresentation, &existing) == 0)
-            return EEXIST;
-        if (errno != ENOENT) return errno;
+        [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
+            [NSString stringWithFormat:@"SSH packages: recoverable partial receipts installed=%lu; preserving installed packages",
+             (unsigned long)installed]];
     }
     NSMutableArray<NSString *> *verifiedPaths = [NSMutableArray new];
     for (NSDictionary *package in packages) {
@@ -1914,17 +2019,48 @@ static int RH3DiagnosticMachMagic(NSString *path)
         if (![hash isEqualToString:package[@"sha"]]) return EBADMSG;
         [verifiedPaths addObject:path];
     }
-    [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:@"SSH packages: three pinned offline payloads verified; dpkg transaction starting"];
-    int result = exec_cmd_trusted(JBROOT_PATH("/usr/bin/dpkg"), "-i",
-                                  verifiedPaths[0].fileSystemRepresentation,
-                                  verifiedPaths[1].fileSystemRepresentation,
-                                  verifiedPaths[2].fileSystemRepresentation, NULL);
+    // Install only genuinely absent packages; configure unpacked ones in
+    // dependency order. Never use --force, --configure -a or -i on an installed
+    // package (in particular never overwrite an existing sshd_config).
+    for (NSUInteger i = 0; i < packages.count; i++) {
+        NSInteger state = states[i].integerValue;
+        if (state == RH3SSHInstalled) continue;
+        const char *name = [packages[i][@"package"] UTF8String];
+        [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
+            [NSString stringWithFormat:@"SSH packages: verified offline %lu/3; step=%s",
+             (unsigned long)(i + 1), state == RH3SSHAbsent ? "install_absent" : "configure_unpacked"]];
+        int result = state == RH3SSHAbsent ?
+            exec_cmd_trusted(JBROOT_PATH("/usr/bin/dpkg"), "-i",
+                             verifiedPaths[i].fileSystemRepresentation, NULL) :
+            exec_cmd_trusted(JBROOT_PATH("/usr/bin/dpkg"), "--configure", name, NULL);
+        [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
+            [NSString stringWithFormat:@"SSH packages: dpkg step=%lu result=%d; no service started",
+             (unsigned long)(i + 1), result]];
+        if (result) return result; // Preserve the precise dpkg state for another attempt.
+    }
+    NSUInteger finalMask = 0;
+    int checkResult = RH3SSHReadInstalledReceiptMask(root, &finalMask);
+    if (checkResult || finalMask != 7) {
+        [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
+            [NSString stringWithFormat:@"SSH packages: transaction incomplete read=%d receipt_mask=%lu; preserving state",
+             checkResult, (unsigned long)finalMask]];
+        return checkResult ?: EIO;
+    }
+    for (NSArray<NSString *> *files in footprints) {
+        for (NSString *suffix in files) {
+            struct stat file = {0};
+            NSString *path = [root stringByAppendingPathComponent:suffix];
+            BOOL executable = [suffix hasSuffix:@"/sshd"] ||
+                [suffix hasSuffix:@"/ssh-keygen"] || [suffix hasSuffix:@"/sftp-server"];
+            if (lstat(path.fileSystemRepresentation, &file) != 0 ||
+                !S_ISREG(file.st_mode) || file.st_uid != 0 || (file.st_mode & 022) ||
+                (executable && !(file.st_mode & S_IXUSR)) || file.st_size < 32)
+                return EIO;
+        }
+    }
     [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
-        [NSString stringWithFormat:@"SSH packages: dpkg result=%d; package scripts do not start the service", result]];
-    // If dpkg fails or ends with a partial receipt, preserve its entire state
-    // for inspection. Repeating the package transaction is deliberately NOT
-    // automatic. The next attempt will detect existing SSH paths and stop.
-    return result;
+        @"SSH packages: all three pinned receipts and payload paths verified; existing keys/config untouched"];
+    return 0;
 }
 
 - (int)rh3GenerateMissingOpenSSHHostKeyBeforeImport
@@ -2401,10 +2537,12 @@ static int RH3DiagnosticMachMagic(NSString *path)
     int preflight = [self rh3PerformPrivilegedAction:^int {
         NSError *error = nil;
         root = [DOBootstrapper rootHideExistingRootWithError:&error];
-        const char *serverRoot = jbclient_get_jbroot();
+        // The cached jbclient_get_jbroot() may still refer to the previous
+        // randomized brand, giving a false EPERM before launchd is inspected.
+        NSString *serverRoot = RH3SSHCurrentServerRoot();
         if (error || !root || !serverRoot ||
             ![RH3CanonicalAppPath(root) isEqualToString:
-              RH3CanonicalAppPath([NSString stringWithUTF8String:serverRoot])]) return EPERM;
+              RH3CanonicalAppPath(serverRoot)]) return EPERM;
         packageStatus = RH3SSHReadInstalledReceiptMask(root, &packageMask);
         struct stat entry = {0};
         NSString *sshd = [root stringByAppendingPathComponent:@"usr/sbin/sshd"];
