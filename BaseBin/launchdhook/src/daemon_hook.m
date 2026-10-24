@@ -11,6 +11,10 @@
 #import <Foundation/Foundation.h>
 #import <litehook.h>
 
+// This is evidence only of a candidate offered to launchd's dictionary,
+// never proof of a loaded job, bound socket or SSH-2.0 banner.
+static volatile int rh3SSHLaunchdDictionarySeen = 0;
+
 void xpc_dictionary_add_launch_daemon_plist_at_path(xpc_object_t xdict, const char *path)
 {
 	// Import must not block PID 1 when a malformed package has installed a
@@ -41,9 +45,14 @@ void xpc_dictionary_add_launch_daemon_plist_at_path(xpc_object_t xdict, const ch
 				// for a later import; its effective timing is unverified.
 				// Ignore malformed/non-job plists instead of giving launchd a
 				// foreign XPC type. The required Label is not rewritten.
-				if (xpc_get_type(daemonXdict) == XPC_TYPE_DICTIONARY &&
-				    xpc_dictionary_get_string(daemonXdict, "Label") != NULL)
+				const char *label = xpc_get_type(daemonXdict) == XPC_TYPE_DICTIONARY ?
+				    xpc_dictionary_get_string(daemonXdict, "Label") : NULL;
+				if (label) {
 					xpc_dictionary_set_value(xdict, path, daemonXdict);
+					if (!strcmp(label, "com.openssh.sshd") &&
+					    __sync_bool_compare_and_swap(&rh3SSHLaunchdDictionarySeen, 0, 1))
+						rh3_bootlog("launchd: OpenSSH plist added to launchd dictionary; live job/socket not proved");
+				}
 				// Under -fobjc-arc, xpc_object_t is an Objective-C OS object:
 				// ARC releases this local at scope exit. xpc_dictionary_set_value
 				// keeps its own reference. An explicit xpc_release is forbidden
