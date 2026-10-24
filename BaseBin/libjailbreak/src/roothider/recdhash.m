@@ -186,7 +186,9 @@ int ensure_randomized_cdhash_for_slice(const char* inputPath, uint64_t offset, v
 	int existing = rh3_existing_branded_cdhash(inputPath, offset, cdhashOut);
 	if (existing != 0) return existing > 0 ? 0 : -1;
 
-    Fat* fat = fat_init_for_writing(inputPath);
+    // Do not open an executable O_RDWR just to inspect its signature. On
+    // iOS 16 a writable vnode open can prevent that image from launching.
+    Fat* fat = fat_init_from_path(inputPath);
     if (!fat) {
 		JBLogError("Error: failed to init fat: %s\n", inputPath);
 		return -1;
@@ -302,67 +304,102 @@ int ensure_randomized_cdhash_for_slice(const char* inputPath, uint64_t offset, v
 			}
 		}
 
-		// Validate page geometry/hash type through the bounded consumer before
-		// the first on-disk mutation. Unsupported signatures stay untouched.
-		CS_CodeDirectory codeDir;
-		if(csd_blob_read(bestCDBlob, 0, sizeof(CS_CodeDirectory), &codeDir) != 0) {
-			JBLogError("Error: failed to read code directory: %s\n", inputPath);
-			break;
-		}
+		// Reject an already-invalid library rather than rebranding its broken
+		// CodeDirectory and adding a CDHash that will still fail page validation.
+		CS_CodeDirectory codeDir = {0};
+		if (csd_blob_read(bestCDBlob, 0, sizeof(codeDir), &codeDir) != 0) break;
 		CODE_DIRECTORY_APPLY_BYTE_ORDER(&codeDir, BIG_TO_HOST_APPLIER);
-		uint8_t pageHash[CC_SHA384_DIGEST_LENGTH];
-		if (!code_directory_calculate_page_hash(&codeDir, macho, 0, pageHash)) {
-			JBLogError("Error: unsupported code page layout: %s\n", inputPath);
+		uint8_t oldHash[CC_SHA384_DIGEST_LENGTH] = {0};
+		uint8_t pageHash[CC_SHA384_DIGEST_LENGTH] = {0};
+		uint64_t codeLimit = codeDir.codeLimit;
+		uint64_t firstPageSize = codeDir.pageSize < 32 ?
+		    (codeDir.pageSize ? UINT64_C(1) << codeDir.pageSize : codeLimit) : 0;
+		if (firstPageSize > codeLimit) firstPageSize = codeLimit;
+		if (!jbinfo(jbrand) || !firstPageSize ||
+		    firstsectoffset > firstPageSize ||
+		    sizeof(firstsection) > firstPageSize - firstsectoffset ||
+		    codeDir.hashSize == 0 || codeDir.hashSize > sizeof(oldHash) ||
+		    codeDir.hashOffset > codeDir.length ||
+		    codeDir.hashSize > codeDir.length - codeDir.hashOffset ||
+		    !code_directory_calculate_page_hash(&codeDir, macho, 0, pageHash) ||
+		    csd_blob_read(bestCDBlob, codeDir.hashOffset, codeDir.hashSize, oldHash) != 0 ||
+		    memcmp(pageHash, oldHash, codeDir.hashSize) != 0) {
+			JBLogError("Error: unsupported code page layout: refusing invalid Mach-O: %s", inputPath);
 			break;
 		}
-		*rd2 = jbinfo(jbrand);
-
-		JBLogDebug("randomize cdhash with %016llX: %s\n", *rd2, inputPath);
-
-		if(memory_stream_write(fat->stream, macho->archDescriptor.offset + firstsectoffset, sizeof(firstsection), &firstsection) != 0) {
-			JBLogError("Error: failed to write macho file: %s\n", inputPath);
-			break;
-		}
-
-		if(!code_directory_calculate_page_hash(&codeDir, macho, 0, pageHash)) {
-			JBLogError("Error: failed to calculate page hash: %s\n", inputPath);
-			break;
-		}
-
+		// Locate the CodeDirectory slot inside the *declared* LC_CODE_SIGNATURE,
+		// rather than trusting index offsets from a separately parsed SuperBlob.
+		uint64_t hashOffset = 0;
+		uint64_t directoryOffset = 0;
 		for (uint32_t i = 0; i < BIG_TO_HOST(superblob->count); i++) {
-			CS_BlobIndex curIndex = superblob->index[i];
-			BLOB_INDEX_APPLY_BYTE_ORDER(&curIndex, BIG_TO_HOST_APPLIER);
-			//JBLogDebug("decoding %u (type: %x, offset: 0x%x)\n", i, curIndex.type, curIndex.offset);
-
-			if(curIndex.type == bestCDBlob->type)
-			{
-				if(0 != memory_stream_write(fat->stream, macho->archDescriptor.offset + linkedit.dataoff + curIndex.offset + codeDir.hashOffset, codeDir.hashSize, pageHash)) {
-					JBLogError("Error: failed to write page hash: %s\n", inputPath);
-					break;
-				}
-
-				void* newCDBlob = malloc(codeDir.length);
-				if (!newCDBlob) {
-					JBLogError("Error: failed to allocate code directory: %s\n", inputPath);
-					break;
-				}
-
-				if(memory_stream_read(fat->stream, macho->archDescriptor.offset + linkedit.dataoff + curIndex.offset, codeDir.length, newCDBlob) == 0)
-				{
-					retval = calc_cdhash(newCDBlob, codeDir.length, csd_code_directory_get_hash_type(bestCDBlob), cdhashOut);
-					if(retval != 0) {
-						JBLogError("Error: failed to calculate cdhash: %s\n", inputPath);
-					}
-				}
-				else
-				{
-					JBLogError("Error: failed to read new code directory: %s\n", inputPath);
-				}
-
-				free(newCDBlob);
-
+			CS_BlobIndex index = superblob->index[i];
+			BLOB_INDEX_APPLY_BYTE_ORDER(&index, BIG_TO_HOST_APPLIER);
+			if (index.type == bestCDBlob->type && index.offset <= linkedit.datasize &&
+			    codeDir.length <= linkedit.datasize - index.offset &&
+			    codeDir.hashOffset <= codeDir.length &&
+			    codeDir.hashSize <= codeDir.length - codeDir.hashOffset) {
+				directoryOffset = (uint64_t)linkedit.dataoff + index.offset;
+				hashOffset = macho->archDescriptor.offset + directoryOffset + codeDir.hashOffset;
 				break;
 			}
+		}
+		if (!hashOffset || directoryOffset > macho->archDescriptor.size ||
+		    codeDir.length > macho->archDescriptor.size - directoryOffset) break;
+
+		// Open writable only after validation and compare the exact original
+		// section and signature to prevent rebranding a changed file.
+		Fat *writable = fat_init_for_writing(inputPath);
+		if (!writable) break;
+		MachO *writableSlice = fat_find_slice_by_offset(writable, macho->archDescriptor.offset);
+		struct section_64 observedSection = {0};
+		CS_SuperBlob *observedSignature =
+		    writableSlice ? rh3_verified_code_signature(writableSlice) : NULL;
+		bool unchanged = observedSignature &&
+		    BIG_TO_HOST(observedSignature->length) == BIG_TO_HOST(superblob->length) &&
+		    memcmp(observedSignature, superblob, BIG_TO_HOST(superblob->length)) == 0 &&
+		    macho_read_at_offset(writableSlice, firstsectoffset,
+		                         sizeof(observedSection), &observedSection) == 0 &&
+		    memcmp(&observedSection, &firstsection, sizeof(firstsection)) == 0;
+		free(observedSignature);
+		if (!unchanged) {
+			fat_free(writable);
+			break;
+		}
+		fat_free(fat);
+		fat = writable;
+		macho = writableSlice;
+
+		struct section_64 originalSection = firstsection;
+		*rd2 = jbinfo(jbrand);
+		uint64_t sectionOffset = macho->archDescriptor.offset + firstsectoffset;
+		bool sectionWritten = memory_stream_write(fat->stream, sectionOffset,
+		                                           sizeof(firstsection), &firstsection) == 0;
+		if (sectionWritten && code_directory_calculate_page_hash(&codeDir, macho, 0, pageHash) &&
+		    memory_stream_write(fat->stream, hashOffset, codeDir.hashSize, pageHash) == 0) {
+			void *newCDBlob = malloc(codeDir.length);
+			if (newCDBlob) {
+				uint8_t observedPageHash[CC_SHA384_DIGEST_LENGTH] = {0};
+				if (memory_stream_read(fat->stream, macho->archDescriptor.offset + directoryOffset,
+				                       codeDir.length, newCDBlob) == 0 &&
+					    memcmp((uint8_t *)newCDBlob + codeDir.hashOffset,
+					           pageHash, codeDir.hashSize) == 0 &&
+					    code_directory_calculate_page_hash(&codeDir, macho, 0, observedPageHash) &&
+				    memcmp(pageHash, observedPageHash, codeDir.hashSize) == 0) {
+					retval = calc_cdhash(newCDBlob, codeDir.length,
+					                     csd_code_directory_get_hash_type(bestCDBlob), cdhashOut);
+				}
+				free(newCDBlob);
+			}
+		}
+		if (retval != 0) {
+			// Best-effort rollback of *both* linked writes, including a partial
+			// first write. Never upload trustcache entries for this file on error.
+			int restoreSection = memory_stream_write(fat->stream, sectionOffset,
+			                                         sizeof(originalSection), &originalSection);
+			int restoreHash = memory_stream_write(fat->stream, hashOffset,
+			                                      codeDir.hashSize, oldHash);
+			JBLogError("Mach-O signature update failed (%d/%d rollback): %s",
+			           restoreSection, restoreHash, inputPath);
 		}
 
 	} while(0);

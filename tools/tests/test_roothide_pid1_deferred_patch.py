@@ -53,6 +53,15 @@ int main(void) {
     if (rh3_pid1_selected_child("/tmp/usr/sbin/sshd",NULL,ssh)) return 13;
     if (rh3_pid1_selected_child("/usr/libexec/xpcproxy.evil",newterm,ssh)) return 14;
     if (rh3_pid1_selected_child("/usr/libexec/xpcproxy",newterm,NULL)==0) return 15;
+    if (!rh3_pid1_selected_child("/var/containers/Bundle/Application/.jbroot-0123456789ABCDEF/Applications/Sileo.app/Sileo",NULL,ssh)) return 16;
+    if (!rh3_pid1_selected_child("/var/containers/Bundle/Application/.jbroot-0123456789ABCDEF/Applications/Zebra.app/Zebra",NULL,ssh)) return 17;
+    if (!rh3_pid1_selected_child("/var/containers/Bundle/Application/.jbroot-0123456789ABCDEF/Applications/RootHide.app/RootHide",NULL,ssh)) return 18;
+    if (!rh3_pid1_selected_child("/var/containers/Bundle/Application/.jbroot-0123456789ABCDEF/Applications/NewTerm.app/NewTerm",NULL,ssh)) return 19;
+    if (rh3_pid1_selected_child("/var/containers/Bundle/Application/.jbroot-OTHER/Applications/Sileo.app/Sileo",NULL,ssh)) return 20;
+    if (rh3_pid1_selected_child("/var/containers/Bundle/Application/.jbroot-0123456789ABCDEF/Applications/Sileo.app/Sileo.evil",NULL,ssh)) return 21;
+    if (rh3_pid1_selected_child("/var/containers/Bundle/Application/.jbroot-0123456789ABCDEF/Applications/Unsafe.app/Unsafe",NULL,ssh)) return 22;
+    if (rh3_pid1_selected_child("/Applications/Sileo.app/Sileo",NULL,ssh)) return 23;
+    if (!rh3_pid1_selected_child("/private/var/containers/Bundle/Application/.jbroot-0123456789ABCDEF/Applications/Sileo.app/Sileo",NULL,ssh)) return 24;
     return 0;
 }
 '''
@@ -66,6 +75,14 @@ int main(void) {
             self.assertEqual(compile_.returncode, 0, compile_.stderr)
             result = subprocess.run([str(exe)], capture_output=True, text=True, timeout=10)
             self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_direct_app_selection_is_bound_to_active_root(self):
+        source = HEADER.read_text(encoding='utf-8')
+        for fixed in ('/Applications/Sileo.app/Sileo', '/Applications/Zebra.app/Zebra',
+                      '/Applications/RootHide.app/RootHide', '/Applications/NewTerm.app/NewTerm'):
+            self.assertIn(fixed, source)
+        self.assertIn('rootSshd', source)
+        self.assertIn('strcmp(candidate + rootLength,', source)
 
     def test_pid1_is_never_blocked_on_patch_reply(self):
         src = LAUNCHD.read_text(encoding='utf-8')

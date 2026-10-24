@@ -132,8 +132,18 @@ int main(void) {
         self.assertRegex(entry, re.compile(
             r"int existing = rh3_existing_branded_cdhash\(inputPath, offset, cdhashOut\);"
             r"\s*if \(existing != 0\) return existing > 0 \? 0 : -1;"
-            r"\s*Fat\* fat = fat_init_for_writing\(inputPath\);"
         ))
+        # r198 library recovery now validates the unmodified CodeDirectory
+        # before opening writable. The original contract (fastpath first,
+        # no writable open for a known brand) must remain true.
+        self.assertLess(entry.index("int existing = rh3_existing_branded_cdhash("),
+                        entry.index("fat_init_from_path(inputPath)"))
+        self.assertLess(entry.index("fat_init_from_path(inputPath)"),
+                        entry.index("fat_init_for_writing(inputPath)"))
+        self.assertLess(entry.index("memcmp(pageHash, oldHash, codeDir.hashSize)"),
+                        entry.index("fat_init_for_writing(inputPath)"))
+        self.assertLess(entry.index("fat_init_for_writing(inputPath)"),
+                        entry.index("if (!unchanged)"))
 
     def test_existing_brand_uses_only_readonly_choma_and_validates_code_directory(self):
         source = SRC.read_text(encoding="utf-8")
