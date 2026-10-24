@@ -35,6 +35,7 @@
 #import "RootHideAppRegistration.h"
 #import "RootHideLSRecordStatus.h"
 #import <CoreServices/LSApplicationProxy.h>
+#import <objc/message.h>
 #import <signal.h>
 #import "RootHideForensics.h"
 extern char **environ;
@@ -1881,6 +1882,188 @@ static BOOL RH3AwaitExplicitLSCheck(int (^operation)(void), int *resultOut)
         return EAGAIN;
     }, &result);
     return finished ? result : ETIMEDOUT;
+}
+
+// Independent, unprivileged disk observation. This cannot inspect a bundle
+// hidden by the app's sandbox; a denied open is UNKNOWN, not an ID mismatch.
+// Use lstat + O_NOFOLLOW + inode comparison to avoid following a replaced
+// Info.plist. No owner, mode, file or package database is changed.
+static int RH3ObserveLSBundlePlist(NSString *root, NSString *bundleName, NSString *expectedID)
+{
+    if (![DOBootstrapper rootHideBrandForPath:root]) return -1;
+    NSString *bundle = [[root stringByAppendingPathComponent:@"Applications"]
+                        stringByAppendingPathComponent:bundleName];
+    NSString *plist = [bundle stringByAppendingPathComponent:@"Info.plist"];
+    struct stat directory = {0}, before = {0}, after = {0};
+    if (lstat(bundle.fileSystemRepresentation, &directory) != 0)
+        return errno == ENOENT ? 0 : -1;
+    if (!S_ISDIR(directory.st_mode)) return 3;
+    if (lstat(plist.fileSystemRepresentation, &before) != 0)
+        return errno == ENOENT ? 0 : -1;
+    if (!S_ISREG(before.st_mode) || before.st_nlink != 1 ||
+        before.st_size <= 0 || before.st_size > 65536) return 3;
+    int fd = open(plist.fileSystemRepresentation, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0) return -1;
+    int classification = -1;
+    if (fstat(fd, &after) == 0 && S_ISREG(after.st_mode) &&
+        after.st_dev == before.st_dev && after.st_ino == before.st_ino &&
+        after.st_size == before.st_size && after.st_uid == before.st_uid) {
+        NSMutableData *bytes = [NSMutableData dataWithLength:(NSUInteger)after.st_size];
+        if (bytes && pread(fd, bytes.mutableBytes, bytes.length, 0) == (ssize_t)bytes.length) {
+            NSDictionary *info = [NSPropertyListSerialization propertyListWithData:bytes
+                options:NSPropertyListImmutable format:NULL error:NULL];
+            if (![info isKindOfClass:NSDictionary.class]) classification = 3;
+            else if (![info[@"CFBundleIdentifier"] isEqual:expectedID]) classification = 2;
+            else {
+                NSString *executable = info[@"CFBundleExecutable"];
+                BOOL validExecutable = [executable isKindOfClass:NSString.class] &&
+                    executable.length > 0 && executable.length <= 128 &&
+                    [executable.lastPathComponent isEqualToString:executable];
+                classification = [info[@"CFBundlePackageType"] isEqual:@"APPL"] &&
+                                 validExecutable ? 1 : 3;
+            }
+        }
+    }
+    close(fd);
+    // -1 unavailable, 0 ENOENT (not proof of physical absence),
+    // 1 exact pinned identity and app type,
+    // 2 wrong identifier, 3 malformed/unsafe metadata. No raw values logged.
+    return classification;
+}
+
+// An LSApplicationProxy placeholder need not represent an installed app.
+// Probe a fixed system control plus the supported workspace enumeration API,
+// independent of the identifier factory. Both surfaces may talk to the same
+// lsd, so disagreement suggests query/caching inconsistency but agreement
+// does NOT prove why lsd failed to publish a RootHide app.
+static NSDictionary<NSString *, NSNumber *> *RH3ObserveLSQuerySurfaces(NSArray<NSString *> *ids,
+                                                                        NSString *root)
+{
+    LSApplicationProxy *settings = [LSApplicationProxy applicationProxyForIdentifier:@"com.apple.Preferences"];
+    BOOL controlVisible = settings.installed && settings.bundleURL.path.length > 0;
+    id ownIdentifier = NSBundle.mainBundle.bundleIdentifier;
+    LSApplicationProxy *ownApp = [ownIdentifier isKindOfClass:NSString.class]
+        ? [LSApplicationProxy applicationProxyForIdentifier:ownIdentifier] : nil;
+    BOOL ownVisible = ownApp.installed && ownApp.bundleURL.path.length > 0;
+    __block NSUInteger enumerated = 0, identified = 0;
+    __block BOOL truncated = NO, supported = NO, exception = NO;
+    NSMutableSet<NSString *> *foundIDs = [NSMutableSet set];
+    NSMutableSet<NSString *> *foundPaths = [NSMutableSet set];
+    @try {
+        Class type = NSClassFromString(@"LSApplicationWorkspace");
+        SEL getter = NSSelectorFromString(@"defaultWorkspace");
+        id workspace = type && [type respondsToSelector:getter]
+            ? ((id (*)(id, SEL))objc_msgSend)(type, getter) : nil;
+        SEL iterator = NSSelectorFromString(@"enumerateApplicationsOfType:block:");
+        if (workspace && [workspace respondsToSelector:iterator]) {
+            supported = YES;
+            // This selector is present in the checked-in private header; 0
+            // is logged as the *requested type*, not assumed to mean 'all'.
+            ((void (*)(id, SEL, NSUInteger, id))objc_msgSend)(workspace, iterator, 0,
+                ^(id record) {
+                    if (enumerated >= 2048) { truncated = YES; return; }
+                    enumerated++;
+                    SEL idSelector = NSSelectorFromString(@"applicationIdentifier");
+                    if (![record respondsToSelector:idSelector])
+                        idSelector = NSSelectorFromString(@"bundleIdentifier");
+                    NSString *identifier = [record respondsToSelector:idSelector]
+                        ? ((id (*)(id, SEL))objc_msgSend)(record, idSelector) : nil;
+                    if ([identifier isKindOfClass:NSString.class]) {
+                        identified++;
+                        if ([ids containsObject:identifier]) [foundIDs addObject:identifier];
+                    }
+                    if ([record respondsToSelector:@selector(bundleURL)]) {
+                        NSURL *url = ((id (*)(id, SEL))objc_msgSend)(record, @selector(bundleURL));
+                        NSString *location = RH3CanonicalAppPath(url.path);
+                        for (NSUInteger i = 0; i < ids.count; i++) {
+                            NSString *expected = RH3CanonicalAppPath([[root stringByAppendingPathComponent:@"Applications"]
+                                                                       stringByAppendingPathComponent:
+                                                                       @[@"Sileo.app", @"Zebra.app", @"RootHide.app"][i]]);
+                            if (expected && [location isEqual:expected]) [foundPaths addObject:ids[i]];
+                        }
+                    }
+                });
+        }
+    } @catch (__unused NSException *caught) {
+        exception = YES;
+        supported = NO;
+    }
+    return @{
+        @"system_control_installed": @(controlVisible),
+        @"own_app_control_installed": @(ownVisible),
+        @"workspace_available": @(supported),
+        @"workspace_threw": @(exception),
+        @"workspace_type": @0,
+        @"workspace_seen": @(enumerated),
+        @"workspace_identified": @(identified),
+        @"workspace_truncated": @(truncated),
+        @"Sileo_id": @([foundIDs containsObject:ids[0]]),
+        @"Zebra_id": @([foundIDs containsObject:ids[1]]),
+        @"RootHide_id": @([foundIDs containsObject:ids[2]]),
+        @"Sileo_path": @([foundPaths containsObject:ids[0]]),
+        @"Zebra_path": @([foundPaths containsObject:ids[1]]),
+        @"RootHide_path": @([foundPaths containsObject:ids[2]]),
+    };
+}
+
++ (void)recordRootHideLaunchServicesDifferentialWithContext:(NSString *)context
+{
+    if (![DOBootstrapper rootHidePortEnabled]) return;
+    NSString *stage = [context isEqualToString:@"after-explicit-refresh"]
+        ? @"after-explicit-refresh" : @"full-diagnostic";
+    // Strictly read-only after the UI's privileged inventory has returned.
+    // The deadline limits the caller; a stuck private API has no permission
+    // to trigger a re-registration when it eventually returns.
+    __block NSDictionary *evidence = nil;
+    dispatch_group_t group = dispatch_group_create();
+    dispatch_group_async(group, dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{
+        @autoreleasepool {
+            xpc_object_t reply = jbserver_xpc_send(JBS_DOMAIN_SYSTEMWIDE,
+                                                  JBS_SYSTEMWIDE_GET_JBROOT, NULL);
+            const char *path = reply && xpc_get_type(reply) == XPC_TYPE_DICTIONARY
+                ? xpc_dictionary_get_string(reply, "root-path") : NULL;
+            NSString *root = path ? RH3CanonicalAppPath([NSString stringWithUTF8String:path]) : nil;
+            BOOL active = [DOBootstrapper rootHideBrandForPath:root] != 0;
+            NSArray<NSString *> *ids = @[@"org.coolstar.SileoStore", @"xyz.willy.Zebra",
+                                          @"com.roothide.manager"];
+            NSArray<NSString *> *bundles = @[@"Sileo.app", @"Zebra.app", @"RootHide.app"];
+            NSMutableDictionary *facts = active
+                ? [RH3ObserveLSQuerySurfaces(ids, root) mutableCopy]
+                : [NSMutableDictionary dictionary];
+            facts[@"active_root"] = @(active);
+            for (NSUInteger i = 0; i < ids.count; i++) {
+                NSString *key = [@[@"Sileo_plist", @"Zebra_plist", @"RootHide_plist"] objectAtIndex:i];
+                facts[key] = @(active ? RH3ObserveLSBundlePlist(root, bundles[i], ids[i]) : -1);
+            }
+            evidence = facts;
+        }
+    });
+    DOUIManager *log = [DOUIManager sharedInstance];
+    if (dispatch_group_wait(group, dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC)) != 0) {
+        [log rh3RecordDiagnosticStage:
+             [NSString stringWithFormat:@"LS differential: context=%@ result=deadline; no mutations", stage]];
+        return;
+    }
+    if (!evidence) {
+        [log rh3RecordDiagnosticStage:
+             [NSString stringWithFormat:@"LS differential: context=%@ result=unavailable; no mutations", stage]];
+        return;
+    }
+    // Only known app labels, counts and small status integers leave memory;
+    // never emit a path, arbitrary installed identifier or workspace object.
+    [log rh3RecordDiagnosticStage:[NSString stringWithFormat:
+        @"LS differential: context=%@ root_known=%d system_control_installed=%d own_app_control_installed=%d workspace_available=%d workspace_threw=%d enumerate_type=0 enumerated=%d identified=%d truncated=%d read_only=1",
+        stage, [evidence[@"active_root"] intValue], [evidence[@"system_control_installed"] intValue],
+        [evidence[@"own_app_control_installed"] intValue], [evidence[@"workspace_available"] intValue],
+        [evidence[@"workspace_threw"] intValue], [evidence[@"workspace_seen"] intValue],
+        [evidence[@"workspace_identified"] intValue], [evidence[@"workspace_truncated"] intValue]]];
+    for (NSString *name in @[@"Sileo", @"Zebra", @"RootHide"]) {
+        [log rh3RecordDiagnosticStage:[NSString stringWithFormat:
+            @"LS differential: context=%@ app=%@ installed_plist=%d workspace_id_seen=%d workspace_path_seen=%d (absence in type=0 enumeration is not LS refusal)",
+            stage, name, [evidence[[name stringByAppendingString:@"_plist"]] intValue],
+            [evidence[[name stringByAppendingString:@"_id"]] intValue],
+            [evidence[[name stringByAppendingString:@"_path"]] intValue]]];
+    }
 }
 
 - (NSError *)repairRootHideAppLinks

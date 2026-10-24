@@ -46,6 +46,8 @@ typedef NS_ENUM(NSInteger, BootstrapErrorCode) {
 + (nullable NSString *)rootHideExistingRootWithError:(NSError * _Nullable * _Nullable)error;
 + (uint64_t)rootHideBrandForPath:(NSString *)path;
 + (void)recordRootHideLaunchServicesSnapshotWithContext:(NSString *)context;
+// Additional read-only, bounded checks for incomplete LS records after -p.
++ (void)recordRootHideLaunchServicesDifferentialWithContext:(NSString *)context;
 // Read-only preflight/verification around the existing user-initiated
 // post-reexec uicache -p path. No package writes or background repair.
 + (int)preflightExplicitRootHideAppRefresh;

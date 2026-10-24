@@ -95,7 +95,7 @@ int main(void) {
             "- (void)repairRootHideLibkrwPressed", 1
         )[0]
         self.assertEqual(refresh.count("refreshJailbreakApps]"), 2)  # RootHide and stock paths
-        self.assertIn('if (result != ETIMEDOUT)\n'
+        self.assertIn('if (result != ETIMEDOUT) {\n'
                       '                    [DOBootstrapper recordRootHideLaunchServicesSnapshotWithContext:@"after-explicit-refresh"]',
                       refresh)
         self.assertLess(

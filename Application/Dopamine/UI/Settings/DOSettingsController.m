@@ -929,6 +929,7 @@ static BOOL gRootHideFullDiagnosisInFlight = NO;
         // the *active* randomized root after reexec, not with pre-reboot
         // uicache exit statuses. This diagnostic never re-registers a bundle.
         [DOBootstrapper recordRootHideLaunchServicesSnapshotWithContext:@"full-diagnostic"];
+        [DOBootstrapper recordRootHideLaunchServicesDifferentialWithContext:@"full-diagnostic"];
         NSURL *report = [[DOUIManager sharedInstance] rh3FinishUnifiedReportWithResult:result];
         dispatch_async(dispatch_get_main_queue(), ^{
             finished = YES;
@@ -1053,8 +1054,10 @@ static BOOL gRootHideFullDiagnosisInFlight = NO;
                 // Record LS outcome even on EAGAIN or a failed command; the
                 // previous success-only log suppressed the useful evidence.
                 // Do not duplicate a possibly hung LS lookup on timeout.
-                if (result != ETIMEDOUT)
+                if (result != ETIMEDOUT) {
                     [DOBootstrapper recordRootHideLaunchServicesSnapshotWithContext:@"after-explicit-refresh"];
+                    [DOBootstrapper recordRootHideLaunchServicesDifferentialWithContext:@"after-explicit-refresh"];
+                }
                 dispatch_async(dispatch_get_main_queue(), ^{
                     completed = YES;
                     // A child timeout does not establish that uicache exited.
@@ -1067,7 +1070,7 @@ static BOOL gRootHideFullDiagnosisInFlight = NO;
                         UIAlertController *alert = [UIAlertController alertControllerWithTitle:
                             result ? @"Registro de apps sin confirmar" : @"Registro de apps verificado"
                             message:result == EAGAIN && refreshCommandExitedZero
-                                ? @"uicache terminó, pero LaunchServices todavía no confirma los tres gestores. Comparte el diagnóstico. No se ha repetido automáticamente la operación."
+                                ? @"uicache terminó, pero LaunchServices sigue sin confirmar los tres gestores. No repitas esta actualización: comparte el diagnóstico integral para identificar el bloqueo."
                                 : (result == EEXIST
                                     ? @"Una app tiene un registro de otra ruta o un estado ambiguo. No se ha reemplazado ni borrado ese registro. Comparte el diagnóstico."
                                     : (result
