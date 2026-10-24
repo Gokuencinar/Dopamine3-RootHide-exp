@@ -52,6 +52,11 @@ class LaunchDaemonImport(unittest.TestCase):
 #define XPC_TYPE_DICTIONARY ((void*)0x15)
 typedef void* xpc_object_t;
 static int config, opened, mapped, parsed, released, inserted, closed, unmapped;
+static volatile int rh3SSHLaunchdDictionarySeen;
+static int sshDictionaryCheckpoints;
+static void rh3_bootlog(const char *message) {
+    if (message && strstr(message, "live job/socket not proved")) sshDictionaryCheckpoints++;
+}
 static const char data[] = "plist";
 static int fake_open(const char *path, int flags) {
     if (!(flags & O_NONBLOCK) || !(flags & O_CLOEXEC)) return -1;
@@ -101,6 +106,9 @@ static int run_case(int scenario, int eInsert, int eParse, int eRelease) {
 }
 int main(void) {
     if (run_case(0,1,1,0)) return 1; // valid package job; ARC owns local
+    if (sshDictionaryCheckpoints != 1) return 9;
+    if (run_case(0,1,1,0)) return 10; // same job may be offered twice
+    if (sshDictionaryCheckpoints != 1) return 11; // checkpoint is one-shot
     if (run_case(1,0,1,0)) return 2; // wrong XPC type
     if (run_case(2,0,1,0)) return 3; // missing required Label
     if (run_case(3,0,0,0)) return 4; // pipe: reject before mapping
