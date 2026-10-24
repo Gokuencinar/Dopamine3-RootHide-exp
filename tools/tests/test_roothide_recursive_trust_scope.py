@@ -12,6 +12,21 @@ MAIN = ROOT / "BaseBin/systemhook/src/main.c"
 
 
 class RecursiveTrustScope(unittest.TestCase):
+    def test_active_root_apt_dependency_trust_runs_even_with_private_dyld_patch(self):
+        src = MAIN.read_text(encoding="utf-8")
+        method = src.split("static int rh3_trust_before_spawn(", 1)[1].split(
+            "int __posix_spawn_hook(", 1)[0]
+        # The private-dyld mode must not suppress the APT method's recursive
+        # pretrust: the ordinary single-file trust misses libgnutls.@rpath.
+        recursion = method.index("jbclient_trust_executable_recurse(path, preferredArchs)")
+        self.assertIn("getpid() == 1", method[:recursion],
+                      "Never introduce synchronous trust-service IPC in PID1")
+        self.assertNotIn("jbclient_dyld_patch_enabled()", method[:recursion],
+                         "Mode selection must not bypass active-root dependency closure")
+        # Keep original dyld-mode policy for unrelated Apple/system jobs.
+        self.assertIn("if (jbclient_dyld_patch_enabled()) return 0;", method[recursion:])
+        self.assertIn("rh3_spawn_canonical_root_child(path, root)", method[:recursion])
+
     def test_actual_spawn_preflight_scopes_executable_but_not_inserted_libraries(self):
         src = MAIN.read_text(encoding="utf-8")
         method = src.split("static int rh3_trust_before_spawn(", 1)[1].split(

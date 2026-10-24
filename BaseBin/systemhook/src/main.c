@@ -366,13 +366,18 @@ static bool rh3_spawn_canonical_root_child(const char *path, const char *root)
 
 static int rh3_trust_before_spawn(const char *path, struct _posix_spawn_args_desc *desc, char *const envp[])
 {
-    // Do not introduce jailbreakd XPC in PID 1 or the dyld-patched phase.
-    if (!path || !rh3_has_authenticated_root() || jbclient_dyld_patch_enabled())
+    // Never synchronously call the trust service from PID1; it hosts the
+    // service and self-referential XPC can stall launchd.
+    if (!path || getpid() == 1 || !rh3_has_authenticated_root())
         return 0;
     const char *root = get_jbroot();
     if (!systemhook_is_roothide_root_path(root)) return 0;
     bool activeRootChild = rh3_trust_is_active_root_child(path, root);
     if (activeRootChild) {
+        // Recursively trust package dependencies even in private-dyld patch
+        // mode: otherwise the normal single-file spawn path only trusts the
+        // APT method binary, not its @rpath/libgnutls dependency. This path
+        // runs in a non-PID1 systemhook process, never launchd's spawn hook.
         // Only package-owned executables in the *current* hidden root need
         // recursive trust. Never trust an Apple executable or a symlink into
         // the stock OS/another root merely because a process spawns it.
@@ -387,6 +392,10 @@ static int rh3_trust_before_spawn(const char *path, struct _posix_spawn_args_des
             if (status) return status;
         }
     }
+    // Preserve the donor's no-extra-IPC policy for ordinary Apple/system
+    // processes while dyld-patch mode is active. Their inserted libraries
+    // still need to be trusted in non-patch mode as before.
+    if (jbclient_dyld_patch_enabled()) return 0;
     // Inserted RootHide libraries still require trust when the executable is
     // an ordinary UIKit app or system service outside the hidden root.
     return roothide_trust_injected_libraries(envp);

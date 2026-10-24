@@ -44,10 +44,23 @@ files, which have not been read or changed.
    verified. The `com.hbang.NewTerm` xpcproxy base label is recognized,
    alongside the existing `ws.hbang.Terminal` label. No new synchronous
    XPC or arbitrary Apple process policy is added.
+4. `systemhook/src/main.c`: for non-PID1 processes with an authenticated
+   RootHide root, invoke bounded recursive executable trust for a canonical,
+   rooted Mach-O even if `dyld_patch_enabled` is true. Previously the mode
+   toggle caused an early return: APT's `methods/http` was then given only
+   single-file pretrust and had to rely on private dyld's late library attach
+   for `libgnutls`. For unrelated Apple/system executables retain the
+   pre-existing no-extra-IPC behavior in dyld-patch mode. No synchronous
+   launchd/PID1 dependency traversal has been introduced. The physical
+   r198 mode value is unavailable: this is a verified conditional coverage
+   gap and targeted source correction, **not** proof it caused the incident.
 
 ## Verified locally
 
 - New source-contract regression tests failed before changing the code.
+- The systemhook/dyld-patch pretrust regression also failed before change
+  and passes when both mode states take rooted binaries through the same
+  exact-root identity and dependency-trust gate.
 - The packaged Mach-O test reads the **actual** immutable 1900 bootstrap
   archive and verifies the APT library dependencies and original page hashes.
   A deliberately altered in-memory `libgnutls` code page fails validation.
@@ -67,5 +80,9 @@ files, which have not been read or changed.
   hashes cannot substitute for actual dyld mapping and constructor evidence.
 - OpenSSH service/files, NewTerm execution, Sileo/Zebra registration, tweak
   constructors, and `pw` exit status remain unproven/failed per r198.
+- Existing installed libraries may already have damaged CodeDirectories.
+  The safer first-page preflight refuses such files; it cannot repair their
+  signature without independent, read-only comparison to the installed
+  package receipts and a separately authorized reversible recovery.
 - **Readiness stays 7/9**. A successful compiler run must not turn this into
   a public release or claim that r198's device failures are resolved.
