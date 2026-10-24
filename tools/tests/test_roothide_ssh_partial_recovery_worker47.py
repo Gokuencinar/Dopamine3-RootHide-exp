@@ -7,6 +7,7 @@ checks inspect the actual bundled 1900 input, never an invented sample plist.
 import hashlib
 from pathlib import Path
 import plistlib
+import re
 import shutil
 import subprocess
 import unittest
@@ -67,9 +68,9 @@ class RootHideSSHPartialRecovery(unittest.TestCase):
         self.assertNotIn("Status: deinstall ok config-files", INSTALL)
 
     def test_r216_mismatched_server_version_is_classified_before_rejection(self):
-        # Version is deliberately reported rather than guessed. Most
-        # importantly a mismatched-version entry must never reach dpkg -i,
-        # even if its package files are all absent and receipt mask is 3.
+        # Different/malformed versions still fail. r218 adds ONLY an exact
+        # no-Version "install ok not-installed" server exception, guarded by
+        # complete absence of old dpkg metadata and all server payload files.
         mismatch = INSTALL.split(
             'if (![fields containsString:@"\\nVersion: 9.2p1\\n"]) {', 1
         )[1].split('if (![fields containsString:@"\\nArchitecture:', 1)[0]
@@ -85,6 +86,104 @@ class RootHideSSHPartialRecovery(unittest.TestCase):
         for unsafe in ('"--force"', '"--force-confnew"', '"--force-confmiss"',
                        '"--purge"', '"--remove"'):
             self.assertNotIn(unsafe, INSTALL)
+
+    def test_r218_versionless_not_installed_server_only_proceeds_after_no_residue(self):
+        match = INSTALL.split('if (![fields containsString:@"\\nVersion: 9.2p1\\n"]) {', 1)[1].split(
+            'if (![fields containsString:@"\\nArchitecture: iphoneos-arm64e\\n"])', 1
+        )[0]
+        self.assertIn('BOOL explicitlyAbsentServer = (i == 2 &&', match)
+        self.assertIn('[version isEqualToString:@"missing"]', match)
+        self.assertIn('[statusClass isEqualToString:@"install ok not-installed"]', match)
+        self.assertIn('[arch isEqualToString:@"missing"]', match)
+        self.assertIn('[arch isEqualToString:@"iphoneos-arm64e"]', match)
+        for blocked in ("Conffiles:", "Config-Version:", "Triggers-Pending:", "Triggers-Awaited:"):
+            self.assertIn(f'![fields containsString:@"\\n{blocked}"]', match)
+        self.assertIn("state = RH3SSHAbsent;", match)
+        self.assertIn("verifiedNotInstalledReceipt = YES;", match)
+        self.assertIn('inventoryReason = "not_installed_receipt_no_version";', match)
+        self.assertLess(match.index("if (explicitlyAbsentServer)"), match.index("inventoryError = EEXIST;"))
+
+        guard = INSTALL.split("if (verifiedNotInstalledReceipt) {", 1)[1].split(
+            "if (state == RH3SSHInstalled)", 1
+        )[0]
+        self.assertIn("dup(infoDirectory)", guard)
+        self.assertIn("fdopendir(scanFD)", guard)
+        self.assertIn("readdir(entries)", guard)
+        self.assertIn('strncmp(entry->d_name, "openssh-server."', guard)
+        self.assertIn('strncmp(entry->d_name, "openssh-server:"', guard)
+        self.assertIn('inventoryReason = "not_installed_info_residue";', guard)
+        self.assertIn("O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC", guard)
+        self.assertIn("serverPayloadFiles", guard)
+        self.assertIn("lstat(path.fileSystemRepresentation, &file)", guard)
+        self.assertIn('inventoryReason = "not_installed_payload_residue";', guard)
+        self.assertIn('inventoryReason = "not_installed_payload_parent";', guard)
+        self.assertIn('inventoryReason = "not_installed_package_directory_residue";', guard)
+        self.assertIn('inventoryReason = "not_installed_package_directory_probe";', guard)
+        self.assertIn("if (inventoryError)", guard)
+        self.assertLess(INSTALL.index("if (verifiedNotInstalledReceipt) {"),
+                        INSTALL.index("exec_cmd_trusted("))
+        self.assertIn('if (state == RH3SSHInstalled) continue;', INSTALL)
+        self.assertIn('state == RH3SSHAbsent ?\n            exec_cmd_trusted(', INSTALL)
+        self.assertNotIn('unlinkat(infoDirectory', INSTALL)
+
+    def test_r218_server_full_absence_set_equals_real_bundled_payload(self):
+        # This list is from the exact SHA-256-pinned server .deb data.tar.zst;
+        # a three-file smoke check alone could overwrite PAM, moduli, docs etc.
+        if not shutil.which("tar"):
+            self.skipTest("tar unavailable")
+        package_bytes = RESOURCE.read_bytes()
+        self.assertEqual(hashlib.sha256(package_bytes).hexdigest(),
+                         "ccd27b95690071f181dfb3869d59b721efa1e27e0ab6f0c8c5937f29e9bd7bfd")
+        payload = deb_members(package_bytes)["data.tar.zst"]
+        result = subprocess.run(["tar", "-tvf", "-"], input=payload,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+        if result.returncode:
+            self.skipTest("tar cannot decompress bundled .deb")
+        package_files = {
+            line.strip().split()[-1].removeprefix("./")
+            for line in result.stdout.decode(errors="replace").splitlines()
+            if line.startswith("-")
+        }
+        section = INSTALL.split("NSArray<NSString *> *serverPayloadFiles = @[", 1)[1].split(
+            "];", 1
+        )[0]
+        named = set(re.findall(r'@"([^"]+)"', section))
+        self.assertEqual(package_files, named)
+        self.assertEqual(len(package_files), 11)
+        self.assertNotIn("etc/ssh/ssh_host_ed25519_key", package_files)
+
+    def test_r218_table_version_and_status_negative_states_fail_closed(self):
+        # Reference cases for the exact acceptance predicate, NOT an iOS
+        # runtime simulation. Production policy tokens verified above.
+        def qualifies(package, version, status, arch="missing", extra=""):
+            return (package == "openssh-server" and version == "missing" and
+                    status == "install ok not-installed" and
+                    arch in ("missing", "iphoneos-arm64e") and not any(
+                        line in extra for line in (
+                            "\nConffiles:", "\nConfig-Version:",
+                            "\nTriggers-Pending:", "\nTriggers-Awaited:",
+                        )
+                    ))
+        self.assertTrue(qualifies("openssh-server", "missing", "install ok not-installed"))
+        self.assertTrue(qualifies("openssh-server", "missing", "install ok not-installed",
+                                  "iphoneos-arm64e"))
+        for package, version, status, arch, extra in [
+            ("openssh-client", "missing", "install ok not-installed", "missing", ""),
+            ("openssh-sftp-server", "missing", "install ok not-installed", "missing", ""),
+            ("openssh-server", "9.2p1-1", "install ok not-installed", "missing", ""),
+            ("openssh-server", "ambiguous", "install ok not-installed", "missing", ""),
+            ("openssh-server", "missing", "deinstall ok config-files", "missing", ""),
+            ("openssh-server", "missing", "install ok half-installed", "missing", ""),
+            ("openssh-server", "missing", "install reinstreq half-installed", "missing", ""),
+            ("openssh-server", "missing", "install ok unpacked", "missing", ""),
+            ("openssh-server", "missing", "install ok not-installed", "arm64", ""),
+            ("openssh-server", "missing", "install ok not-installed", "missing",
+             "\nConffiles:\n /etc/ssh/sshd_config"),
+            ("openssh-server", "missing", "install ok not-installed", "missing",
+             "\nConfig-Version: 1"),
+        ]:
+            with self.subTest(status=status, version=version, package=package, arch=arch):
+                self.assertFalse(qualifies(package, version, status, arch, extra))
 
     def test_r216_public_version_and_dpkg_status_are_bounded_and_allowlisted(self):
         helper = INSTALL.split('NSString *(^safeReceiptField)', 1)[1].split(

@@ -18,6 +18,8 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
+#include <dirent.h>
+#include <string.h>
 #include <signal.h>
 #include <time.h>
 #import <mach-o/dyld.h>
@@ -1868,6 +1870,20 @@ static int RH3DiagnosticMachMagic(NSString *path)
         @[@"usr/sbin/sshd", @"etc/ssh/sshd_config",
           @"Library/LaunchDaemons/com.openssh.sshd.plist"]
     ];
+    // All 11 non-directory payload entries of the SHA-pinned 1900 server .deb.
+    // If a "not-installed" receipt survives from an aborted install, dpkg -i
+    // must not overwrite any other file that the three-path smoke check missed.
+    // Host keys are intentionally NOT in the package; they are never deleted.
+    NSArray<NSString *> *serverPayloadFiles = @[
+        @"Library/LaunchDaemons/com.openssh.sshd.plist",
+        @"etc/pam.d/sshd", @"etc/ssh/moduli", @"etc/ssh/sshd_config",
+        @"usr/libexec/sshd-keygen-wrapper", @"usr/sbin/sshd",
+        @"usr/share/doc/openssh-server/README.zst",
+        @"usr/share/doc/openssh-server/TODO.zst",
+        @"usr/share/man/man5/moduli.5.zst",
+        @"usr/share/man/man5/sshd_config.5.zst",
+        @"usr/share/man/man8/sshd.8.zst"
+    ];
     // Existing host keys are NEVER package payloads. They remain authoritative
     // and are checked separately before any absent key is generated.
     NSString *infoDirectoryPath = [root stringByAppendingPathComponent:@"Library/dpkg/info"];
@@ -1967,6 +1983,7 @@ static int RH3DiagnosticMachMagic(NSString *path)
         NSString *prefix = [@"Package: " stringByAppendingFormat:@"%@\n", package[@"package"]];
         NSUInteger matches = 0;
         NSInteger state = RH3SSHAbsent;
+        BOOL verifiedNotInstalledReceipt = NO;
         const char *inventoryReason = "verified";
         NSUInteger inventoryItem = 0;
         for (NSString *record in records) {
@@ -1987,6 +2004,31 @@ static int RH3DiagnosticMachMagic(NSString *path)
                       characterIsMember:[version characterAtIndex:0]])
                     version = @"invalid";
                 NSString *statusClass = safeDpkgStatus(fields);
+                NSString *arch = safeReceiptField(fields, @"Architecture", 32,
+                                                   @"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz-");
+                // The r218 server record was "install ok not-installed", with
+                // NO Version. Dpkg legitimately retains such selection entries.
+                // This is not a migration from a different installed version.
+                // Only this exact server state can be treated as absent; any
+                // ambiguous version, other status, foreign architecture or
+                // leftover configuration/trigger record remains fail-closed.
+                BOOL explicitlyAbsentServer = (i == 2 &&
+                    [version isEqualToString:@"missing"] &&
+                    [statusClass isEqualToString:@"install ok not-installed"] &&
+                    ([arch isEqualToString:@"missing"] ||
+                     [arch isEqualToString:@"iphoneos-arm64e"]) &&
+                    ![fields containsString:@"\nConffiles:"] &&
+                    ![fields containsString:@"\nConfig-Version:"] &&
+                    ![fields containsString:@"\nTriggers-Pending:"] &&
+                    ![fields containsString:@"\nTriggers-Awaited:"]);
+                if (explicitlyAbsentServer) {
+                    state = RH3SSHAbsent;
+                    verifiedNotInstalledReceipt = YES;
+                    inventoryReason = "not_installed_receipt_no_version";
+                    [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
+                        @"SSH inventory: server not-installed receipt has no version; checking all payload and dpkg metadata before pinned install"];
+                    break;
+                }
                 [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
                     [NSString stringWithFormat:@"SSH inventory mismatch: package=%s version=%@ status=%@ reason=version_mismatch; no dpkg writes",
                      packageTags[i], version, statusClass]];
@@ -2016,6 +2058,92 @@ static int RH3DiagnosticMachMagic(NSString *path)
                 [NSString stringWithFormat:@"SSH inventory: package=%s state=untrusted item=0 reason=%s error=%d",
                  packageTags[i], inventoryReason, inventoryError]];
             break;
+        }
+        if (verifiedNotInstalledReceipt) {
+            // A dpkg status selection is not proof of a clean disk. Reject
+            // ANY openssh-server.* or arch-qualified openssh-server:* info
+            // sidecar, including symlinks or unknown maintainer scripts.
+            // No cleanup, purge, or deletion is permitted.
+            int scanFD = dup(infoDirectory);
+            DIR *entries = scanFD < 0 ? NULL : fdopendir(scanFD);
+            if (!entries) {
+                inventoryError = errno;
+                inventoryReason = "not_installed_info_scan";
+                if (scanFD >= 0) close(scanFD);
+            } else {
+                errno = 0;
+                struct dirent *entry = NULL;
+                while ((entry = readdir(entries)) != NULL) {
+                    if (strncmp(entry->d_name, "openssh-server.", sizeof("openssh-server.") - 1) == 0 ||
+                        strncmp(entry->d_name, "openssh-server:", sizeof("openssh-server:") - 1) == 0) {
+                        inventoryError = EEXIST;
+                        inventoryReason = "not_installed_info_residue";
+                        break;
+                    }
+                    errno = 0;
+                }
+                int scanError = errno;
+                closedir(entries);
+                if (!inventoryError && scanError) {
+                    inventoryError = scanError;
+                    inventoryReason = "not_installed_info_scan";
+                }
+            }
+            // Protect all additional directories touched by the server
+            // payload. Missing dirs are fine; symlinks/foreign writable dirs
+            // are not. Existing etc/ssh and host keys remain untouched.
+            for (NSString *suffix in @[@"etc/pam.d", @"usr/share", @"usr/share/doc",
+                                       @"usr/share/doc/openssh-server", @"usr/share/man",
+                                       @"usr/share/man/man5", @"usr/share/man/man8"]) {
+                if (inventoryError) break;
+                NSString *parent = [root stringByAppendingPathComponent:suffix];
+                int fd = open(parent.fileSystemRepresentation,
+                              O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+                if (fd < 0) {
+                    if (errno == ENOENT) continue;
+                    inventoryError = errno;
+                } else {
+                    struct stat directory = {0};
+                    if (fstat(fd, &directory)) inventoryError = errno;
+                    else if (!S_ISDIR(directory.st_mode) || directory.st_uid != 0 ||
+                             (directory.st_mode & 022)) inventoryError = EPERM;
+                    close(fd);
+                }
+                if (inventoryError) inventoryReason = "not_installed_payload_parent";
+            }
+            // This directory is dedicated to the server package, unlike the
+            // shared system parents above. A leftover directory may contain
+            // unlisted user files or old package files: do not adopt it.
+            if (!inventoryError) {
+                NSString *privateDocDirectory =
+                    [root stringByAppendingPathComponent:@"usr/share/doc/openssh-server"];
+                struct stat previous = {0};
+                if (lstat(privateDocDirectory.fileSystemRepresentation, &previous) == 0) {
+                    inventoryError = EEXIST;
+                    inventoryReason = "not_installed_package_directory_residue";
+                } else if (errno != ENOENT) {
+                    inventoryError = errno;
+                    inventoryReason = "not_installed_package_directory_probe";
+                }
+            }
+            for (NSString *suffix in serverPayloadFiles) {
+                if (inventoryError) break;
+                NSString *path = [root stringByAppendingPathComponent:suffix];
+                struct stat file = {0};
+                if (lstat(path.fileSystemRepresentation, &file) == 0) {
+                    inventoryError = EEXIST;
+                    inventoryReason = "not_installed_payload_residue";
+                } else if (errno != ENOENT) {
+                    inventoryError = errno;
+                    inventoryReason = "not_installed_payload_probe";
+                }
+            }
+            if (inventoryError) {
+                [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
+                    [NSString stringWithFormat:@"SSH inventory: package=server state=not_installed reason=%s error=%d; no files modified",
+                     inventoryReason, inventoryError]];
+                break;
+            }
         }
         if (state == RH3SSHInstalled) installed++;
         NSString *listName = [package[@"package"] stringByAppendingString:@".list"];
