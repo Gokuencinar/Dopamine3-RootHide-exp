@@ -387,14 +387,19 @@ static int rh3_pid1_spawn_and_patch_async(pid_t *pid, const char *path,
 	});
 	dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
 		int patched = rh3_pid1_same_child(job) ?
-			jbdSpawnPatchChildIdentified(job->pid, job->uniqueid, true) : -1;
-		if (rh3_pid1_deferred_finish(&job->outcome, 1)) {
-			if (patched != 0) {
+			jbdSpawnPatchChildIdentified(job->pid, job->uniqueid) : -1;
+		// The daemon has only patched the suspended child. It MUST NOT
+		// resume: a late XPC answer cannot override the watchdog timeout.
+		if (patched == 0 && rh3_pid1_deferred_finish(&job->outcome, 1)) {
+			if (!rh3_pid1_same_child(job) || kill(job->pid, SIGCONT) != 0) {
 				rh3_pid1_kill_failed_child(job);
-				rh3_bootlog("PID1 child patch failed; isolated child");
+				rh3_bootlog("PID1 child patch: resume failed; isolated child");
 			} else {
-				rh3_bootlog("PID1 child patch replied; not constructor proof");
+				rh3_bootlog("PID1 child patched and resumed; not constructor proof");
 			}
+		} else if (patched != 0 && rh3_pid1_deferred_finish(&job->outcome, 1)) {
+			rh3_pid1_kill_failed_child(job);
+			rh3_bootlog("PID1 child patch failed; isolated child");
 		}
 		atomic_fetch_sub(&rh3_pid1_outstanding_patches, 1);
 		rh3_pid1_patch_job_release(job);

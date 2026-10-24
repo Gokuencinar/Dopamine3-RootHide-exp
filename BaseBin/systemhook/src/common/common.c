@@ -27,6 +27,7 @@
 // must not negate that earlier authenticated result. Never use this in PID1.
 static _Atomic bool gRh3RootCheckedIn = false;
 static char gRh3CheckedInRoot[PATH_MAX] = {0};
+static _Atomic pid_t gRh3CheckedInPid = 0;
 
 void rh3_record_authenticated_root(const char *root)
 {
@@ -34,6 +35,9 @@ void rh3_record_authenticated_root(const char *root)
 	size_t length = strlen(root);
 	if (!length || length >= sizeof(gRh3CheckedInRoot)) return;
 	memcpy(gRh3CheckedInRoot, root, length + 1);
+	// fork inherits this cache but does not inherit the server's verified
+	// process check-in. Bind the grant to its PID, not just the root string.
+	atomic_store_explicit(&gRh3CheckedInPid, getpid(), memory_order_relaxed);
 	atomic_store_explicit(&gRh3RootCheckedIn, true, memory_order_release);
 }
 
@@ -42,6 +46,7 @@ bool rh3_has_authenticated_root(void)
 	const char *root = get_jbroot();
 	return getpid() != 1 &&
 	       atomic_load_explicit(&gRh3RootCheckedIn, memory_order_acquire) &&
+	       atomic_load_explicit(&gRh3CheckedInPid, memory_order_relaxed) == getpid() &&
 	       root && systemhook_is_roothide_root_path(root) &&
 	       strcmp(root, gRh3CheckedInRoot) == 0;
 }

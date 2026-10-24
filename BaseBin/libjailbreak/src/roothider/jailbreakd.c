@@ -393,7 +393,7 @@ int jbdSpawnPatchChild(int pid, bool resume)
 	return result;
 }
 
-int jbdSpawnPatchChildIdentified(int pid, uint64_t uniqueid, bool resume)
+int jbdSpawnPatchChildIdentified(int pid, uint64_t uniqueid)
 {
 	if (getpid() != 1 || pid <= 1 || !uniqueid || !jailbreakd_has_checked_in()) return -1;
 	xpc_object_t message = xpc_dictionary_create_empty();
@@ -401,7 +401,8 @@ int jbdSpawnPatchChildIdentified(int pid, uint64_t uniqueid, bool resume)
 	xpc_dictionary_set_uint64(message, "id", JBD_MSG_SPAWN_PATCH_CHILD);
 	xpc_dictionary_set_int64(message, "pid", pid);
 	xpc_dictionary_set_uint64(message, "uniqueid", uniqueid);
-	xpc_dictionary_set_bool(message, "resume", resume);
+	xpc_dictionary_set_bool(message, "resume", false);
+	xpc_dictionary_set_bool(message, "deferred_resume", true);
 	// Uses the *direct* daemon port. This function can block, so it must
 	// exclusively run on a background launchd worker, never in its spawn hook.
 	xpc_object_t reply = jailbreakdXpcRequest(message);

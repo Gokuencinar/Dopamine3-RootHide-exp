@@ -216,3 +216,24 @@ binary build **cannot** prove the child executed or its tweak constructor ran.
 PID reuse has a residual check-to-signal race. An iPhone X test must verify
 launchd responsiveness, private dyld, hook constructor, app startup and SSH
 banner before any public release. Strict readiness remains 7/9.
+
+### Follow-up: two lifetime bugs fixed before another enabled hardware IPA
+
+The first r196 daemon operation used `resume=true`: a stalled daemon could
+send `SIGCONT` after launchd's three-second watchdog marked the child expired.
+The follow-up changes identified requests to **patch-only** (`resume=false`,
+`deferred_resume=true`), while retaining the full `roothide_patch_proc`
+implementation rather than the older PID1 spinlock-only compatibility path.
+After a successful reply, only the original launchd worker that atomically
+wins the watchdog state race can resume its *same uniquely identified* child.
+The donor's ordinary non-deferred spawn protocol remains unchanged. Regression
+tests reproduced the old late-resume path before the change.
+
+The systemhook's cached authenticated RootHide root was also inherited across
+`fork()`. That let a fork child mistake its parent's completed check-in for
+its own. The cache is now bound to the PID that actually passed check-in.
+The native C harness reproduced and then rejected the inherited grant.
+
+These fixes do not grant additional global privileges, modify account or SSH
+files, install any packages, or bypass the 7/9 hardware readiness barrier.
+No native build or physical constructor test is implied by host tests alone.

@@ -69,6 +69,10 @@ int main(void) {
     if (rh3_has_authenticated_root()) return 2;
     rh3_record_authenticated_root(active);
     if (!rh3_has_authenticated_root()) return 3;
+    // fork() inherits static memory but the new process never checked in.
+    testPid = 41;
+    if (rh3_has_authenticated_root()) return 7;
+    testPid = 40;
     testPid = 1;
     if (rh3_has_authenticated_root()) return 4;
     testPid = 40;

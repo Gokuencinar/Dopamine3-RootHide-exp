@@ -39,7 +39,9 @@ int jbdSpawnPatchChild(int pid, bool resume);
 // PID1 asynchronous patching: bind the request to the actual suspended
 // process, not just its recyclable numeric PID. Never use the unbound API
 // from PID1 for an asynchronous child.
-int jbdSpawnPatchChildIdentified(int pid, uint64_t uniqueid, bool resume);
+// Patches only; the PID1 caller decides whether the watchdog has already
+// expired before it sends SIGCONT. jailbreakd MUST NOT resume this request.
+int jbdSpawnPatchChildIdentified(int pid, uint64_t uniqueid);
 int jbdSpawnExecStart(const char* execfile, bool resume);
 int jbdSpawnExecCancel(const char* execfile);
 int jbdExecTraceStart(const char* execfile, bool* traced);

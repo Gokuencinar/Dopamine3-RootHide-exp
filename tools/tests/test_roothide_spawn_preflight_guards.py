@@ -147,7 +147,7 @@ int main(void) {
         patch_child = server.split("case JBD_MSG_SPAWN_PATCH_CHILD:", 1)[1].split(
             "case JBD_MSG_SPAWN_EXEC_START:", 1
         )[0]
-        self.assertIn("resume && kill(pid, SIGCONT) != 0", patch_child)
+        self.assertIn("resume && !deferredResume && kill(pid, SIGCONT) != 0", patch_child)
         self.assertIn("result = -1", patch_child)
         self.assertLess(patch_child.index("result = -1"),
                         patch_child.index('xpc_dictionary_set_int64(reply, "result", result)'))

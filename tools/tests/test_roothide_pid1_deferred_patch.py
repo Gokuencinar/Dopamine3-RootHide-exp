@@ -102,8 +102,8 @@ int main(void) {
         handler = server.split('case JBD_MSG_SPAWN_PATCH_CHILD:', 1)[1].split(
             'case JBD_MSG_SPAWN_EXEC_START:', 1)[0]
         self.assertIn('expectedUniqueid && proc_get_uniqueid(pid) == expectedUniqueid', handler)
-        self.assertIn('if(ppid == clientPid && sameChild)', handler)
-        self.assertLess(handler.index('if(ppid == clientPid && sameChild)'),
+        self.assertIn('if(ppid == clientPid && sameChild && (!deferredResume', handler)
+        self.assertLess(handler.index('if(ppid == clientPid && sameChild && (!deferredResume'),
                         handler.index('roothide_patch_proc(pid)'))
         self.assertIn('proc_get_uniqueid(pid) != expectedUniqueid', handler)
         self.assertLess(handler.index('proc_get_uniqueid(pid) != expectedUniqueid'),
@@ -114,6 +114,23 @@ int main(void) {
         self.assertIn('jailbreakd_has_checked_in()', client)
         self.assertIn('"uniqueid", uniqueid', client)
         self.assertIn('xpc_get_type(value) == XPC_TYPE_INT64', client)
+
+    def test_watchdog_wins_without_daemon_late_resume(self):
+        source = LAUNCHD.read_text(encoding='utf-8')
+        worker = source.split('dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{', 1)[1].split('return 0; // Child is suspended.', 1)[0]
+        # The prior implementation set resume=true in the daemon request.
+        # A slow daemon could then send SIGCONT AFTER the PID1 timeout won.
+        self.assertIn('jbdSpawnPatchChildIdentified(job->pid, job->uniqueid)', worker)
+        self.assertNotIn('jbdSpawnPatchChildIdentified(job->pid, job->uniqueid, true)', worker)
+        self.assertIn('if (patched == 0 && rh3_pid1_deferred_finish(&job->outcome, 1))', worker)
+        self.assertIn('kill(job->pid, SIGCONT)', worker)
+        client = CLIENT.read_text(encoding='utf-8').split('int jbdSpawnPatchChildIdentified(', 1)[1].split('int jbdSpinlockFixOnly(', 1)[0]
+        self.assertIn('"deferred_resume", true', client)
+        self.assertIn('"resume", false', client)
+        server = SERVER.read_text(encoding='utf-8').split('case JBD_MSG_SPAWN_PATCH_CHILD:',1)[1].split('case JBD_MSG_SPAWN_EXEC_START:',1)[0]
+        self.assertIn('bool deferredResume = xpc_dictionary_get_bool(message, "deferred_resume")', server)
+        self.assertIn('&& !deferredResume', server)
+        self.assertIn('else if(resume && !deferredResume && kill(pid, SIGCONT)', server)
 
     def test_native_actual_state_handles_races_backpressure_and_recovery(self):
         cc = shutil.which('gcc') or shutil.which('clang') or shutil.which('cc')
