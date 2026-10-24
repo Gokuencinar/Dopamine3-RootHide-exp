@@ -6,6 +6,7 @@ No files on a device or bootstrap extraction directories are modified.
 """
 
 import hashlib
+import posixpath
 from pathlib import Path
 import shutil
 import struct
@@ -155,6 +156,29 @@ class AptBootstrapMachOTests(unittest.TestCase):
                     with self.subTest(binary=path, dependency=name):
                         self.assertTrue("./usr/lib/" + name in packaged or
                                         "./usr/local/lib/" + name in packaged)
+
+    def test_original_apt_backlinks_are_packaged_and_point_inside_root(self):
+        """An intact bootstrap needs no repair of the APT HTTP methods backlink."""
+        result = subprocess.run([shutil.which("tar"), "-tvf", str(ARCHIVE)],
+                                capture_output=True, text=True, timeout=40)
+        self.assertEqual(result.returncode, 0, result.stderr[:200])
+        links = {}
+        for entry in result.stdout.splitlines():
+            if not entry.startswith("l") or " -> " not in entry:
+                continue
+            before, target = entry.rsplit(" -> ", 1)
+            member = before.split()[-1]
+            links[member] = target
+
+        # The initial archive already contains a root marker and per-directory
+        # relative links. Verify the chain without extracting or mutating it.
+        self.assertEqual(links.get("./.jbroot"), ".")
+        self.assertEqual(links.get("./usr/libexec/apt/methods/.jbroot"),
+                         "../../../../.jbroot")
+        self.assertEqual(links.get("./usr/lib/.jbroot"), "../../.jbroot")
+        for member in ("./usr/libexec/apt/methods/.jbroot", "./usr/lib/.jbroot"):
+            dest = posixpath.normpath(posixpath.join(posixpath.dirname(member), links[member]))
+            self.assertEqual(dest, ".jbroot")
 
     def test_corrupting_page_zero_is_detected_not_trusted(self):
         data = bytearray(self.files[GNUTLS])

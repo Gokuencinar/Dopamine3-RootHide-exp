@@ -54,7 +54,7 @@ bool string_has_suffix(const char* str, const char* suffix);
 bool hasTrollstoreMarker(const char* path);
 bool hasTrollstoreLiteMarker(const char* path);
 
-void ensure_jbroot_symlink(const char* filepath);
+int ensure_jbroot_symlink(const char* filepath);
 
 int roothide_patch_proc(pid_t pid);
 

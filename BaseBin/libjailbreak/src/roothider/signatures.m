@@ -313,7 +313,15 @@ static void recurse_handler(NSString *loadPath, NSString *loaderPath, NSString *
 	//add realLoadPath to fileCaches
 	[fileCaches addObject:realLoadPath];
 
-	ensure_jbroot_symlink(realLoadPath.fileSystemRepresentation);
+	int backlinkError = ensure_jbroot_symlink(realLoadPath.fileSystemRepresentation);
+	if (backlinkError != 0) {
+		JBLogError("Unable to prepare RootHide @rpath backlink for %s: %d", realLoadPath.fileSystemRepresentation, backlinkError);
+		// Match the existing weak/lazy dependency policy. A mandatory
+		// library must not be silently declared trusted, but an optional
+		// dependency may be skipped if its backlink cannot be prepared.
+		if (required) *failed = true;
+		return;
+	}
 
 	Fat *fat = fat_init_from_path(realLoadPath.fileSystemRepresentation);
 	if (!fat) {

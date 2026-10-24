@@ -401,38 +401,38 @@ bool isSubPathOf(const char* child, const char* parent) //not work for jbroot:/v
 	return real_child[strlen(real_parent)] == '/';
 }
 
-void ensure_jbroot_symlink(const char* filepath)
+int ensure_jbroot_symlink(const char* filepath)
 {
+	if (!filepath || !*filepath) return EINVAL;
 	JBLogDebug("ensure_jbroot_symlink: %s", filepath);
-
-	if(access(filepath, F_OK) !=0 )
-		return;
+	if (access(filepath, F_OK) != 0) return errno ? errno : EIO;
 
 	char realfpath[PATH_MAX]={0};
-	assert(realpath(filepath, realfpath) != NULL);
+	if (!realpath(filepath, realfpath)) return errno ? errno : EIO;
 
 	char realdirpath[PATH_MAX+1]={0};
-	dirname_r(realfpath, realdirpath);
+	if (!dirname_r(realfpath, realdirpath)) return EINVAL;
 	if(realdirpath[0] && realdirpath[strlen(realdirpath)-1] != '/') {
-		strlcat(realdirpath, "/", sizeof(realdirpath));
+		if (strlcat(realdirpath, "/", sizeof(realdirpath)) >= sizeof(realdirpath)) return ENAMETOOLONG;
 	}
 
 	char jbrootpath[PATH_MAX+1]={0};
-	assert(realpath(JBROOT_PATH("/"), jbrootpath) != NULL);
+	if (!realpath(JBROOT_PATH("/"), jbrootpath)) return errno ? errno : EIO;
 	if(jbrootpath[0] && jbrootpath[strlen(jbrootpath)-1] != '/') {
-		strlcat(jbrootpath, "/", sizeof(jbrootpath));
+		if (strlcat(jbrootpath, "/", sizeof(jbrootpath)) >= sizeof(jbrootpath)) return ENAMETOOLONG;
 	}
 
 	if(strncmp(realdirpath, jbrootpath, strlen(jbrootpath)) != 0) {
         JBLogDebug("ensure_jbroot_symlink skip path not inside jbroot: %s", realdirpath);
-		return;
+		return 0;
 	}
 
 	struct stat jbrootst;
-	assert(stat(jbrootpath, &jbrootst) == 0);
+	if (stat(jbrootpath, &jbrootst) != 0) return errno ? errno : EIO;
 
 	char sympath[PATH_MAX];
-	snprintf(sympath,sizeof(sympath),"%s/.jbroot", realdirpath);
+	int length = snprintf(sympath,sizeof(sympath),"%s/.jbroot", realdirpath);
+	if (length < 0 || (size_t)length >= sizeof(sympath)) return ENAMETOOLONG;
 
 	struct stat symst;
 	if(lstat(sympath, &symst)==0)
@@ -443,21 +443,25 @@ void ensure_jbroot_symlink(const char* filepath)
 			{
 				if(symst.st_dev==jbrootst.st_dev
 					&& symst.st_ino==jbrootst.st_ino)
-					return;
+					return 0;
 			}
 
-			assert(unlink(sympath) == 0);
+			if (unlink(sympath) != 0) return errno ? errno : EIO;
 
 		} else {
-			//not a symlink? just let it go
-			return;
+			// Preserve existing regular files and directories.
+			return EEXIST;
 		}
 	}
+	else if (errno != ENOENT) return errno ? errno : EIO;
 
 	if(symlink(jbrootpath, sympath) ==0 ) {
 		JBLogDebug("update .jbroot @ %s\n", sympath);
+		return 0;
 	} else {
-		JBLogError("symlink error @ %s\n", sympath);
+		int error = errno ? errno : EIO;
+		JBLogError("symlink error @ %s (%d)\n", sympath, error);
+		return error;
 	}
 }
 
