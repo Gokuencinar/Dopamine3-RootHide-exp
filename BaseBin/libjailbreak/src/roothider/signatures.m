@@ -48,6 +48,7 @@ MachO* fat_find_preferred_slice(Fat *fat)
 }
 
 extern bool csd_superblob_is_adhoc_signed(CS_DecodedSuperBlob *superblob);
+extern bool rh3_code_directory_pages_match(MachO *macho, CS_DecodedBlob *best);
 
 // ChOma's csd_superblob_decode() trusts the index table and each embedded
 // blob's length. Check all of those untrusted offsets against the actual
@@ -384,8 +385,16 @@ static void recurse_handler(NSString *loadPath, NSString *loaderPath, NSString *
 							*failed = true;
 						} else {
 							isAdhocSigned = csd_superblob_is_adhoc_signed(decodedSuperblob);
-							if (isAdhocSigned && !cdhashesContains(cdhash) &&
-							    !is_cdhash_trustcached(cdhash)) {
+								// An already-cached CDHash does not validate the installed
+								// file: a modified later code page still fails in AMFI/dyld.
+								// Reject it before either the cached fast path or a write.
+								CS_DecodedBlob *best = csd_superblob_find_best_code_directory(decodedSuperblob);
+								if (isAdhocSigned && !rh3_code_directory_pages_match(macho, best)) {
+									JBLogError("Installed Mach-O code page signature mismatch: %s", realLoadPath.fileSystemRepresentation);
+									*failed = true;
+								}
+								if (isAdhocSigned && !cdhashesContains(cdhash) &&
+								    !*failed && !is_cdhash_trustcached(cdhash)) {
 								int ret = ensure_randomized_cdhash_for_slice(realLoadPath.fileSystemRepresentation, macho->archDescriptor.offset, cdhash);
 								if (ret == 0) {
 									cdhashesAdd(cdhash);

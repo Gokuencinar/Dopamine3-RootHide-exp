@@ -1,6 +1,10 @@
 #include <Foundation/Foundation.h>
 
 #include <spawn.h>
+#include <errno.h>
+#include <signal.h>
+#include <sys/wait.h>
+#include <unistd.h>
 #include <roothide.h>
 
 #include "common.h"
@@ -652,15 +656,59 @@ int (*orig_LSServer_RebuildApplicationDatabases)()=NULL;
 // recursively fan out uicache -a children while the previous refresh is still
 // executing (or stuck). A future lsd restart clears this in-memory guard.
 static volatile int rh3AutoUICacheInFlight = 0;
+// The auto-refresh is an optional RootHide2 compatibility path. Never let an
+// lsd worker wait forever on its own uicache -a child when LaunchServices or
+// the child's dyld/check-in stalls. This cannot touch a manually started
+// uicache: only the PID returned by this hook's successful spawn is reaped.
+static int rh3_wait_auto_uicache(pid_t child)
+{
+    if (child <= 1) return ECHILD;
+    for (unsigned attempt = 0; attempt < 100; attempt++) {
+        int status = 0;
+        pid_t reaped = waitpid(child, &status, WNOHANG);
+        if (reaped == child)
+            return WIFEXITED(status) ? WEXITSTATUS(status) :
+                   WIFSIGNALED(status) ? 128 + WTERMSIG(status) : ECHILD;
+        if (reaped < 0) {
+            if (errno == EINTR) continue;
+            return errno;
+        }
+        usleep(100000);
+    }
+    // A second nonblocking check avoids signalling an already reaped child.
+    // This worker is the sole wait owner of its direct child.
+    int status = 0;
+    if (waitpid(child, &status, WNOHANG) == 0) {
+        (void)kill(child, SIGKILL);
+        for (unsigned attempt = 0; attempt < 20; attempt++) {
+            pid_t reaped = waitpid(child, &status, WNOHANG);
+            if (reaped == child || (reaped < 0 && errno == ECHILD)) break;
+            if (reaped < 0 && errno != EINTR) break;
+            usleep(10000);
+        }
+    }
+    // Negative sentinel cannot be confused with a child's exit code 60
+    // (ETIMEDOUT on Darwin) or any other 0..255 exit status.
+    return -ETIMEDOUT;
+}
+
 int new_LSServer_RebuildApplicationDatabases()
 {
 	int r = orig_LSServer_RebuildApplicationDatabases();
 
 	if(access(jbroot("/.disable_auto_uicache"), F_OK) == 0) return r;
 
+    // RootHide3 registers the package-owned bundles explicitly with
+    // uicache -p. Launching uicache -a *from lsd* while that registration is
+    // waiting for lsd can create a self-amplifying concurrent refresh.
+    // RootHide2's existing auto-refresh path remains available.
+    const char *rh3Marker = jbroot("/.installed_roothide3");
+    if (rh3Marker && access(rh3Marker, F_OK) == 0) return r;
+
     if (!__sync_bool_compare_and_swap(&rh3AutoUICacheInFlight, 0, 1)) return r;
 
 	dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+			bool timedOut = false;
 		// Ensure jailbreak apps are readded to icon cache after the system reloads it
 		// A bit hacky, but works
 		char* const args[] = {"/usr/bin/uicache", "-a", NULL};
@@ -669,10 +717,12 @@ int new_LSServer_RebuildApplicationDatabases()
 			pid_t pid=0;
 			int spawnerr = posix_spawn(&pid, uicachePath, NULL, NULL, args, environ);
 			if(spawnerr==0) {
-				wait_for_exit(pid);
+					timedOut = rh3_wait_auto_uicache(pid) == -ETIMEDOUT;
 			}
 		}
-            __sync_lock_release(&rh3AutoUICacheInFlight);
+            // A timed-out auto-refresh must not queue new stuck -a children
+            // until lsd restarts. Explicit -p registration is unaffected.
+            if (!timedOut) __sync_lock_release(&rh3AutoUICacheInFlight);
 	});
 
 	return r;

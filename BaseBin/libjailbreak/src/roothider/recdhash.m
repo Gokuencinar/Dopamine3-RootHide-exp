@@ -109,6 +109,39 @@ static CS_SuperBlob *rh3_verified_code_signature(MachO *macho)
     return superblob;
 }
 
+// A CodeDirectory hash proves only what was signed, not that the code pages
+// still match it. Do this read-only before either skipping an already-trusted
+// CDHash or opening an installed Mach-O writable for RootHide branding.
+// In particular, a damaged nonzero page in APT's libgnutls must never be
+// silently accepted because the first __TEXT page is still intact.
+bool rh3_code_directory_pages_match(MachO *macho, CS_DecodedBlob *best)
+{
+    if (!macho || !best) return false;
+    CS_CodeDirectory codeDir = {0};
+    if (csd_blob_read(best, 0, sizeof(codeDir), &codeDir) != 0) return false;
+    CODE_DIRECTORY_APPLY_BYTE_ORDER(&codeDir, BIG_TO_HOST_APPLIER);
+    if (!codeDir.codeLimit || codeDir.codeLimit > macho->archDescriptor.size ||
+        (codeDir.pageSize != 0 && codeDir.pageSize != 12 && codeDir.pageSize != 14) ||
+        codeDir.hashSize == 0 || codeDir.hashSize > CC_SHA384_DIGEST_LENGTH ||
+        codeDir.hashOffset > codeDir.length ||
+        codeDir.nCodeSlots == 0 || codeDir.nCodeSlots > 262144 ||
+        (uint64_t)codeDir.nCodeSlots * codeDir.hashSize >
+            (uint64_t)codeDir.length - codeDir.hashOffset) return false;
+    uint64_t pageBytes = codeDir.pageSize ?
+        (UINT64_C(1) << codeDir.pageSize) : codeDir.codeLimit;
+    if ((uint64_t)1 + ((uint64_t)codeDir.codeLimit - 1) / pageBytes != codeDir.nCodeSlots)
+        return false;
+    uint8_t expected[CC_SHA384_DIGEST_LENGTH] = {0};
+    uint8_t actual[CC_SHA384_DIGEST_LENGTH] = {0};
+    for (uint32_t i = 0; i < codeDir.nCodeSlots; i++) {
+        uint64_t slotOffset = (uint64_t)codeDir.hashOffset + (uint64_t)i * codeDir.hashSize;
+        if (!code_directory_calculate_page_hash(&codeDir, macho, (int)i, actual) ||
+            csd_blob_read(best, slotOffset, codeDir.hashSize, expected) != 0 ||
+            memcmp(expected, actual, codeDir.hashSize) != 0) return false;
+    }
+    return true;
+}
+
 // The brand lives inside page 0. A previous rebrand can be interrupted after
 // writing the brand but before committing the updated CodeDirectory slot 0.
 // Reject that partially-written file without opening it for writing again.
@@ -164,7 +197,8 @@ static int rh3_existing_branded_cdhash(const char *inputPath, uint64_t requested
     if (!superblob) { fat_free(fat); return -1; }
     CS_DecodedSuperBlob *decoded = csd_superblob_decode(superblob);
     CS_DecodedBlob *best = decoded ? csd_superblob_find_best_code_directory(decoded) : NULL;
-    int result = rh3_branded_page_zero_hash_matches(best, macho)
+    int result = rh3_branded_page_zero_hash_matches(best, macho) &&
+                 rh3_code_directory_pages_match(macho, best)
         ? csd_code_directory_calculate_hash(best, cdhashOut) : -1;
     if (decoded) csd_superblob_free(decoded);
     free(superblob);
@@ -288,6 +322,10 @@ int ensure_randomized_cdhash_for_slice(const char* inputPath, uint64_t offset, v
 			// succeeds. Do not let this fallback accept an interrupted rebrand.
 			if (!rh3_branded_page_zero_hash_matches(bestCDBlob, macho)) {
 				JBLogError("Error: branded Mach-O has a stale code page hash: %s\n", inputPath);
+				break;
+			}
+			if (!rh3_code_directory_pages_match(macho, bestCDBlob)) {
+				JBLogError("Error: existing Mach-O code pages do not match its signature: %s", inputPath);
 				break;
 			}
 			JBLogDebug("macho already patched: %s\n", inputPath);

@@ -40,7 +40,7 @@ class RootHideExecPatchRaceTests(unittest.TestCase):
         self.assertIn("__sync_lock_release(&rh3AutoUICacheInFlight)", hook)
         self.assertLess(hook.index("__sync_bool_compare_and_swap"),
                         hook.index("dispatch_async("))
-        self.assertLess(hook.index("wait_for_exit(pid)"),
+        self.assertLess(hook.index("rh3_wait_auto_uicache(pid)"),
                         hook.index("__sync_lock_release(&rh3AutoUICacheInFlight)"))
 
     def test_refresh_skips_verifiably_registered_active_root_apps(self):
