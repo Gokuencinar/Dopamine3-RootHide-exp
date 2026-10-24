@@ -42,6 +42,16 @@ class RecursiveTrustScope(unittest.TestCase):
         self.assertIn("return roothide_trust_injected_libraries(envp);", method)
         self.assertNotIn("jbdSpawnPatchChild", method)
 
+    def test_scripts_and_non_macho_root_files_never_enter_recursive_trust_xpc(self):
+        source = MAIN.read_text(encoding="utf-8")
+        method = source.split("static int rh3_trust_before_spawn(", 1)[1].split(
+            "int __posix_spawn_hook(", 1)[0]
+        recursive_call = method.index("jbclient_trust_executable_recurse(path, preferredArchs)")
+        self.assertIn("else if (rh3_trust_looks_like_macho(path)) {",
+                      method[:recursive_call])
+        self.assertLess(method.index("else if (rh3_trust_looks_like_macho(path)) {"),
+                        recursive_call)
+
     def test_native_extracted_preflight_rejects_symlink_escape_and_old_root(self):
         cc = shutil.which("clang") or shutil.which("gcc") or shutil.which("cc")
         if not cc:

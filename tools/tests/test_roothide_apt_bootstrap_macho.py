@@ -120,7 +120,9 @@ class AptBootstrapMachOTests(unittest.TestCase):
         dependencies = command_paths(http, {0xC, 0x18, 0x80000018})
         self.assertIn("@rpath/libgnutls.30.dylib", dependencies)
         self.assertIn("libgnutls.30.dylib", GNUTLS)
-        self.assertTrue(command_paths(http, {0x8000001C}), "No LC_RPATH found")
+        rpaths = command_paths(http, {0x8000001C})
+        self.assertIn("@loader_path/.jbroot/usr/lib", rpaths)
+        self.assertIn("@loader_path/.jbroot/usr/local/lib", rpaths)
 
     def test_original_code_signatures_are_page_consistent(self):
         for path, data in self.files.items():
@@ -128,6 +130,31 @@ class AptBootstrapMachOTests(unittest.TestCase):
                 directories = code_directories(data)
                 self.assertTrue(directories, "missing CodeDirectory")
                 self.assertTrue(all(valid_code_pages(data, cd) for cd in directories))
+
+    def test_http_and_gnutls_are_adhoc_dependencies_for_recursive_trust(self):
+        for path, data in self.files.items():
+            with self.subTest(path=path):
+                directories = code_directories(data)
+                self.assertTrue(directories)
+                # code-directory flags at byte 12: 0x2 is CS_ADHOC.
+                self.assertTrue(all(struct.unpack_from(">I", cd[0], 12)[0] & 2
+                                    for cd in directories))
+
+    def test_http_and_gnutls_rpath_dependencies_exist_in_1900_bootstrap(self):
+        tar = shutil.which("tar")
+        result = subprocess.run([tar, "-tf", str(ARCHIVE)], capture_output=True,
+                                text=True, timeout=40)
+        self.assertEqual(result.returncode, 0, result.stderr[:200])
+        packaged = set(result.stdout.splitlines())
+        for path, data in self.files.items():
+            dependencies = command_paths(data, {0xC, 0x18, 0x80000018,
+                                                0x1F, 0x8000001F})
+            for dependency in dependencies:
+                if dependency.startswith("@rpath/"):
+                    name = dependency[len("@rpath/"):]
+                    with self.subTest(binary=path, dependency=name):
+                        self.assertTrue("./usr/lib/" + name in packaged or
+                                        "./usr/local/lib/" + name in packaged)
 
     def test_corrupting_page_zero_is_detected_not_trusted(self):
         data = bytearray(self.files[GNUTLS])

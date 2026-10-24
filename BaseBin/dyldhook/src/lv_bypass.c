@@ -43,21 +43,39 @@ bool proc_has_bootstrap_port(void)
 
 CS_SuperBlob *load_signature(int fd, const fsignatures_t *fs)
 {
-	uintptr_t superblobStart = fs->fs_file_start + (uintptr_t)fs->fs_blob_start;
-	uintptr_t superblobSize  = fs->fs_blob_size;
+	// File offsets come from a package's signature command. Reject unbounded
+	// or truncated reads before allocating memory in the private dyld process.
+	if (!fs || fs->fs_file_start < 0 ||
+	    fs->fs_blob_size < sizeof(CS_SuperBlob) ||
+	    fs->fs_blob_size > (16U * 1024U * 1024U)) return NULL;
+	uint64_t fileStart = (uint64_t)fs->fs_file_start;
+	uint64_t blobStart = (uintptr_t)fs->fs_blob_start;
+	uint64_t superblobSize = fs->fs_blob_size;
+	if (fileStart > INT64_MAX || blobStart > INT64_MAX - fileStart) return NULL;
+	uint64_t superblobStart = fileStart + blobStart;
+	off_t oldPos = lseek(fd, 0, SEEK_CUR);
+	if (oldPos < 0) return NULL;
+	off_t endPos = lseek(fd, 0, SEEK_END);
+	if (lseek(fd, oldPos, SEEK_SET) != oldPos || endPos < 0 ||
+	    superblobStart > (uint64_t)endPos ||
+	    superblobSize > (uint64_t)endPos - superblobStart) return NULL;
 
 	vm_address_t addr;
 	kern_return_t kr = vm_allocate(mach_task_self(), &addr, superblobSize, VM_FLAGS_ANYWHERE);
 	if (kr != KERN_SUCCESS) return NULL;
 
-	lseek(fd, superblobStart, SEEK_SET);
-	int r = read(fd, (void *)addr, superblobSize);
-	if (r != superblobSize) {
+	if (lseek(fd, (off_t)superblobStart, SEEK_SET) != (off_t)superblobStart ||
+	    read(fd, (void *)addr, (size_t)superblobSize) != (ssize_t)superblobSize) {
 		vm_deallocate(mach_task_self(), addr, superblobSize);
 		return NULL;
 	}
 	CS_SuperBlob *superblob = (CS_SuperBlob *)addr;
-	if (OSSwapBigToHostInt32(superblob->length) > superblobSize) {
+	uint32_t magic = OSSwapBigToHostInt32(superblob->magic);
+	uint32_t declaredLen = OSSwapBigToHostInt32(superblob->length);
+	uint32_t count = OSSwapBigToHostInt32(superblob->count);
+	if ((magic != CSMAGIC_EMBEDDED_SIGNATURE && magic != CSMAGIC_DETACHED_SIGNATURE) ||
+	    declaredLen < sizeof(CS_SuperBlob) || declaredLen > superblobSize ||
+	    count > (declaredLen - sizeof(CS_SuperBlob)) / sizeof(CS_BlobIndex)) {
 		vm_deallocate(mach_task_self(), addr, superblobSize);
 		return NULL;
 	}
@@ -130,13 +148,17 @@ int superblob_find_cdflags_and_team_id(const CS_SuperBlob *superblob, off_t *cdf
 
 bool superblob_is_adhoc_signed(const CS_SuperBlob *superblob)
 {
+	if (!superblob) return false;
 	const uint8_t *base = (const uint8_t *)superblob;
+	uint32_t superMagic = OSSwapBigToHostInt32(superblob->magic);
+	if (superMagic != CSMAGIC_EMBEDDED_SIGNATURE &&
+	    superMagic != CSMAGIC_DETACHED_SIGNATURE) return false;
 	uint32_t superLen  = OSSwapBigToHostInt32(superblob->length);
 	uint32_t count      = OSSwapBigToHostInt32(superblob->count);
  
 	size_t indexBytes = (size_t)count * sizeof(CS_BlobIndex);
 	if (superLen < sizeof(CS_SuperBlob) || indexBytes > superLen - sizeof(CS_SuperBlob)) {
-		return -1;
+		return false;
 	}
 	
 	// Find signature slot
@@ -146,8 +168,12 @@ bool superblob_is_adhoc_signed(const CS_SuperBlob *superblob)
 		uint32_t cdOffset = OSSwapBigToHostInt32(superblob->index[i].offset);
  
 		if (type == CSSLOT_SIGNATURESLOT) {
-			if (cdOffset > superLen || superLen - cdOffset < sizeof(CS_CodeDirectory)) {
-				return true;
+			// CMS wrappers have an eight-byte header, not a full CodeDirectory.
+			// Treat an invalid slot as malformed rather than assuming ad-hoc.
+			if (cdOffset < sizeof(CS_SuperBlob) + indexBytes ||
+			    cdOffset > superLen ||
+			    superLen - cdOffset < sizeof(CS_GenericBlob)) {
+				return false;
 			}
 
 			wrapperBlob = (const CS_GenericBlob *)((uintptr_t)superblob + cdOffset);
@@ -156,9 +182,12 @@ bool superblob_is_adhoc_signed(const CS_SuperBlob *superblob)
 	}
 
 	if (wrapperBlob) {
-		if (OSSwapBigToHostInt32(wrapperBlob->length) > 8) {
-			return false;
-		}
+		uint32_t wrapperLen = OSSwapBigToHostInt32(wrapperBlob->length);
+		uint32_t wrapperOffset = (uint32_t)((const uint8_t *)wrapperBlob - base);
+		if (OSSwapBigToHostInt32(wrapperBlob->magic) != CSMAGIC_BLOBWRAPPER ||
+		    wrapperLen < sizeof(CS_GenericBlob) ||
+		    wrapperLen > superLen - wrapperOffset) return false;
+		return wrapperLen == sizeof(CS_GenericBlob);
 	}
 
 	return true;
@@ -236,10 +265,13 @@ int HOOK(__fcntl)(int fd, int cmd, void *arg1, void *arg2, void *arg3, void *arg
 							superblobNeedsFree = true;
 						}
 						else {
-							superblob = (CS_SuperBlob *)siginfo.signature.fs_blob_start;
-							if (OSSwapBigToHostInt32(superblob->length) > siginfo.signature.fs_blob_size) {
-								superblob = NULL;
-							}
+								if (siginfo.signature.fs_blob_start &&
+								    siginfo.signature.fs_blob_size >= sizeof(CS_SuperBlob)) {
+									superblob = (CS_SuperBlob *)siginfo.signature.fs_blob_start;
+									uint32_t size = OSSwapBigToHostInt32(superblob->length);
+									if (size < sizeof(CS_SuperBlob) ||
+									    size > siginfo.signature.fs_blob_size) superblob = NULL;
+								}
 						}
 
 						if (superblob) {

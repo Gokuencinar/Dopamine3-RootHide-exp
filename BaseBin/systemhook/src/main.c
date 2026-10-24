@@ -383,7 +383,7 @@ static int rh3_trust_before_spawn(const char *path, struct _posix_spawn_args_des
         // the stock OS/another root merely because a process spawns it.
         if (!rh3_spawn_canonical_root_child(path, root)) {
             if (rh3_trust_looks_like_macho(path)) return EACCES;
-        } else {
+        } else if (rh3_trust_looks_like_macho(path)) {
             xpc_object_t preferredArchs = rh3_copy_spawn_arch_preferences(desc);
             int trustResult = jbclient_trust_executable_recurse(path, preferredArchs);
             if (preferredArchs) xpc_release(preferredArchs);
