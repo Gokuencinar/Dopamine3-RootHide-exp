@@ -1297,7 +1297,10 @@ int libarchive_unarchive(const char *fileToExtract, const char *extractionPath)
 					break;
 			if (r < ARCHIVE_OK)
 					fprintf(stderr, "%s\n", archive_error_string(a));
-			if (r < ARCHIVE_WARN)
+			// A recoverable libarchive warning is still an incomplete
+			// extraction for a pinned RootHide bootstrap. Never allow the
+			// caller to commit a root with missing package backlinks.
+			if (r < ARCHIVE_OK)
 					return 1;
 
 			const char *currentFile = archive_entry_pathname(entry);
@@ -1309,20 +1312,22 @@ int libarchive_unarchive(const char *fileToExtract, const char *extractionPath)
 			archive_entry_set_pathname(entry, outputPath);
 			
 			r = archive_write_header(ext, entry);
-			if (r < ARCHIVE_OK)
+			if (r < ARCHIVE_OK) {
+				fprintf(stderr, "%s\n", archive_error_string(ext));
+				return 1;
+			}
+			if (archive_entry_size(entry) > 0) {
+				r = copy_data(a, ext);
+				if (r < ARCHIVE_OK) {
 					fprintf(stderr, "%s\n", archive_error_string(ext));
-			else if (archive_entry_size(entry) > 0) {
-					r = copy_data(a, ext);
-					if (r < ARCHIVE_OK)
-							fprintf(stderr, "%s\n", archive_error_string(ext));
-					if (r < ARCHIVE_WARN)
-							return 1;
+					return 1;
+				}
 			}
 			r = archive_write_finish_entry(ext);
-			if (r < ARCHIVE_OK)
+			if (r < ARCHIVE_OK) {
 					fprintf(stderr, "%s\n", archive_error_string(ext));
-			if (r < ARCHIVE_WARN)
-					return 1;
+				return 1;
+			}
 	}
 	archive_read_close(a);
 	archive_read_free(a);

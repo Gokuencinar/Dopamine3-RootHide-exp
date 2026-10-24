@@ -2,10 +2,59 @@
 #include <bsm/libbsm.h>
 #include <errno.h>
 #include <libproc.h>
+#include <sys/stat.h>
 
 #include <libjailbreak/libjailbreak.h>
+#include <libjailbreak/codesign.h>
 #include <libjailbreak/roothider.h>
 #include <libjailbreak/roothide_bootlog.h>
+
+// CS_INSTALLER from the jailbreak app does not automatically survive exec.
+// Keep the entitlement scoped to a suspended, authenticated-root child that
+// actually owns package/account configuration. Never set it on PID 1, all
+// processes, an arbitrary request PID, or a helper outside the live .jbroot.
+static bool rh3_installer_child_is_trusted(const char *childPath)
+{
+    if (!childPath || !roothide_is_active()) return false;
+    const char *root = jbinfo(rootPath);
+    if (!root || !root[0]) return false;
+    static const char *helpers[] = {
+        "/usr/bin/dpkg", "/usr/bin/ssh-keygen",
+        "/usr/sbin/pw", "/usr/sbin/pwd_mkdb"
+    };
+    for (size_t i = 0; i < sizeof(helpers) / sizeof(helpers[0]); i++) {
+        char expected[PATH_MAX];
+        int length = snprintf(expected, sizeof(expected), "%s%s", root, helpers[i]);
+        if (length <= 0 || (size_t)length >= sizeof(expected)) continue;
+        // proc_pidpath sometimes reports the equivalent /private/var path.
+        bool matched = strcmp(childPath, expected) == 0;
+        if (!matched && strncmp(expected, "/var/", 5) == 0) {
+            char alias[PATH_MAX];
+            length = snprintf(alias, sizeof(alias), "/private%s", expected);
+            matched = length > 0 && (size_t)length < sizeof(alias) &&
+                      strcmp(childPath, alias) == 0;
+        }
+        if (!matched) continue;
+        struct stat info = {0};
+        if (lstat(childPath, &info) != 0 || !S_ISREG(info.st_mode) ||
+            info.st_uid != 0 || info.st_nlink != 1 ||
+            !(info.st_mode & S_IXUSR) || (info.st_mode & 0022)) return false;
+        return true;
+    }
+    return false;
+}
+
+static int rh3_patch_installer_right(pid_t pid, bool childExecInheritance)
+{
+    uint64_t proc = proc_find(pid);
+    if (!proc) return -1;
+    // Only dpkg's maintainer scripts and pw's pwd_mkdb child need the
+    // inherited installer right; never grant it to ordinary app processes.
+    uint32_t required = CS_INSTALLER |
+        (childExecInheritance ? CS_EXEC_INHERIT_SIP : 0);
+    proc_csflags_set(proc, required);
+    return (proc_getcsflags(proc) & required) == required ? 0 : -1;
+}
 
 void jailbreakd_reply_message(JBD_MESSAGE_ID msgId, xpc_object_t reply)
 {
@@ -100,12 +149,26 @@ void jailbreakd_received_message(mach_port_t port)
 							//`frida -f` sucks with proc_patch_dyld on ios15
 							result = proc_patch_csflags(pid);
 						}
-							else if(roothide_patch_proc(pid) == 0) {
+								else if(roothide_patch_proc(pid) == 0) {
+										// The parent identity comes from the XPC audit token;
+										// ppid was matched above while the child is suspended.
+										// This is not a general entitlement inheritance policy.
+										bool needsInstaller = clientPid != 1 && clientUid == 0 &&
+										    rh3_installer_child_is_trusted(childPath);
+										bool maySpawnMaintainer = needsInstaller &&
+										    (string_has_suffix(childPath, "/usr/bin/dpkg") ||
+										     string_has_suffix(childPath, "/usr/sbin/pw"));
+										if (needsInstaller && rh3_patch_installer_right(pid, maySpawnMaintainer) != 0) {
+											result = -1;
+											rh3_bootlog("jailbreakd: verified helper installer right denied; child not resumed");
+										} else if (needsInstaller) {
+											rh3_bootlog("jailbreakd: verified hidden-root installer child entitled");
+										}
 									// Recheck immediately before signal, in case the child
 									// terminated during patching. Never resume a recycled PID.
-									if(clientPid == 1 && proc_get_uniqueid(pid) != expectedUniqueid) {
+										if(result == 0 && clientPid == 1 && proc_get_uniqueid(pid) != expectedUniqueid) {
 										result = -1;
-										} else if(resume && !deferredResume && kill(pid, SIGCONT) != 0) {
+											} else if(result == 0 && resume && !deferredResume && kill(pid, SIGCONT) != 0) {
 									// The parent will kill/reap its OWN suspended child
 									// when it receives this nonzero patch result.
 									JBLogError("spawn patch: failed to resume child %d", pid);

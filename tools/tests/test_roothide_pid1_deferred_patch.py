@@ -171,7 +171,9 @@ int main(void) {
         server = SERVER.read_text(encoding='utf-8').split('case JBD_MSG_SPAWN_PATCH_CHILD:',1)[1].split('case JBD_MSG_SPAWN_EXEC_START:',1)[0]
         self.assertIn('bool deferredResume = xpc_dictionary_get_bool(message, "deferred_resume")', server)
         self.assertIn('&& !deferredResume', server)
-        self.assertIn('else if(resume && !deferredResume && kill(pid, SIGCONT)', server)
+        # A denied scoped installer capability must also block SIGCONT;
+        # the existing PID1 deferred-resume ownership remains unchanged.
+        self.assertIn('else if(result == 0 && resume && !deferredResume && kill(pid, SIGCONT)', server)
 
     def test_native_actual_state_handles_races_backpressure_and_recovery(self):
         cc = shutil.which('gcc') or shutil.which('clang') or shutil.which('cc')
