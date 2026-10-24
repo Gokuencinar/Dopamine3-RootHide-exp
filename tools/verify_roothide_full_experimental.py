@@ -23,9 +23,12 @@ EXPERIMENTAL_BUNDLE_ID = "com.gokuencinar.roothide3.fulltest"
 EXPERIMENTAL_DISPLAY_NAME = "RootHide 3 Experimental"
 HARDWARE_BETA_BUNDLE_ID = "com.gokuencinar.roothide3.hardwarebeta"
 HARDWARE_BETA_DISPLAY_NAME = "RootHide 3 Hardware Beta"
+ALL_ENABLED_DISPLAY_NAME = "RootHide 3 All Enabled Beta"
 GUARD_MARKER = b"RH3_FULL_APP_EXPERIMENTAL_GUARDED_V1"
 DISABLED_MARKER = b"RH3_JAILBREAK_DISABLED_V1"
 ACTIVE_MARKER = b"RH3_HARDWARE_BETA_ACTIVATED_V1"
+TWEAKS_ON_MARKER = b"RH3_TWEAKS_DEFAULT_ENABLED_V1"
+TWEAKS_SAFE_MARKER = b"RH3_TWEAKS_DEFAULT_SAFE_V1"
 
 
 def check_bundle_identifiers(archive):
@@ -52,7 +55,7 @@ def check_bundle_identifiers(archive):
     return errors, bundles
 
 
-def check_full_identity(archive, *, hardware_beta=False):
+def check_full_identity(archive, *, hardware_beta=False, all_enabled=False):
     """Identity, separation and defensive ZIP validation (portable fixture)."""
     errors = []
     contents = archive.infolist()
@@ -83,7 +86,10 @@ def check_full_identity(archive, *, hardware_beta=False):
         "bundle_identifiers": bundles,
     }
     expected_id = HARDWARE_BETA_BUNDLE_ID if hardware_beta else EXPERIMENTAL_BUNDLE_ID
-    expected_display = HARDWARE_BETA_DISPLAY_NAME if hardware_beta else EXPERIMENTAL_DISPLAY_NAME
+    expected_display = (ALL_ENABLED_DISPLAY_NAME if all_enabled else
+                        HARDWARE_BETA_DISPLAY_NAME if hardware_beta else EXPERIMENTAL_DISPLAY_NAME)
+    if all_enabled and not hardware_beta:
+        errors.append("Tweaks-on mode requires jailbreak-enabled hardware beta")
     if details["bundle_id"] != expected_id:
         errors.append("Full experiment has incorrect or stock bundle identifier")
     if details["display_name"] != expected_display:
@@ -98,6 +104,15 @@ def check_full_identity(archive, *, hardware_beta=False):
         errors.append("Full experiment does not match expected bootstrap activation marker")
     if forbidden_marker in archive.read(binary_path):
         errors.append("Full experiment contains contradictory bootstrap activation markers")
+    if hardware_beta:
+        expected_tweaks = TWEAKS_ON_MARKER if all_enabled else TWEAKS_SAFE_MARKER
+        forbidden_tweaks = TWEAKS_SAFE_MARKER if all_enabled else TWEAKS_ON_MARKER
+        if expected_tweaks not in archive.read(binary_path):
+            errors.append("Full experiment lacks requested tweak injection default marker")
+        if forbidden_tweaks in archive.read(binary_path):
+            errors.append("Full experiment contains contradictory tweak injection defaults")
+    elif TWEAKS_ON_MARKER in archive.read(binary_path):
+        errors.append("Jailbreak-disabled full experiment claims tweaks enabled")
     return errors, details
 
 
@@ -158,13 +173,14 @@ def check_embedded_deployment(archive):
     return errors, checked
 
 
-def inspect_ipa(path, *, hardware_beta=False):
+def inspect_ipa(path, *, hardware_beta=False, all_enabled=False):
     errors, details = check_ipa(path)
     if not path.is_file():
         return errors, details
     try:
         with zipfile.ZipFile(path) as archive:
-            identity_errors, identity_details = check_full_identity(archive, hardware_beta=hardware_beta)
+            identity_errors, identity_details = check_full_identity(archive, hardware_beta=hardware_beta,
+                                                                 all_enabled=all_enabled)
             errors.extend(identity_errors)
             details.update(identity_details)
             deployment_errors, checked = check_embedded_deployment(archive)
@@ -184,8 +200,11 @@ def main():
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--hardware-beta", action="store_true",
                         help="Explicitly verify a manually activated, untested hardware beta")
+    parser.add_argument("--all-enabled", action="store_true",
+                        help="Also require default tweak injection on a fresh experimental bootstrap")
     args = parser.parse_args()
-    errors, details = inspect_ipa(args.ipa, hardware_beta=args.hardware_beta)
+    errors, details = inspect_ipa(args.ipa, hardware_beta=args.hardware_beta,
+                                  all_enabled=args.all_enabled)
     report = {
         "status": "PASS" if not errors else "FAIL",
         "classification": ("UNTESTED HARDWARE BETA / DANGEROUS JAILBREAK ENABLED"
@@ -196,6 +215,8 @@ def main():
         "apple_provisioning_verified": False,
         "device_bootstrap_verified": False,
         "roothide_runtime_enabled": args.hardware_beta,
+        "tweaks_default_enabled_on_fresh_bootstrap": args.all_enabled,
+        "tweak_loader_runtime_verified": False,
     }
     if args.json:
         print(json.dumps(report, indent=2))

@@ -1,5 +1,5 @@
 name: "Dopamine: build and upload"
-run-name: "RootHide3 r${{ github.run_number }}.a${{ github.run_attempt }} - ${{ github.event_name == 'workflow_dispatch' && inputs.hardware_beta == true && 'Hardware Beta' || 'CI' }}"
+run-name: "RootHide3 r${{ github.run_number }}.a${{ github.run_attempt }} - ${{ github.event_name == 'workflow_dispatch' && inputs.hardware_beta == true && inputs.all_enabled == true && 'All Enabled Beta' || github.event_name == 'workflow_dispatch' && inputs.hardware_beta == true && 'Hardware Beta' || 'CI' }}"
 
 on:
   push:
@@ -18,6 +18,11 @@ on:
     inputs:
       hardware_beta:
         description: 'Build the unvalidated RootHide jailbreak-enabled hardware beta'
+        type: boolean
+        required: true
+        default: false
+      all_enabled:
+        description: 'Also enable tweaks by default on a fresh RootHide bootstrap (experimental; watchdog still applies)'
         type: boolean
         required: true
         default: false
@@ -90,6 +95,7 @@ jobs:
     env:
       # Only an explicit manual dispatch can enable the hardware variant.
       ROOTHIDE_HARDWARE_TEST: ${{ github.event_name == 'workflow_dispatch' && inputs.hardware_beta == true && 'YES' || 'NO' }}
+      ROOTHIDE_ALL_ENABLED: ${{ github.event_name == 'workflow_dispatch' && inputs.hardware_beta == true && inputs.all_enabled == true && 'YES' || 'NO' }}
     steps:
       - name: Xcode Setup
         uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # peeled commit for v1
@@ -420,25 +426,50 @@ jobs:
         run: |
           set -euo pipefail
           cp Application/Dopamine.ipa Application/RootHide3-Hardware-Beta.ipa
-          python3 tools/verify_roothide_full_experimental.py --hardware-beta --ipa Application/RootHide3-Hardware-Beta.ipa --json | tee roothide-hardware-beta-inspection.json
+          extra_verify=()
+          if [[ "$ROOTHIDE_ALL_ENABLED" == YES ]]; then extra_verify+=(--all-enabled); fi
+          python3 tools/verify_roothide_full_experimental.py --hardware-beta --ipa Application/RootHide3-Hardware-Beta.ipa "${extra_verify[@]}" --json | tee roothide-hardware-beta-inspection.json
           # Validate the signed main Mach-O CodeDirectory and embedded policy,
           # not merely the signing load-command offsets. This remains an ad-hoc
           # signature: Apple provisioning and actual sideloading are not tested.
           python3 tools/verify_roothide_app_signature.py --ipa Application/RootHide3-Hardware-Beta.ipa --json | tee roothide-app-signature-inspection.json
           suffix="r${GITHUB_RUN_NUMBER}-a${GITHUB_RUN_ATTEMPT}-${GITHUB_SHA:0:7}"
-          asset="RootHide3-Hardware-Beta-${suffix}.ipa"
+          if [[ "$ROOTHIDE_ALL_ENABLED" == YES ]]; then
+            asset="RootHide3-All-Enabled-Beta-${suffix}.ipa"
+          else
+            asset="RootHide3-Hardware-Beta-${suffix}.ipa"
+          fi
           tag="roothide3-hw-${suffix}"
           cp Application/RootHide3-Hardware-Beta.ipa "Application/$asset"
           (cd Application && shasum -a 256 "$asset" > "$asset.sha256")
           echo "asset=$asset" >> "$GITHUB_OUTPUT"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          printf 'RootHide 3: beta con el intento de jailbreak habilitado.\nRevisión: %s\nPerfiles experimentales para arm64/arm64e e iOS 15, 16, 17, 18 y 26. Los exploits de Dopamine deciden la combinación admitida.\nEmpieza sin tweaks. No se ha probado en un iPhone.\nHaz una copia de tus datos y consulta HARDWARE-BETA.md.\n' "$GITHUB_SHA" > ROOT_HIDE_HARDWARE_BETA_README.txt
+          if [[ "$ROOTHIDE_ALL_ENABLED" == YES ]]; then
+            printf 'RootHide 3: EXPERIMENTO con jailbreak habilitado y tweaks activos por defecto en un bootstrap NUEVO, salvo safe mode previo, watchdog, o exclusiones por proceso.\nRevisión: %s\nNO demuestra que TweakLoader, APT, servicios, Sileo ni SSH funcionen en un iPhone. No inicia SSH sin configuracion segura. Mayor riesgo de bucles de reinicio.\nConsulta HARDWARE-BETA.md.\n' "$GITHUB_SHA" > ROOT_HIDE_HARDWARE_BETA_README.txt
+          else
+            printf 'RootHide 3: beta con el intento de jailbreak habilitado.\nRevisión: %s\nPerfiles experimentales para arm64/arm64e e iOS 15, 16, 17, 18 y 26. Los exploits de Dopamine deciden la combinación admitida.\nEmpieza sin tweaks. No se ha probado en un iPhone.\nHaz una copia de tus datos y consulta HARDWARE-BETA.md.\n' "$GITHUB_SHA" > ROOT_HIDE_HARDWARE_BETA_README.txt
+          fi
 
       - name: Upload jailbreak-enabled RootHide hardware beta
-        if: steps.roothide_port.outputs.is_port == 'true' && env.ROOTHIDE_HARDWARE_TEST == 'YES'
+        if: steps.roothide_port.outputs.is_port == 'true' && env.ROOTHIDE_HARDWARE_TEST == 'YES' && env.ROOTHIDE_ALL_ENABLED != 'YES'
         uses: actions/upload-artifact@v4
         with:
           name: RootHide3-HARDWARE-BETA-JAILBREAK-ENABLED-r${{ github.run_number }}-a${{ github.run_attempt }}
+          if-no-files-found: error
+          retention-days: 7
+          path: |
+            ${{ github.workspace }}/Application/${{ steps.hardware_beta_package.outputs.asset }}
+            ${{ github.workspace }}/roothide-hardware-beta-inspection.json
+            ${{ github.workspace }}/roothide-app-signature-inspection.json
+            ${{ github.workspace }}/Application/${{ steps.hardware_beta_package.outputs.asset }}.sha256
+            ${{ github.workspace }}/ROOT_HIDE_HARDWARE_BETA_README.txt
+            ${{ github.workspace }}/HARDWARE-BETA.md
+
+      - name: Upload all-enabled RootHide hardware beta
+        if: steps.roothide_port.outputs.is_port == 'true' && env.ROOTHIDE_HARDWARE_TEST == 'YES' && env.ROOTHIDE_ALL_ENABLED == 'YES'
+        uses: actions/upload-artifact@v4
+        with:
+          name: RootHide3-ALL-ENABLED-BETA-JAILBREAK-AND-TWEAKS-ON-r${{ github.run_number }}-a${{ github.run_attempt }}
           if-no-files-found: error
           retention-days: 7
           path: |

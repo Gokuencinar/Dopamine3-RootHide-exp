@@ -22,6 +22,9 @@
 #ifndef ROOTHIDE3_BOOTSTRAP_READY
 #define ROOTHIDE3_BOOTSTRAP_READY 0
 #endif
+#ifndef ROOTHIDE3_TWEAKS_DEFAULT_ON
+#define ROOTHIDE3_TWEAKS_DEFAULT_ON 0
+#endif
 
 #if RH3_FULL_APP_EXPERIMENTAL
 // Included in the complete Dopamine executable to distinguish the guarded
@@ -31,6 +34,13 @@ __attribute__((used)) static const char RH3FullExperimentMarker[] =
 #if ROOTHIDE3_BOOTSTRAP_READY
 __attribute__((used)) static const char RH3ActivationMarker[] =
     "RH3_HARDWARE_BETA_ACTIVATED_V1";
+#if ROOTHIDE3_TWEAKS_DEFAULT_ON
+__attribute__((used)) static const char RH3TweakModeMarker[] =
+    "RH3_TWEAKS_DEFAULT_ENABLED_V1";
+#else
+__attribute__((used)) static const char RH3TweakModeMarker[] =
+    "RH3_TWEAKS_DEFAULT_SAFE_V1";
+#endif
 #else
 __attribute__((used)) static const char RH3ActivationMarker[] =
     "RH3_JAILBREAK_DISABLED_V1";
@@ -59,6 +69,9 @@ int main(int argc, char * argv[]) {
     // A live use also keeps the build marker in the final linked Mach-O.
     NSLog(@"RootHide 3 guarded full experiment: %s", RH3FullExperimentMarker);
     NSLog(@"RootHide 3 bootstrap setting: %s", RH3ActivationMarker);
+#if ROOTHIDE3_BOOTSTRAP_READY
+    NSLog(@"RootHide 3 tweak default setting: %s", RH3TweakModeMarker);
+#endif
 #endif
 #if !RH3_INSTALLABLE_DIAGNOSTIC && !RH3_FULL_APP_EXPERIMENTAL
     if (argc >= 3) {

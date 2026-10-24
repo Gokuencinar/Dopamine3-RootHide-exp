@@ -45,6 +45,12 @@
 #import "spawn.h"
 #import "clock_alarm.h"
 #import <IOSurface/IOSurfaceRef.h>
+#ifndef ROOTHIDE3_TWEAKS_DEFAULT_ON
+#define ROOTHIDE3_TWEAKS_DEFAULT_ON 0
+#endif
+#if ROOTHIDE3_TWEAKS_DEFAULT_ON && !ROOTHIDE3_BOOTSTRAP_READY
+#error RootHide tweak-default-on requires an explicitly enabled jailbreak build
+#endif
 int posix_spawnattr_set_registered_ports_np(posix_spawnattr_t * __restrict attr, mach_port_t portarray[], uint32_t count);
 
 #define kCFPreferencesNoContainer CFSTR("kCFPreferencesNoContainer")
@@ -632,17 +638,29 @@ static void *rh3_boomerang_server(void *opaque)
          isEqualToString:@"3"];
     NSString *safeMode = [root stringByAppendingPathComponent:@"basebin/.safe_mode"];
     struct stat safeModeInfo = {0};
-    if (lstat(safeMode.fileSystemRepresentation, &safeModeInfo) == 0) {
+    BOOL safeModeAlreadyExists = lstat(safeMode.fileSystemRepresentation, &safeModeInfo) == 0;
+    if (safeModeAlreadyExists) {
         if (!S_ISREG(safeModeInfo.st_mode))
             return [self rh3LaunchdInjectionError:@"RootHide safe-mode marker is not a regular file"];
     } else if (errno != ENOENT) {
         return [self rh3LaunchdInjectionError:@"Could not inspect RootHide safe-mode marker"];
     }
     if (!installed) {
+#if ROOTHIDE3_TWEAKS_DEFAULT_ON
+        // Explicit all-enabled beta ONLY: for a fresh, clean bootstrap do not
+        // create the first-activation safe-mode marker. Preserve an existing
+        // marker after a failed attempt, and NEVER clear the watchdog latch.
+        // systemhook still independently enforces _SafeMode, DISABLE_TWEAKS,
+        // the watchdog latch and per-process injection exclusions.
+        [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
+            [NSString stringWithFormat:@"launchd: explicit all-enabled beta; existing safe mode preserved=%d; watchdog still authoritative",
+             safeModeAlreadyExists]];
+#else
         if (![[NSData data] writeToFile:safeMode atomically:YES]) {
             return [self rh3LaunchdInjectionError:@"Could not prepare RootHide safe mode before launchd injection"];
         }
         [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:@"launchd: first activation; no-tweak mode enforced"];
+#endif
     } else {
         [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
             [NSString stringWithFormat:@"launchd: existing bootstrap; saved no-tweak marker present=%d",

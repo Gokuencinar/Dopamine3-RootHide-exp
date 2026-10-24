@@ -13,6 +13,8 @@ La nueva candidata elimina el filtro de CPU arm64e y contempla iOS 15, 16, 17, 1
 
 La primera instalación empieza sin tweaks. En posteriores activaciones se conserva el modo seguro efectivo; el cambio de inyección puede requerir una nueva fase de jailbreak con permisos de instalación. No interpretes una solicitud pendiente como activación efectiva. Este flujo nuevo tampoco está probado en hardware.
 
+**Variante manual «All Enabled Beta» (24/10/2026):** la opción adicional `all_enabled=true`, junto con `hardware_beta=true`, compila una IPA experimental distinta: jailbreak habilitado y **sin crear automáticamente `basebin/.safe_mode` en un bootstrap nuevo**. No elimina un marcador previo (por ejemplo, tras una activación interrumpida), ni el bloqueo del watchdog, ni las exclusiones por proceso que protegen a launchd, Dopamine y otros servicios. Tampoco cambia contraseñas ni habilita por defecto un servidor SSH: la distribución inicial no contiene OpenSSH y nunca debe exponerse un servicio de administración sin una configuración segura. La inyección funcional de `systemhook`/`TweakLoader`, instalación APT, Sileo/Zebra, NewTerm y el funcionamiento de SSH siguen requiriendo una prueba física; esta opción solo cambia el estado inicial solicitado y aumenta el riesgo de bucles de reinicio por tweaks.
+
 La instalación inicial incluye RootHide Manager y los gestores que selecciones: Sileo y, opcionalmente, Zebra. No incluye arm64ePatcher.
 
 ## Reparación puntual de la dependencia libkrw (RootHide 3)

@@ -37,6 +37,9 @@ class RootHideBuildMatrixTests(unittest.TestCase):
         self.assertIn("ROOTHIDE3_BOOTSTRAP_READY=$(ROOTHIDE_BOOTSTRAP_GATE)", experimental)
         self.assertIn("ROOTHIDE_BOOTSTRAP_GATE := 0", makefile)
         self.assertIn("ROOTHIDE_BOOTSTRAP_GATE := 1", makefile)
+        self.assertIn("ROOTHIDE_TWEAKS_DEFAULT_ON := 0", makefile)
+        self.assertIn("ROOTHIDE_TWEAKS_DEFAULT_ON := 1", makefile)
+        self.assertIn("ROOTHIDE3_TWEAKS_DEFAULT_ON=$(ROOTHIDE_TWEAKS_DEFAULT_ON)", makefile)
         self.assertIn("$(DOPAMINE_NIGHTLY_DEFINITIONS)", experimental)
 
     def test_xcode_cache_launcher_requires_explicit_opt_in(self):
@@ -89,6 +92,7 @@ class RootHideBuildMatrixTests(unittest.TestCase):
                         self.assertIn("RH3_APP_BUNDLE_IDENTIFIER=" + BUNDLE_ID, command)
                         self.assertIn("RH3_FULL_APP_EXPERIMENTAL=1", command)
                         self.assertIn("ROOTHIDE3_BOOTSTRAP_READY=0", command)
+                        self.assertIn("ROOTHIDE3_TWEAKS_DEFAULT_ON=0", command)
                         self.assertIn("RH3_APP_DISPLAY_NAME=", command)
                     else:
                         self.assertNotIn(BUNDLE_ID, command)
@@ -115,6 +119,7 @@ class RootHideBuildMatrixTests(unittest.TestCase):
                                if line.lstrip().startswith("xcodebuild "))
                 self.assertIn("RH3_APP_BUNDLE_IDENTIFIER=" + BETA_BUNDLE_ID, command)
                 self.assertIn("ROOTHIDE3_BOOTSTRAP_READY=1", command)
+                self.assertIn("ROOTHIDE3_TWEAKS_DEFAULT_ON=0", command)
                 self.assertIn("RH3_FULL_APP_EXPERIMENTAL=1", command)
                 self.assertNotIn(BUNDLE_ID, command)
                 self.assertEqual("hardware-test-sha" in command, nightly == "1")
@@ -127,6 +132,29 @@ class RootHideBuildMatrixTests(unittest.TestCase):
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("requires ROOTHIDE_EXPERIMENTAL_BUILD=1", result.stderr)
+
+    def test_explicit_all_enabled_requires_manual_hardware_beta(self):
+        makefile = MAKEFILE.read_text(encoding="utf-8")
+        workflow = (ROOT / ".github/workflows/main.yml").read_text(encoding="utf-8")
+        self.assertIn("ROOTHIDE_ALL_ENABLED=YES requires ROOTHIDE_HARDWARE_TEST=YES", makefile)
+        self.assertIn("inputs.hardware_beta == true && inputs.all_enabled == true", workflow)
+        make = shutil.which("gmake") or shutil.which("make")
+        if not make:
+            return
+        for hardware, enabled, accepted in (("NO", "YES", False),
+                                            ("YES", "YES", True),
+                                            ("YES", "NO", True)):
+            with self.subTest(hardware=hardware, enabled=enabled):
+                result = subprocess.run([make, "--no-print-directory", "-n", "-C", "Application",
+                                         "Dopamine.ipa", "ROOTHIDE_EXPERIMENTAL_BUILD=1",
+                                         f"ROOTHIDE_HARDWARE_TEST={hardware}",
+                                         f"ROOTHIDE_ALL_ENABLED={enabled}"], cwd=ROOT,
+                                        text=True, capture_output=True)
+                self.assertEqual(result.returncode == 0, accepted, result.stderr)
+                if accepted:
+                    command = next(x for x in result.stdout.splitlines()
+                                   if x.lstrip().startswith("xcodebuild "))
+                    self.assertIn(f"ROOTHIDE3_TWEAKS_DEFAULT_ON={int(enabled == 'YES')}", command)
 
 
 if __name__ == "__main__":

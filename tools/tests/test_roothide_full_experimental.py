@@ -6,6 +6,7 @@ import unittest
 import zipfile
 from tools.verify_roothide_full_experimental import (
     check_full_identity, GUARD_MARKER, DISABLED_MARKER, ACTIVE_MARKER,
+    TWEAKS_ON_MARKER, TWEAKS_SAFE_MARKER, ALL_ENABLED_DISPLAY_NAME,
     EXPERIMENTAL_BUNDLE_ID, EXPERIMENTAL_DISPLAY_NAME,
     HARDWARE_BETA_BUNDLE_ID, HARDWARE_BETA_DISPLAY_NAME
 )
@@ -19,7 +20,7 @@ def source(name):
 
 
 def fixture(*, identifier=EXPERIMENTAL_BUNDLE_ID, display=EXPERIMENTAL_DISPLAY_NAME,
-            marker=True, hardware_beta=False, extra=None):
+            marker=True, hardware_beta=False, all_enabled=False, extra=None):
     memory = io.BytesIO()
     info = plistlib.dumps({"CFBundleIdentifier": identifier,
                            "CFBundleDisplayName": display,
@@ -28,7 +29,9 @@ def fixture(*, identifier=EXPERIMENTAL_BUNDLE_ID, display=EXPERIMENTAL_DISPLAY_N
         archive.writestr("Payload/Dopamine.app/Info.plist", info)
         archive.writestr("Payload/Dopamine.app/Dopamine",
                          thin_macho() + (GUARD_MARKER if marker else b"") +
-                         (ACTIVE_MARKER if hardware_beta else DISABLED_MARKER))
+                         (ACTIVE_MARKER if hardware_beta else DISABLED_MARKER) +
+                         ((TWEAKS_ON_MARKER if all_enabled else TWEAKS_SAFE_MARKER)
+                          if hardware_beta else b""))
         if extra:
             archive.writestr(extra, b"x")
     memory.seek(0)
@@ -121,6 +124,36 @@ class FullExperimentalTests(unittest.TestCase):
             self.assertTrue(check_full_identity(archive, hardware_beta=False)[0])
         with zipfile.ZipFile(fixture()) as archive:
             self.assertTrue(check_full_identity(archive, hardware_beta=True)[0])
+
+    def test_all_enabled_beta_requires_both_distinct_markers(self):
+        memory = fixture(identifier=HARDWARE_BETA_BUNDLE_ID,
+                         display=ALL_ENABLED_DISPLAY_NAME,
+                         hardware_beta=True, all_enabled=True)
+        with zipfile.ZipFile(memory) as archive:
+            self.assertEqual(check_full_identity(archive, hardware_beta=True,
+                                                all_enabled=True)[0], [])
+            self.assertTrue(check_full_identity(archive, hardware_beta=True)[0])
+            self.assertTrue(check_full_identity(archive, all_enabled=True)[0])
+        memory = fixture(identifier=HARDWARE_BETA_BUNDLE_ID,
+                         display=ALL_ENABLED_DISPLAY_NAME,
+                         hardware_beta=True, all_enabled=False)
+        with zipfile.ZipFile(memory) as archive:
+            self.assertTrue(check_full_identity(archive, hardware_beta=True,
+                                                all_enabled=True)[0])
+
+    def test_first_boot_opt_in_does_not_erase_prior_safe_mode(self):
+        jb = source("Application/Dopamine/Jailbreak/DOJailbreaker.m")
+        first = jb[jb.index('if (!installed) {', jb.index('BOOL safeModeAlreadyExists')):
+                   jb.index('launchd: allocating boomerang port')]
+        self.assertIn('#if ROOTHIDE3_TWEAKS_DEFAULT_ON', first)
+        self.assertIn('safeModeAlreadyExists', first)
+        self.assertIn('#else', first)
+        self.assertIn('writeToFile:safeMode', first)
+        self.assertNotIn('removeItemAtPath:safeMode', first)
+        self.assertNotIn('unlink(safeMode', first)
+        self.assertIn('watchdog still authoritative', first)
+        self.assertIn('DISABLE_TWEAKS', source("BaseBin/systemhook/src/main.c"))
+        self.assertIn('.roothide3-watchdog-safe-mode', source("BaseBin/systemhook/src/main.c"))
 
 
 if __name__ == "__main__":

@@ -31,6 +31,7 @@ Dopamine.ipa: build/Build/Products/Debug-iphoneos/Dopamine.app
 # latter only adds metadata; disabling nightly must never select stock
 # Dopamine's bundle ID or re-enable its bootstrap on a RootHide build.
 ROOTHIDE_BOOTSTRAP_GATE := 0
+ROOTHIDE_TWEAKS_DEFAULT_ON := 0
 ROOTHIDE_EXPERIMENT_ID := com.gokuencinar.roothide3.fulltest
 ROOTHIDE_EXPERIMENT_NAME := RootHide 3 Experimental
 ifeq ($(ROOTHIDE_HARDWARE_TEST),YES)
@@ -50,6 +51,17 @@ ROOTHIDE_EXPERIMENT_ID := com.gokuencinar.roothide3.hardwarebeta
 ROOTHIDE_EXPERIMENT_NAME := RootHide 3 Hardware Beta
 endif
 
+# A second, deliberately explicit manual selection: jailbreak AND tweak
+# injection can start enabled on a FRESH bootstrap. Never override an existing
+# safe-mode marker or a watchdog latch merely because this build was installed.
+ifeq ($(ROOTHIDE_ALL_ENABLED),YES)
+ifneq ($(ROOTHIDE_HARDWARE_TEST),YES)
+$(error ROOTHIDE_ALL_ENABLED=YES requires ROOTHIDE_HARDWARE_TEST=YES)
+endif
+ROOTHIDE_TWEAKS_DEFAULT_ON := 1
+ROOTHIDE_EXPERIMENT_NAME := RootHide 3 All Enabled Beta
+endif
+
 ifeq ($(NIGHTLY), 1)
 DOPAMINE_NIGHTLY_DEFINITIONS := NIGHTLY=1 COMMIT_HASH=\"$(COMMIT_HASH)\"
 endif
@@ -57,7 +69,7 @@ endif
 ifeq ($(ROOTHIDE_EXPERIMENTAL_BUILD), 1)
 build/Build/Products/Debug-iphoneos/Dopamine.app: FORCE
 	@echo "Building full RootHide 3 experimental app with protected jailbreak entrypoint"
-	xcodebuild -scheme Dopamine -derivedDataPath build -destination 'generic/platform=iOS' CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO RH3_APP_BUNDLE_IDENTIFIER=$(ROOTHIDE_EXPERIMENT_ID) RH3_APP_DISPLAY_NAME='$(ROOTHIDE_EXPERIMENT_NAME)' GCC_PREPROCESSOR_DEFINITIONS='RH3_FULL_APP_EXPERIMENTAL=1 ROOTHIDE3_BOOTSTRAP_READY=$(ROOTHIDE_BOOTSTRAP_GATE) $(DOPAMINE_NIGHTLY_DEFINITIONS)' $(RH3_XCODE_CCACHE_ARGS)
+		xcodebuild -scheme Dopamine -derivedDataPath build -destination 'generic/platform=iOS' CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO RH3_APP_BUNDLE_IDENTIFIER=$(ROOTHIDE_EXPERIMENT_ID) RH3_APP_DISPLAY_NAME='$(ROOTHIDE_EXPERIMENT_NAME)' GCC_PREPROCESSOR_DEFINITIONS='RH3_FULL_APP_EXPERIMENTAL=1 ROOTHIDE3_BOOTSTRAP_READY=$(ROOTHIDE_BOOTSTRAP_GATE) ROOTHIDE3_TWEAKS_DEFAULT_ON=$(ROOTHIDE_TWEAKS_DEFAULT_ON) $(DOPAMINE_NIGHTLY_DEFINITIONS)' $(RH3_XCODE_CCACHE_ARGS)
 else ifeq ($(NIGHTLY), 1)
 build/Build/Products/Debug-iphoneos/Dopamine.app: FORCE
 	xcodebuild -scheme Dopamine -derivedDataPath build -destination 'generic/platform=iOS' CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO GCC_PREPROCESSOR_DEFINITIONS='$(DOPAMINE_NIGHTLY_DEFINITIONS)' $(RH3_XCODE_CCACHE_ARGS)
