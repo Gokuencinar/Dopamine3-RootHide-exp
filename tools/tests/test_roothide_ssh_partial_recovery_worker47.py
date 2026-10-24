@@ -26,6 +26,7 @@ DIAG = SOURCE.split("- (int)diagnoseRootHideOpenSSHSocket", 1)[1].split(
     "// Never treat presence of TweakLoader", 1
 )[0]
 RESOURCE = ROOT / "Application/Dopamine/Resources/roothide_ssh_server_safe_1900.deb"
+BOOTSTRAP = ROOT / "Application/Dopamine/Resources/roothide_bootstrap_1900.tar.zst"
 
 
 def deb_members(binary):
@@ -103,6 +104,99 @@ class RootHideSSHPartialRecovery(unittest.TestCase):
     def test_diagnostic_uses_current_root_after_rotation(self):
         self.assertIn("NSString *serverRoot = RH3SSHCurrentServerRoot()", DIAG)
         self.assertIn("RH3CanonicalAppPath(serverRoot)", DIAG)
+
+    def test_inventory_reason_is_bounded_and_package_specific(self):
+        # Every rejection of a receipt, info .list, or footprint must name
+        # its guard before returning the same fail-closed error as before.
+        reasons = (
+            "duplicate_receipt", "version_mismatch", "architecture_mismatch",
+            "unsupported_receipt_state", "absent_receipt_has_list",
+            "absent_receipt_list_probe", "installed_receipt_list_missing",
+            "installed_receipt_list_open", "installed_receipt_list_metadata",
+            "installed_receipt_list_read", "installed_receipt_list_encoding",
+            "absent_receipt_file_exists", "absent_receipt_file_probe",
+            "installed_receipt_file_missing", "installed_receipt_file_type",
+            "installed_receipt_file_owner",
+            "installed_receipt_file_permissions",
+            "installed_receipt_file_not_executable",
+            "installed_receipt_file_size",
+            "installed_receipt_manifest_missing_entry",
+        )
+        for reason in reasons:
+            with self.subTest(reason=reason):
+                self.assertIn('"' + reason + '"', INSTALL)
+        self.assertIn('packageTags[] = { "client", "sftp", "server" }', INSTALL)
+        self.assertIn(
+            "SSH inventory: package=%s state=%s item=%lu reason=%s error=%d",
+            INSTALL,
+        )
+        self.assertIn("SSH inventory: package=%s state=untrusted item=0 reason=%s error=%d", INSTALL)
+        self.assertIn('if (inventoryError) inventoryItem = fileIndex + 1;', INSTALL)
+        # Missing or unreadable .list should NOT be reclassified as encoding
+        # failure, and it should still be logged with item=0.
+        self.assertIn('if (!inventoryError && state != RH3SSHAbsent && !list)', INSTALL)
+        self.assertIn('if (!inventoryError) [states addObject:@(state)];', INSTALL)
+        self.assertLess(INSTALL.index('SSH inventory: package=%s state=%s'),
+                        INSTALL.index('if (inventoryError) {', INSTALL.index('SSH inventory: package=%s state=%s')))
+        # Neither user-specific paths nor the raw dpkg status/manifest text
+        # may enter a diagnostic message.
+        for forbidden in (
+            'rh3RecordDiagnosticStage:status',
+            'rh3RecordDiagnosticStage:list',
+            'rh3RecordDiagnosticStage:path',
+            'rh3RecordDiagnosticStage:root',
+            '[NSString stringWithFormat:@"SSH inventory: %@", root]',
+        ):
+            self.assertNotIn(forbidden, INSTALL)
+
+    def test_bundled_1900_footprints_match_the_strict_file_guards(self):
+        footprints = (
+            ("roothide_ssh_client_1900.deb", (
+                ("./etc/ssh/ssh_config", False),
+                ("./usr/bin/ssh-keygen", True),
+            )),
+            ("roothide_ssh_sftp_1900.deb", (
+                ("./usr/libexec/sftp-server", True),
+            )),
+            ("roothide_ssh_server_safe_1900.deb", (
+                ("./usr/sbin/sshd", True),
+                ("./etc/ssh/sshd_config", False),
+                ("./Library/LaunchDaemons/com.openssh.sshd.plist", False),
+            )),
+        )
+        if not shutil.which("tar"):
+            self.skipTest("tar not installed")
+        for package, entries in footprints:
+            with self.subTest(package=package):
+                deb = deb_members((RESOURCE.parent / package).read_bytes())
+                result = subprocess.run(
+                    ["tar", "-tvf", "-"], input=deb["data.tar.zst"],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+                )
+                if result.returncode:
+                    self.skipTest("tar cannot read bundled zstd input")
+                lines = result.stdout.decode(errors="replace").splitlines()
+                for path, executable in entries:
+                    matches = [line for line in lines if line.endswith(" " + path)]
+                    self.assertEqual(len(matches), 1, path)
+                    mode = matches[0].split()[0]
+                    self.assertEqual(mode[0], "-")  # no symlinks or directories
+                    self.assertEqual(mode[1:4], "rwx" if executable else "rw-")
+                    self.assertEqual(mode[4:10], "r-xr-x" if executable else "r--r--")
+                    self.assertIn(" root ", matches[0])
+
+    def test_bootstrap_dpkg_list_format_supports_exact_manifest_matching(self):
+        if not BOOTSTRAP.exists() or not shutil.which("tar"):
+            self.skipTest("bundled dpkg manifest unavailable")
+        receipt = subprocess.run(
+            ["tar", "-xOf", str(BOOTSTRAP), "./Library/dpkg/info/libssl3.list"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+        )
+        if receipt.returncode:
+            self.skipTest("cannot read bundled dpkg list")
+        list_text = receipt.stdout.decode("utf-8") + "\n"
+        self.assertIn("\n/usr/lib/libssl.3.dylib\n", list_text)
+        self.assertIn('@"\\n/%@\\n"', INSTALL)
 
     def test_pinned_server_payload_avoids_automatic_launch_and_has_expected_listener(self):
         binary = RESOURCE.read_bytes()

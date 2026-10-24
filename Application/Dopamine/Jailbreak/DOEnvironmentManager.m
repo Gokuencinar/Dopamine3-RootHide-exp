@@ -1922,18 +1922,35 @@ static int RH3DiagnosticMachMagic(NSString *path)
     NSArray<NSString *> *records = [status componentsSeparatedByString:@"\n\n"];
     NSUInteger installed = 0;
     int inventoryError = 0;
+    // Fixed, bounded diagnostics: never log a status record, manifest text,
+    // root path, contents, or user configuration. The first unsafe condition
+    // remains fatal, but identifies exactly which package and guard rejected
+    // it (receipt_mask=3 by itself cannot identify that guard).
+    const char *const packageTags[] = { "client", "sftp", "server" };
     for (NSUInteger i = 0; i < packages.count && !inventoryError; i++) {
         NSDictionary *package = packages[i];
         NSString *prefix = [@"Package: " stringByAppendingFormat:@"%@\n", package[@"package"]];
         NSUInteger matches = 0;
         NSInteger state = RH3SSHAbsent;
+        const char *inventoryReason = "verified";
+        NSUInteger inventoryItem = 0;
         for (NSString *record in records) {
             if (![record hasPrefix:prefix]) continue;
-            if (++matches != 1) { inventoryError = EEXIST; break; }
+            if (++matches != 1) {
+                inventoryError = EEXIST;
+                inventoryReason = "duplicate_receipt";
+                break;
+            }
             NSString *fields = [record stringByAppendingString:@"\n"];
-            if (![fields containsString:@"\nVersion: 9.2p1\n"] ||
-                ![fields containsString:@"\nArchitecture: iphoneos-arm64e\n"]) {
-                inventoryError = EEXIST; break;
+            if (![fields containsString:@"\nVersion: 9.2p1\n"]) {
+                inventoryError = EEXIST;
+                inventoryReason = "version_mismatch";
+                break;
+            }
+            if (![fields containsString:@"\nArchitecture: iphoneos-arm64e\n"]) {
+                inventoryError = EEXIST;
+                inventoryReason = "architecture_mismatch";
+                break;
             }
             if ([fields containsString:@"\nStatus: install ok installed\n"])
                 state = RH3SSHInstalled;
@@ -1941,51 +1958,103 @@ static int RH3DiagnosticMachMagic(NSString *path)
                 state = RH3SSHUnpacked;
             else if ([fields containsString:@"\nStatus: install ok half-configured\n"])
                 state = RH3SSHHalfConfigured;
-            else { inventoryError = EEXIST; break; }
+            else {
+                inventoryError = EEXIST;
+                inventoryReason = "unsupported_receipt_state";
+                break;
+            }
         }
-        if (inventoryError) break;
+        if (inventoryError) {
+            [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
+                [NSString stringWithFormat:@"SSH inventory: package=%s state=untrusted item=0 reason=%s error=%d",
+                 packageTags[i], inventoryReason, inventoryError]];
+            break;
+        }
         if (state == RH3SSHInstalled) installed++;
         NSString *listName = [package[@"package"] stringByAppendingString:@".list"];
         int listFD = openat(infoDirectory, listName.fileSystemRepresentation,
                             O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
         NSData *listBytes = nil;
         if (state == RH3SSHAbsent) {
-            if (listFD >= 0) inventoryError = EEXIST;
-            else if (errno != ENOENT) inventoryError = errno;
+            if (listFD >= 0) {
+                inventoryError = EEXIST;
+                inventoryReason = "absent_receipt_has_list";
+            } else if (errno != ENOENT) {
+                inventoryError = errno;
+                inventoryReason = "absent_receipt_list_probe";
+            }
         } else {
             struct stat listInfo = {0};
-            if (listFD < 0) inventoryError = EEXIST;
+            if (listFD < 0) {
+                inventoryError = EEXIST;
+                inventoryReason = errno == ENOENT ? "installed_receipt_list_missing" : "installed_receipt_list_open";
+            }
             else if (fstat(listFD, &listInfo) || !S_ISREG(listInfo.st_mode) ||
                      listInfo.st_uid != 0 || listInfo.st_nlink != 1 ||
                      (listInfo.st_mode & 022) || listInfo.st_size < 32 ||
-                     listInfo.st_size > 65536) inventoryError = EEXIST;
+                     listInfo.st_size > 65536) {
+                inventoryError = EEXIST;
+                inventoryReason = "installed_receipt_list_metadata";
+            }
             else listBytes = RH3SSHReadBounded(listFD, listInfo.st_size);
-            if (!inventoryError && !listBytes) inventoryError = EIO;
+            if (!inventoryError && !listBytes) {
+                inventoryError = EIO;
+                inventoryReason = "installed_receipt_list_read";
+            }
         }
         if (listFD >= 0) close(listFD);
         NSString *list = listBytes ?
             [[[NSString alloc] initWithData:listBytes encoding:NSUTF8StringEncoding]
                 stringByAppendingString:@"\n"] : nil;
-        if (state != RH3SSHAbsent && !list) inventoryError = EILSEQ;
-        for (NSString *suffix in footprints[i]) {
+        if (!inventoryError && state != RH3SSHAbsent && !list) {
+            inventoryError = EILSEQ;
+            inventoryReason = "installed_receipt_list_encoding";
+        }
+        for (NSUInteger fileIndex = 0; fileIndex < footprints[i].count; fileIndex++) {
             if (inventoryError) break;
+            NSString *suffix = footprints[i][fileIndex];
             NSString *path = [root stringByAppendingPathComponent:suffix];
             struct stat file = {0};
             int found = lstat(path.fileSystemRepresentation, &file);
             if (state == RH3SSHAbsent) {
-                if (found == 0) inventoryError = EEXIST;
-                else if (errno != ENOENT) inventoryError = errno;
+                if (found == 0) {
+                    inventoryError = EEXIST;
+                    inventoryReason = "absent_receipt_file_exists";
+                } else if (errno != ENOENT) {
+                    inventoryError = errno;
+                    inventoryReason = "absent_receipt_file_probe";
+                }
             } else {
                 // Require a complete manifest line; a substring inside some
                 // other filename is not evidence that dpkg owns this inode.
                 NSString *listed = [NSString stringWithFormat:@"\n/%@\n", suffix];
                 BOOL executable = [suffix hasSuffix:@"/sshd"] ||
                     [suffix hasSuffix:@"/ssh-keygen"] || [suffix hasSuffix:@"/sftp-server"];
-                if (found != 0 || !S_ISREG(file.st_mode) || file.st_uid != 0 ||
-                    (file.st_mode & 022) || (executable && !(file.st_mode & S_IXUSR)) ||
-                    file.st_size < 32 || ![list containsString:listed]) inventoryError = EEXIST;
+                const char *fileReason = NULL;
+                if (found != 0) fileReason = "installed_receipt_file_missing";
+                else if (!S_ISREG(file.st_mode)) fileReason = "installed_receipt_file_type";
+                else if (file.st_uid != 0) fileReason = "installed_receipt_file_owner";
+                else if (file.st_mode & 022) fileReason = "installed_receipt_file_permissions";
+                else if (executable && !(file.st_mode & S_IXUSR))
+                    fileReason = "installed_receipt_file_not_executable";
+                else if (file.st_size < 32) fileReason = "installed_receipt_file_size";
+                else if (![list containsString:listed]) fileReason = "installed_receipt_manifest_missing_entry";
+                if (fileReason) {
+                    inventoryReason = fileReason;
+                    inventoryError = EEXIST;
+                }
             }
+            if (inventoryError) inventoryItem = fileIndex + 1;
         }
+        // item=0 means receipt/.list; a nonzero item is the fixed ordinal in
+        // the pinned package footprint. Never interpolate file or root paths.
+        [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
+            [NSString stringWithFormat:@"SSH inventory: package=%s state=%s item=%lu reason=%s error=%d",
+             packageTags[i],
+             state == RH3SSHAbsent ? "absent" :
+             state == RH3SSHInstalled ? "installed" :
+             state == RH3SSHUnpacked ? "unpacked" : "half_configured",
+             (unsigned long)inventoryItem, inventoryReason, inventoryError]];
         if (!inventoryError) [states addObject:@(state)];
     }
     close(infoDirectory);
