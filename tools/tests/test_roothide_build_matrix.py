@@ -55,7 +55,8 @@ class RootHideBuildMatrixTests(unittest.TestCase):
             result = subprocess.run(
                 [make, "--no-print-directory", "-n", "-C", "Application",
                  "Dopamine.ipa", "ROOTHIDE_EXPERIMENTAL_BUILD=1",
-                 "ROOTHIDE_HARDWARE_TEST=YES", f"RH3_CCACHE={enabled}"],
+                 "ROOTHIDE_HARDWARE_TEST=YES", "ROOTHIDE_ALL_ENABLED=NO",
+                 f"RH3_CCACHE={enabled}"],
                 cwd=ROOT, capture_output=True, text=True,
             )
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -76,6 +77,7 @@ class RootHideBuildMatrixTests(unittest.TestCase):
                          "Dopamine.ipa",
                          f"ROOTHIDE_EXPERIMENTAL_BUILD={experimental}",
                          "ROOTHIDE_HARDWARE_TEST=NO",
+                         "ROOTHIDE_ALL_ENABLED=NO",
                          f"NIGHTLY={nightly}", "COMMIT_HASH=matrix-test-sha"],
                         cwd=ROOT, encoding="utf-8", errors="replace",
                         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -109,7 +111,8 @@ class RootHideBuildMatrixTests(unittest.TestCase):
                 result = subprocess.run(
                     [make, "--no-print-directory", "-n", "-C", "Application",
                      "Dopamine.ipa", "ROOTHIDE_EXPERIMENTAL_BUILD=1",
-                     "ROOTHIDE_HARDWARE_TEST=YES", f"NIGHTLY={nightly}",
+                     "ROOTHIDE_HARDWARE_TEST=YES", "ROOTHIDE_ALL_ENABLED=NO",
+                     f"NIGHTLY={nightly}",
                      "COMMIT_HASH=hardware-test-sha"],
                     cwd=ROOT, encoding="utf-8", errors="replace",
                     capture_output=True, check=False,
