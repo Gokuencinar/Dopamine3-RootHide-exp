@@ -1116,7 +1116,17 @@ static BOOL gRootHideFullDiagnosisInFlight = NO;
 		}];
 	}
 	else {
-		[self changeMobilePassword];
+			// A privileged RootHide account-write action must never use the stock
+			// fallback that silently skips owner authentication when LA is absent.
+			if ([DOBootstrapper rootHidePortEnabled]) {
+				UIAlertController *unavailable = [UIAlertController alertControllerWithTitle:@"Autenticación no disponible"
+					message:@"No se ha podido autenticar al propietario del dispositivo. No se modificará la contraseña de mobile. Configura un código de desbloqueo y vuelve a intentarlo."
+					preferredStyle:UIAlertControllerStyleAlert];
+				[unavailable addAction:[UIAlertAction actionWithTitle:@"Aceptar" style:UIAlertActionStyleCancel handler:nil]];
+				[self presentViewController:unavailable animated:YES completion:nil];
+			} else {
+				[self changeMobilePassword];
+			}
 	}
 }
 

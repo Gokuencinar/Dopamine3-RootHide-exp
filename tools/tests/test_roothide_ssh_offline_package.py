@@ -4,8 +4,15 @@ Static/package checks are not proof of a live SSH banner on an iPhone.
 """
 
 import hashlib
+import io
 from pathlib import Path
 import unittest
+import zipfile
+
+try:
+    from tools.verify_roothide_full_experimental import check_offline_ssh_payload
+except ImportError:
+    from verify_roothide_full_experimental import check_offline_ssh_payload
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -13,7 +20,7 @@ RES = ROOT / "Application/Dopamine/Resources"
 EXPECTED = {
     "roothide_ssh_client_1900.deb": "f178c962e65862f5c42bd7317cd234b0f61c5e374901a8811a5e89141d4b7f08",
     "roothide_ssh_sftp_1900.deb": "07670c829ba94722ab69a8457363c0eb737c2e9951cb558668d0ce724a529431",
-    "roothide_ssh_server_safe_1900.deb": "2c49bc8eb80639fd59d914f2337ac4d14b0f54d3c280afe4d82c9e56a5bf60ec",
+    "roothide_ssh_server_safe_1900.deb": "ccd27b95690071f181dfb3869d59b721efa1e27e0ab6f0c8c5937f29e9bd7bfd",
 }
 
 
@@ -22,6 +29,23 @@ def source(path):
 
 
 class OfflineRootHideSSH(unittest.TestCase):
+    def test_full_hardware_ipa_verifier_requires_exact_pinned_ssh_packages(self):
+        memory = io.BytesIO()
+        with zipfile.ZipFile(memory, "w") as archive:
+            for name in EXPECTED:
+                archive.writestr("Payload/Dopamine.app/" + name, (RES / name).read_bytes())
+        with zipfile.ZipFile(io.BytesIO(memory.getvalue())) as archive:
+            errors, verified = check_offline_ssh_payload(archive)
+            self.assertEqual(errors, [])
+            self.assertEqual(set(verified), set(EXPECTED))
+        corrupt = io.BytesIO()
+        with zipfile.ZipFile(corrupt, "w") as archive:
+            archive.writestr("Payload/Dopamine.app/roothide_ssh_server_safe_1900.deb", b"bad")
+        with zipfile.ZipFile(io.BytesIO(corrupt.getvalue())) as archive:
+            errors, verified = check_offline_ssh_payload(archive)
+            self.assertEqual(verified, {})
+            self.assertEqual(len(errors), 3)  # two missing, one checksum mismatch
+
     def test_debs_are_pinned_and_archived(self):
         project = source("Application/Dopamine.xcodeproj/project.pbxproj")
         env = source("Application/Dopamine/Jailbreak/DOEnvironmentManager.m")
@@ -39,6 +63,7 @@ class OfflineRootHideSSH(unittest.TestCase):
         self.assertIn('7030f44fdbb1851cb6e702c02a60842dff54ac7fcabb80745bf34069757d9c6a', build)
         self.assertIn('SAFE_SHELL_SCRIPT', build)
         self.assertIn('("extrainst_", "prerm")', build)
+        self.assertIn('cannot update original config md5sums entry', build)
         self.assertIn('PermitRootLogin prohibit-password', build)
         self.assertIn('PasswordAuthentication no', build)
         self.assertIn('KbdInteractiveAuthentication no', build)

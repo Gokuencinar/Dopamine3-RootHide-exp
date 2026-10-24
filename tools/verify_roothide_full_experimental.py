@@ -29,6 +29,29 @@ DISABLED_MARKER = b"RH3_JAILBREAK_DISABLED_V1"
 ACTIVE_MARKER = b"RH3_HARDWARE_BETA_ACTIVATED_V1"
 TWEAKS_ON_MARKER = b"RH3_TWEAKS_DEFAULT_ENABLED_V1"
 TWEAKS_SAFE_MARKER = b"RH3_TWEAKS_DEFAULT_SAFE_V1"
+SSH_1900_PACKAGES = {
+    "roothide_ssh_client_1900.deb": "f178c962e65862f5c42bd7317cd234b0f61c5e374901a8811a5e89141d4b7f08",
+    "roothide_ssh_sftp_1900.deb": "07670c829ba94722ab69a8457363c0eb737c2e9951cb558668d0ce724a529431",
+    "roothide_ssh_server_safe_1900.deb": "ccd27b95690071f181dfb3869d59b721efa1e27e0ab6f0c8c5937f29e9bd7bfd",
+}
+
+
+def check_offline_ssh_payload(archive):
+    """Exact verified bundles, not proof that dpkg/launchd has run on-device."""
+    errors, verified = [], {}
+    prefix = "Payload/Dopamine.app/"
+    for name, digest in SSH_1900_PACKAGES.items():
+        resource = prefix + name
+        if resource not in archive.namelist():
+            errors.append(f"Missing pinned OpenSSH payload: {name}")
+            continue
+        data = archive.read(resource)
+        actual = hashlib.sha256(data).hexdigest()
+        if actual != digest:
+            errors.append(f"OpenSSH payload differs from pinned bytes: {name}")
+        else:
+            verified[name] = {"sha256": actual, "bytes": len(data)}
+    return errors, verified
 
 
 def check_bundle_identifiers(archive):
@@ -183,6 +206,10 @@ def inspect_ipa(path, *, hardware_beta=False, all_enabled=False):
                                                                  all_enabled=all_enabled)
             errors.extend(identity_errors)
             details.update(identity_details)
+            if hardware_beta:
+                ssh_errors, ssh_verified = check_offline_ssh_payload(archive)
+                errors.extend(ssh_errors)
+                details["offline_roothide_ssh_1900_packages"] = ssh_verified
             deployment_errors, checked = check_embedded_deployment(archive)
             errors.extend(deployment_errors)
             details["embedded_macho_slices_checked"] = checked

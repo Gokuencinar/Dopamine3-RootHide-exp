@@ -28,6 +28,8 @@ class R156RuntimeChecks(unittest.TestCase):
         )[0]
         self.assertIn('mobile password preflight: master_safe=', section)
         self.assertIn('pwd_mkdb_executable=%d', section)
+        self.assertIn('mobile password write capability: csops_ok=', section)
+        self.assertIn('currentFlags & CS_INSTALLER', section)
         self.assertIn('mobile password failed-command verification:', section)
         self.assertIn('no automatic retry', section)
         self.assertIn('![after isEqualToString:before]', section)

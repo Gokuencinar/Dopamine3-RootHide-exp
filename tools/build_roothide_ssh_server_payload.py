@@ -11,6 +11,7 @@ import argparse
 import hashlib
 import io
 from pathlib import Path
+import re
 import tarfile
 
 import zstandard as zstd
@@ -50,12 +51,13 @@ def pack_ar(items):
     return bytes(result)
 
 
-def transform_tar(payload: bytes, *, control: bool):
+def transform_tar(payload: bytes, *, control: bool, config_md5: str | None = None):
     # The original archive has no hardlinks/symlink targets needing rewriting;
     # retain every member's metadata (uid/gid/mode/mtime/path/links).
     raw = zstd.ZstdDecompressor().stream_reader(io.BytesIO(payload)).read()
     members = []
     found = set()
+    new_config_md5 = None
     with tarfile.open(fileobj=io.BytesIO(raw), mode="r:") as source:
         for info in source:
             body = source.extractfile(info).read() if info.isfile() else None
@@ -63,6 +65,16 @@ def transform_tar(payload: bytes, *, control: bool):
             if control and normalized in ("extrainst_", "prerm"):
                 found.add(normalized)
                 body = SAFE_SHELL_SCRIPT
+            if control and normalized == "md5sums":
+                if not config_md5:
+                    raise ValueError("control rebuilt before modified configuration")
+                body, replacements = re.subn(
+                    rb"(?m)^[0-9a-f]{32}(?=  etc/ssh/sshd_config$)",
+                    config_md5.encode("ascii"), body,
+                )
+                if replacements != 1:
+                    raise ValueError("cannot update original config md5sums entry")
+                found.add(normalized)
             if not control and normalized == "etc/ssh/sshd_config":
                 found.add(normalized)
                 if body.count(b"PermitRootLogin yes\n") != 1:
@@ -74,8 +86,9 @@ def transform_tar(payload: bytes, *, control: bool):
                          b"PasswordAuthentication no\n"
                          b"KbdInteractiveAuthentication no\n"
                          b"PermitEmptyPasswords no\n")
+                new_config_md5 = hashlib.md5(body).hexdigest()
             members.append((info, body))
-    expected = {"extrainst_", "prerm"} if control else {"etc/ssh/sshd_config"}
+    expected = {"extrainst_", "prerm", "md5sums"} if control else {"etc/ssh/sshd_config"}
     if found != expected:
         raise ValueError(f"incomplete upstream SSH payload: {found!r}, expected {expected!r}")
     dst = io.BytesIO()
@@ -84,7 +97,7 @@ def transform_tar(payload: bytes, *, control: bool):
             if body is not None:
                 info.size = len(body)
             archive.addfile(info, io.BytesIO(body) if body is not None else None)
-    return zstd.ZstdCompressor(level=15, write_content_size=True).compress(dst.getvalue())
+    return zstd.ZstdCompressor(level=15, write_content_size=True).compress(dst.getvalue()), new_config_md5
 
 
 def build(source: Path, destination: Path):
@@ -94,8 +107,9 @@ def build(source: Path, destination: Path):
     parts = dict(ar_members(original))
     if set(parts) != {"debian-binary", "control.tar.zst", "data.tar.zst"} or parts["debian-binary"] != b"2.0\n":
         raise ValueError("unrecognized OpenSSH package layout")
-    parts["control.tar.zst"] = transform_tar(parts["control.tar.zst"], control=True)
-    parts["data.tar.zst"] = transform_tar(parts["data.tar.zst"], control=False)
+    parts["data.tar.zst"], config_md5 = transform_tar(parts["data.tar.zst"], control=False)
+    parts["control.tar.zst"], _ = transform_tar(parts["control.tar.zst"], control=True,
+                                               config_md5=config_md5)
     output = pack_ar([(name, parts[name]) for name in ("debian-binary", "control.tar.zst", "data.tar.zst")])
     if destination.exists():
         raise ValueError("refusing to replace an already produced SSH payload")

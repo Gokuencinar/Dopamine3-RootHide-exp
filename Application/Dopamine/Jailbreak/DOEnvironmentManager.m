@@ -1808,7 +1808,7 @@ static int RH3DiagnosticMachMagic(NSString *path)
         @{ @"name":@"roothide_ssh_sftp_1900.deb", @"package":@"openssh-sftp-server",
            @"sha":@"07670c829ba94722ab69a8457363c0eb737c2e9951cb558668d0ce724a529431" },
         @{ @"name":@"roothide_ssh_server_safe_1900.deb", @"package":@"openssh-server",
-           @"sha":@"2c49bc8eb80639fd59d914f2337ac4d14b0f54d3c280afe4d82c9e56a5bf60ec" },
+           @"sha":@"ccd27b95690071f181dfb3869d59b721efa1e27e0ab6f0c8c5937f29e9bd7bfd" },
     ];
     NSString *statusPath = [root stringByAppendingPathComponent:@"Library/dpkg/status"];
     int statusFD = open(statusPath.fileSystemRepresentation, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
@@ -2642,6 +2642,17 @@ static int RH3DiagnosticMachMagic(NSString *path)
             BOOL spwdDbPresent = lstat([hiddenEtc stringByAppendingPathComponent:@"spwd.db"].fileSystemRepresentation,
                                       &fileInfo) == 0 && S_ISREG(fileInfo.st_mode);
             BOOL mkdbExecutable = access(JBROOT_PATH("/usr/sbin/pwd_mkdb"), X_OK) == 0;
+            // UID 0 plus an unsandboxed label can still lack CS_INSTALLER
+            // after the Dopamine app is relaunched. That right is required to
+            // update files in the protected hidden AppBundle. Record only
+            // booleans; the password, account record and hashes stay private.
+            uint32_t currentFlags = 0;
+            int csStatus = csops(getpid(), CS_OPS_STATUS, &currentFlags, sizeof(currentFlags));
+            [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
+                [NSString stringWithFormat:@"mobile password write capability: csops_ok=%d installer=%d platform=%d uid0=%d; no privilege change attempted",
+                 csStatus == 0, csStatus == 0 && !!(currentFlags & CS_INSTALLER),
+                 csStatus == 0 && !!(currentFlags & CS_PLATFORM_BINARY),
+                 geteuid() == 0]];
             [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
                 [NSString stringWithFormat:@"mobile password preflight: master_safe=%d passwd_present=%d pwd_db_present=%d spwd_db_present=%d pwd_mkdb_executable=%d mobile_record_present=%d",
                  masterSafe, passwdPresent, pwdDbPresent, spwdDbPresent, mkdbExecutable, before != nil]];
