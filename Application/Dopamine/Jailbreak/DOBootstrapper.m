@@ -13,6 +13,7 @@
 #import <libjailbreak/info.h>
 #import <libjailbreak/util.h>
 #import <libjailbreak/jbclient_xpc.h>
+#import <libjailbreak/jbserver_domains.h>
 #import <libjailbreak/roothider/jailbreakd.h>
 #import <sys/mount.h>
 #import <dlfcn.h>
@@ -31,6 +32,9 @@
 #import "RootHideFreshSetup.h"
 #import "RootHideAppLinks.h"
 #import "RootHideMobileHome.h"
+#import "RootHideAppRegistration.h"
+#import "RootHideLSRecordStatus.h"
+#import <CoreServices/LSApplicationProxy.h>
 #import <signal.h>
 #import "RootHideForensics.h"
 extern char **environ;
@@ -1701,6 +1705,67 @@ static void RH3RecordInstalledAppInventory(NSString *root)
             [[NSDictionary dictionaryWithContentsOfFile:plist][@"CFBundleIdentifier"] isEqualToString:bundles[name]];
         [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
             [NSString stringWithFormat:@"apps: %@ bundle_present=%d bundle_id_valid=%d", name, ownedBundle, expectedID]];
+    }
+}
+
+// Run only after the app is back in an ordinary, non-elevated UI process,
+// typically following a userspace reboot. The pre-reexec uicache -p exit code
+// says the tool exited, NOT that the new lsd retained its registration.
+// Keep this separate from the bootstrap installer: never invoke uicache, dpkg,
+// or a privileged operation from a diagnostic snapshot.
++ (void)recordRootHideLaunchServicesSnapshotWithContext:(NSString *)context
+{
+    if (![DOBootstrapper rootHidePortEnabled]) return;
+    DOUIManager *log = [DOUIManager sharedInstance];
+    NSString *stage = [context isEqualToString:@"after-explicit-refresh"]
+        ? @"after-explicit-refresh" : @"full-diagnostic";
+    NSString *appRoot = gSystemInfo.jailbreakInfo.rootPath
+        ? [NSString stringWithUTF8String:gSystemInfo.jailbreakInfo.rootPath] : nil;
+    // Do NOT use jbclient_get_jbroot(): its dispatch_once cache can retain a
+    // previous randomized brand across the RootHide userspace transition.
+    // Query the existing, read-only systemwide server action on every report.
+    xpc_object_t rootReply = jbserver_xpc_send(JBS_DOMAIN_SYSTEMWIDE,
+                                              JBS_SYSTEMWIDE_GET_JBROOT, NULL);
+    const char *serverPath = rootReply && xpc_get_type(rootReply) == XPC_TYPE_DICTIONARY
+        ? xpc_dictionary_get_string(rootReply, "root-path") : NULL;
+    NSString *serverRoot = serverPath ? [NSString stringWithUTF8String:serverPath] : nil;
+    NSString *canonicalAppRoot = RH3CanonicalAppPath(appRoot);
+    NSString *canonicalServerRoot = RH3CanonicalAppPath(serverRoot);
+    // The server root is authoritative for reporting the CURRENT brand.
+    // This read-only classification does not attest its on-disk ownership.
+    BOOL rootLocatorKnown = [DOBootstrapper rootHideBrandForPath:canonicalServerRoot] != 0 &&
+        canonicalServerRoot.length > 0;
+    int appRootMatchesServer = canonicalAppRoot.length && canonicalServerRoot.length
+        ? (int)[canonicalAppRoot isEqualToString:canonicalServerRoot] : -1;
+    [log rh3RecordDiagnosticStage:[NSString stringWithFormat:
+        @"LS post-reexec: context=%@ fresh_server_root_known=%d app_root_matches_server=%d read_only=1; no raw identifiers/paths",
+        stage, rootLocatorKnown, appRootMatchesServer]];
+
+    NSArray<NSArray<NSString *> *> *apps = @[
+        @[@"Sileo", @"org.coolstar.SileoStore", @"Sileo.app"],
+        @[@"Zebra", @"xyz.willy.Zebra", @"Zebra.app"],
+        @[@"RootHide", @"com.roothide.manager", @"RootHide.app"]
+    ];
+    for (NSArray<NSString *> *app in apps) {
+        LSApplicationProxy *proxy = [LSApplicationProxy applicationProxyForIdentifier:app[1]];
+        NSString *registered = proxy.bundleURL.path;
+        NSString *canonicalRegistered = RH3CanonicalAppPath(registered);
+        NSString *expected = rootLocatorKnown
+            ? [[serverRoot stringByAppendingPathComponent:@"Applications"] stringByAppendingPathComponent:app[2]]
+            : nil;
+        NSString *canonicalExpected = RH3CanonicalAppPath(expected);
+        BOOL hasURL = [registered isKindOfClass:NSString.class] && registered.isAbsolutePath &&
+            registered.length > 0;
+        BOOL pathsMatch = canonicalExpected.length && canonicalRegistered.length &&
+            [canonicalExpected isEqualToString:canonicalRegistered];
+        RH3LSRecordStatus state = RH3ClassifyLSRecord(proxy != nil, hasURL,
+            rootLocatorKnown && canonicalExpected.length > 0, pathsMatch, proxy.installed);
+        BOOL oldRootCandidate = state == RH3LSWrongRoot &&
+            RH3StaleRegisteredRoot(registered, expected) != nil;
+        [log rh3RecordDiagnosticStage:[NSString stringWithFormat:
+            @"LS post-reexec: context=%@ app=%@ state=%s proxy_present=%d bundleURL_present=%d proxy_installed=%d old_randomized_root_candidate=%d (not visibility=absence; read_only=1)",
+            stage, app[0], RH3LSRecordStatusName(state), proxy != nil, hasURL,
+            proxy.installed, oldRootCandidate]];
     }
 }
 

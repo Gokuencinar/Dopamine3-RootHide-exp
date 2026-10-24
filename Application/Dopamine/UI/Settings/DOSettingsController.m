@@ -13,6 +13,7 @@
 #import "DOPkgManagerPickerViewController.h"
 #import "DOHeaderCell.h"
 #import "DOEnvironmentManager.h"
+#import "DOBootstrapper.h"
 #import "DOExploitManager.h"
 #import "DOPSListItemsController.h"
 #import "DOPSExploitListItemsController.h"
@@ -923,6 +924,11 @@ static BOOL gRootHideFullDiagnosisInFlight = NO;
     }];
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         int result = [[DOEnvironmentManager sharedManager] diagnoseRootHideComprehensive];
+        // At this point the privileged filesystem inventory has completed and
+        // the app is unprivileged again. Compare the current lsd proxies with
+        // the *active* randomized root after reexec, not with pre-reboot
+        // uicache exit statuses. This diagnostic never re-registers a bundle.
+        [DOBootstrapper recordRootHideLaunchServicesSnapshotWithContext:@"full-diagnostic"];
         NSURL *report = [[DOUIManager sharedInstance] rh3FinishUnifiedReportWithResult:result];
         dispatch_async(dispatch_get_main_queue(), ^{
             finished = YES;
@@ -1012,6 +1018,12 @@ static BOOL gRootHideFullDiagnosisInFlight = NO;
             });
             dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
                 int result = [[DOEnvironmentManager sharedManager] refreshJailbreakApps];
+                // Explicit user action only: the existing refresh is already
+                // idempotent for registrations that match the active root.
+                // Never launch a second refresh automatically after reboot or
+                // after a timed-out uicache child with an unknown outcome.
+                if (result == 0)
+                    [DOBootstrapper recordRootHideLaunchServicesSnapshotWithContext:@"after-explicit-refresh"];
                 dispatch_async(dispatch_get_main_queue(), ^{
                     completed = YES;
                     // A child timeout does not establish that uicache exited.
