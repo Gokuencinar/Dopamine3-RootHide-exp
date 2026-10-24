@@ -13,6 +13,16 @@ SOURCE = (Path(__file__).resolve().parents[2] /
 
 
 class DyldSignatureAttach(unittest.TestCase):
+    def test_self_contained_private_dyld_uses_cerror_trampoline(self):
+        source = SOURCE.read_text(encoding="utf-8")
+        trampoline = (SOURCE.parent / "main.S").read_text(encoding="utf-8")
+        helper = source.split("static int fcntl_trust_error(", 1)[1].split(
+            "int HOOK(__fcntl)", 1)[0]
+        self.assertIn("MAKE_TRAMPOLINE(cerror)", trampoline)
+        self.assertIn("return cerror(error);", helper)
+        self.assertNotIn("errno =", helper,
+                         "Darwin errno requires __error() and breaks self-contained dyldhook")
+
     def test_all_dyld_signature_attach_ops_are_handled(self):
         source = SOURCE.read_text(encoding="utf-8")
         for cmd in ("case F_ADDSIGS:", "case F_ADDFILESIGS:",

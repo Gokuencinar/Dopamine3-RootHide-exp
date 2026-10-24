@@ -29,6 +29,8 @@ class Pid1DeferredPatch(unittest.TestCase):
 int main(void) {
     const char *ssh = "/var/containers/Bundle/Application/.jbroot-0123456789ABCDEF/usr/sbin/sshd";
     char *newterm[] = {"xpcproxy", "UIKitApplication:ws.hbang.Terminal[ABCD]", NULL};
+    char *newtermModern[] = {"xpcproxy", "UIKitApplication:com.hbang.NewTerm[ABCD]", NULL};
+    char *newtermImpostor[] = {"xpcproxy", "UIKitApplication:com.hbang.NewTermEvil[ABCD]", NULL};
     char *sileo[] = {"xpcproxy", "UIKitApplication:org.coolstar.SileoStore[0]", NULL};
     char *zebra[] = {"xpcproxy", "UIKitApplication:xyz.willy.Zebra[0]", NULL};
     char *rootHide[] = {"xpcproxy", "UIKitApplication:com.roothide.manager[0]", NULL};
@@ -39,6 +41,8 @@ int main(void) {
     char *sshService[] = {"xpcproxy", "com.openssh.sshd", NULL};
     char *wrongService[] = {"xpcproxy", "com.openssh.sshd.fake", NULL};
     if (!rh3_pid1_selected_child("/usr/libexec/xpcproxy",newterm,ssh)) return 1;
+    if (!rh3_pid1_selected_child("/usr/libexec/xpcproxy",newtermModern,ssh)) return 25;
+    if (rh3_pid1_selected_child("/usr/libexec/xpcproxy",newtermImpostor,ssh)) return 26;
     if (!rh3_pid1_selected_child("/usr/libexec/xpcproxy",sileo,ssh)) return 2;
     if (!rh3_pid1_selected_child("/usr/libexec/xpcproxy",zebra,ssh)) return 3;
     if (!rh3_pid1_selected_child("/usr/libexec/xpcproxy",rootHide,ssh)) return 4;
@@ -56,12 +60,19 @@ int main(void) {
     if (!rh3_pid1_selected_child("/var/containers/Bundle/Application/.jbroot-0123456789ABCDEF/Applications/Sileo.app/Sileo",NULL,ssh)) return 16;
     if (!rh3_pid1_selected_child("/var/containers/Bundle/Application/.jbroot-0123456789ABCDEF/Applications/Zebra.app/Zebra",NULL,ssh)) return 17;
     if (!rh3_pid1_selected_child("/var/containers/Bundle/Application/.jbroot-0123456789ABCDEF/Applications/RootHide.app/RootHide",NULL,ssh)) return 18;
-    if (!rh3_pid1_selected_child("/var/containers/Bundle/Application/.jbroot-0123456789ABCDEF/Applications/NewTerm.app/NewTerm",NULL,ssh)) return 19;
+    if (rh3_pid1_selected_child("/var/containers/Bundle/Application/.jbroot-0123456789ABCDEF/Applications/NewTerm.app/NewTerm",NULL,ssh)) return 19;
     if (rh3_pid1_selected_child("/var/containers/Bundle/Application/.jbroot-OTHER/Applications/Sileo.app/Sileo",NULL,ssh)) return 20;
     if (rh3_pid1_selected_child("/var/containers/Bundle/Application/.jbroot-0123456789ABCDEF/Applications/Sileo.app/Sileo.evil",NULL,ssh)) return 21;
     if (rh3_pid1_selected_child("/var/containers/Bundle/Application/.jbroot-0123456789ABCDEF/Applications/Unsafe.app/Unsafe",NULL,ssh)) return 22;
     if (rh3_pid1_selected_child("/Applications/Sileo.app/Sileo",NULL,ssh)) return 23;
     if (!rh3_pid1_selected_child("/private/var/containers/Bundle/Application/.jbroot-0123456789ABCDEF/Applications/Sileo.app/Sileo",NULL,ssh)) return 24;
+    if (!rh3_pid1_direct_bundle_id("/private/var/containers/Bundle/Application/.jbroot-0123456789ABCDEF/Applications/Sileo.app/Sileo",ssh)) return 27;
+    if (strcmp(rh3_pid1_direct_bundle_id("/var/containers/Bundle/Application/.jbroot-0123456789ABCDEF/Applications/Sileo.app/Sileo",ssh),"org.coolstar.SileoStore")) return 28;
+    if (strcmp(rh3_pid1_direct_bundle_id("/var/containers/Bundle/Application/.jbroot-0123456789ABCDEF/Applications/Zebra.app/Zebra",ssh),"xyz.willy.Zebra")) return 29;
+    if (strcmp(rh3_pid1_direct_bundle_id("/var/containers/Bundle/Application/.jbroot-0123456789ABCDEF/Applications/RootHide.app/RootHide",ssh),"com.roothide.manager")) return 30;
+    if (rh3_pid1_direct_bundle_id("/var/containers/Bundle/Application/.jbroot-0123456789ABCDEF/Applications/NewTerm.app/NewTerm",ssh)) return 31;
+    if (rh3_pid1_direct_bundle_id("/var/containers/Bundle/Application/.jbroot-OTHER/Applications/Sileo.app/Sileo",ssh)) return 32;
+    if (rh3_pid1_direct_bundle_id("/Applications/Sileo.app/Sileo",ssh)) return 33;
     return 0;
 }
 '''
@@ -79,10 +90,23 @@ int main(void) {
     def test_direct_app_selection_is_bound_to_active_root(self):
         source = HEADER.read_text(encoding='utf-8')
         for fixed in ('/Applications/Sileo.app/Sileo', '/Applications/Zebra.app/Zebra',
-                      '/Applications/RootHide.app/RootHide', '/Applications/NewTerm.app/NewTerm'):
+                      '/Applications/RootHide.app/RootHide'):
             self.assertIn(fixed, source)
         self.assertIn('rootSshd', source)
         self.assertIn('strcmp(candidate + rootLength,', source)
+        self.assertIn('rh3_pid1_direct_bundle_id(', source)
+        self.assertNotIn('"/Applications/NewTerm.app/NewTerm"', source,
+                         'No locally verified NewTerm executable/blacklist identity')
+
+    def test_rooted_direct_blacklist_precedes_deferred_patch(self):
+        source = LAUNCHD.read_text(encoding='utf-8')
+        blacklist = source.index('rh3_pid1_direct_bundle_id(path, JBROOT_PATH(')
+        lookup = source.index('isBlacklistedApp(directBundleId)', blacklist)
+        skip = source.index('roothide_spawn_uninjected(', lookup)
+        async_patch = source.index('rh3_pid1_selected_child(path, argv,', lookup)
+        self.assertLess(blacklist, lookup)
+        self.assertLess(lookup, skip)
+        self.assertLess(skip, async_patch)
 
     def test_pid1_is_never_blocked_on_patch_reply(self):
         src = LAUNCHD.read_text(encoding='utf-8')

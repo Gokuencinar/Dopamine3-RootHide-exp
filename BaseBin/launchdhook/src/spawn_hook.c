@@ -593,10 +593,18 @@ int __posix_spawn_hook(pid_t *restrict pid, const char *restrict path,
 		return __posix_spawn_orig_wrapper(pid, path, desc, argv, envp);
 	}
 
+	// A direct .jbroot/Applications/*.app executable does NOT pass
+	// isBlacklistedPath(): that resolver only accepts a UUID app container.
+	// Resolve the bundle ID from the same pinned executable mapping used for
+	// deferred patch selection, so an app blacklisted by the user is never
+	// injected simply because launchd bypassed UIKitApplication xpcproxy.
+	const char *directBundleId = path && roothide_is_active() ?
+	    rh3_pid1_direct_bundle_id(path, JBROOT_PATH("/usr/sbin/sshd")) : NULL;
 	// Blacklisted apps are launched without tweak injection. Their identifiers
 	// are read from the RootHide configuration under the active jailbreak root.
 		if (path && roothide_is_active() &&
-		    (isBlacklistedPath(path) || roothide_blacklisted_uikit_proxy(path, argv))) {
+		    (isBlacklistedPath(path) || roothide_blacklisted_uikit_proxy(path, argv) ||
+		     (directBundleId && isBlacklistedApp(directBundleId)))) {
 		// Record the child PID before its first userspace instructions execute;
 		// the server uses this record to deny RootHide IPC to the child.
 		pid_t *trackedPid = allocBlacklistProcessId();

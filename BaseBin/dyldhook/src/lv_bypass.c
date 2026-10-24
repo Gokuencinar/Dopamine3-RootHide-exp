@@ -164,22 +164,26 @@ bool superblob_is_adhoc_signed(const CS_SuperBlob *superblob)
 	return true;
 }
 
+// Resolved by main.S's MachOMerger trampoline. Private dyldhook is built
+// self-contained: writing to errno would import ___error from libSystem.
+extern int cerror(int error);
+
 static int fcntl_trust_error(int status)
 {
 	// Do not report success to dyld after a trust/attach failure. Retain
-	// a useful errno without treating a Mach return code as a POSIX error.
+	// a useful POSIX error via dyld's existing cerror trampoline, not errno.
+	int error = EIO;
 	switch (status) {
-		case KERN_INVALID_ARGUMENT: errno = EINVAL; break;
-		case KERN_PROTECTION_FAILURE: errno = EACCES; break;
+		case KERN_INVALID_ARGUMENT: error = EINVAL; break;
+		case KERN_PROTECTION_FAILURE: error = EACCES; break;
 		case KERN_NO_SPACE:
-		case KERN_RESOURCE_SHORTAGE: errno = ENOMEM; break;
+		case KERN_RESOURCE_SHORTAGE: error = ENOMEM; break;
 		case MACH_SEND_TIMED_OUT:
-		case MACH_RCV_TIMED_OUT: errno = ETIMEDOUT; break;
+		case MACH_RCV_TIMED_OUT: error = ETIMEDOUT; break;
 		case MACH_SEND_INVALID_DEST:
-		case MACH_RCV_PORT_DIED: errno = EPIPE; break;
-		default: errno = EIO; break;
+		case MACH_RCV_PORT_DIED: error = EPIPE; break;
 	}
-	return -1;
+	return cerror(error);
 }
 
 int HOOK(__fcntl)(int fd, int cmd, void *arg1, void *arg2, void *arg3, void *arg4, void *arg5, void *arg6, void *arg7, void *arg8)

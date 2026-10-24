@@ -304,8 +304,9 @@ int ensure_randomized_cdhash_for_slice(const char* inputPath, uint64_t offset, v
 			}
 		}
 
-		// Reject an already-invalid library rather than rebranding its broken
-		// CodeDirectory and adding a CDHash that will still fail page validation.
+		// Verify the CodeDirectory slot for the first code page *before* changing
+		// it. Other pages remain subject to kernel signature validation; this
+		// is not a general verifier for all existing file corruption.
 		CS_CodeDirectory codeDir = {0};
 		if (csd_blob_read(bestCDBlob, 0, sizeof(codeDir), &codeDir) != 0) break;
 		CODE_DIRECTORY_APPLY_BYTE_ORDER(&codeDir, BIG_TO_HOST_APPLIER);

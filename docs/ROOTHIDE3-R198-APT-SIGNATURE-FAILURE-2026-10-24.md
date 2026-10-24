@@ -21,19 +21,29 @@ files, which have not been read or changed.
 1. `roothider/recdhash.m`: earlier code opened an executable writable
    before checking its signature, then could leave its `__TEXT` brand and
    CodeDirectory page hash partially written on failure. The writer now
-   validates the existing hash and write offsets read-only first, compares
+   validates the first code-page hash and write offsets read-only first, compares
    the signature and section on a later writable open, checks the persisted
    CodeDirectory and page hash, and attempts rollback of both writes on
-   error. It refuses corrupted/branded files rather than accepting a CDHash
-   whose code pages do not match.
+   error. It refuses a first-page mismatch rather than accepting a CDHash
+   that the kernel will reject for that page. This is **not** a full-file
+   validation of other code pages, and rollback on I/O failure is best-effort.
 2. `dyldhook/src/lv_bypass.c`: honor the kernel's actual
    `F_ADDFILESIGS*` result first; cover INFO/RETURN; propagate failed
-   trust/attach instead of fabricating `fs_file_start` on success.
-3. `launchdhook/src/roothide_pid1_selected.h`: Sileo, Zebra, RootHide
-   and NewTerm may launch as direct binaries rather than UIKit xpcproxy
-   labels. Select their exact active-hidden-root executable paths for the
-   existing *asynchronous* PID1 patch-before-resume path. Do not widen this
-   policy to arbitrary system paths or introduce synchronous XPC in PID1.
+   trust/attach instead of fabricating `fs_file_start` on success. Private
+   dyld uses its existing `cerror` assembly trampoline to set POSIX errors;
+   writing directly to `errno` would import unresolved `___error`.
+3. `launchdhook/src/roothide_pid1_selected.h`: Sileo, Zebra and RootHide
+   may launch as direct binaries rather than UIKit xpcproxy labels. Select
+   only their exact package-verified executable paths within the active root
+   for the existing *asynchronous* PID1 patch-before-resume path. Use the
+   same pinned path-to-bundle-ID mapping before dispatch to honor the
+   RootHide user blacklist; `isBlacklistedPath` alone only recognizes
+   UUID containers, not `.jbroot-*` bundles. NewTerm's optional on-device
+   executable is **not** bundled/verified and is excluded from the direct
+   whitelist until its CFBundleExecutable and blacklist identity can be
+   verified. The `com.hbang.NewTerm` xpcproxy base label is recognized,
+   alongside the existing `ws.hbang.Terminal` label. No new synchronous
+   XPC or arbitrary Apple process policy is added.
 
 ## Verified locally
 
