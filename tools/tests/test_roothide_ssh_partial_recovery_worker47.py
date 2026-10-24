@@ -66,6 +66,74 @@ class RootHideSSHPartialRecovery(unittest.TestCase):
         self.assertNotIn("Status: install ok half-installed", INSTALL)
         self.assertNotIn("Status: deinstall ok config-files", INSTALL)
 
+    def test_r216_mismatched_server_version_is_classified_before_rejection(self):
+        # Version is deliberately reported rather than guessed. Most
+        # importantly a mismatched-version entry must never reach dpkg -i,
+        # even if its package files are all absent and receipt mask is 3.
+        mismatch = INSTALL.split(
+            'if (![fields containsString:@"\\nVersion: 9.2p1\\n"]) {', 1
+        )[1].split('if (![fields containsString:@"\\nArchitecture:', 1)[0]
+        self.assertIn('safeReceiptField(fields, @"Version", 64', mismatch)
+        self.assertIn("safeDpkgStatus(fields)", mismatch)
+        self.assertIn("version=%@ status=%@ reason=version_mismatch; no dpkg writes", mismatch)
+        self.assertIn("inventoryError = EEXIST;", mismatch)
+        self.assertIn('inventoryReason = "version_mismatch";', mismatch)
+        self.assertIn("break;", mismatch)
+        self.assertNotIn("exec_cmd_trusted", mismatch)
+        self.assertLess(INSTALL.index("inventoryReason = \"version_mismatch\""),
+                        INSTALL.index("verifiedPaths"))
+        for unsafe in ('"--force"', '"--force-confnew"', '"--force-confmiss"',
+                       '"--purge"', '"--remove"'):
+            self.assertNotIn(unsafe, INSTALL)
+
+    def test_r216_public_version_and_dpkg_status_are_bounded_and_allowlisted(self):
+        helper = INSTALL.split('NSString *(^safeReceiptField)', 1)[1].split(
+            'NSString *statusPath', 1
+        )[0]
+        self.assertIn('value.length > limit', helper)
+        self.assertIn("safe.invertedSet", helper)
+        self.assertIn('return @"ambiguous";', helper)
+        self.assertIn('return @"invalid";', helper)
+        self.assertIn('return result ?: @"missing";', helper)
+        self.assertIn('@"Version", 64', INSTALL)
+        self.assertIn('@"Status", 48', helper)
+        self.assertIn('@"abcdefghijklmnopqrstuvwxyz- "', helper)
+        for status in ("unknown", "install", "hold", "deinstall", "purge",
+                       "ok", "reinstreq", "not-installed", "config-files",
+                       "half-installed", "unpacked", "half-configured",
+                       "triggers-awaited", "triggers-pending", "installed"):
+            self.assertIn(f'@"{status}"', helper)
+        self.assertIn('return @"unrecognized";', helper)
+        self.assertIn('@"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz.+:~_-"', INSTALL)
+        # No raw dpkg stanza, filename, host key, or conffile value is written.
+        diagnostic = INSTALL.split("SSH inventory mismatch:", 1)[1].split(
+            "inventoryError = EEXIST;", 1
+        )[0]
+        self.assertEqual(diagnostic.count("%@"), 2)
+        self.assertIn("package=%s", diagnostic)
+        self.assertNotIn("root", diagnostic)
+        self.assertNotIn("path", diagnostic)
+
+    def test_real_server_payload_has_no_conffile_declaration(self):
+        if not shutil.which("tar"):
+            self.skipTest("tar unavailable")
+        archive = deb_members(RESOURCE.read_bytes())["control.tar.zst"]
+        result = subprocess.run(
+            ["tar", "-tf", "-"], input=archive,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False
+        )
+        if result.returncode:
+            self.skipTest("tar cannot read bundled control")
+        entries = set(result.stdout.decode().replace("\r", "").splitlines())
+        self.assertIn("./control", entries)
+        self.assertIn("./extrainst_", entries)
+        self.assertIn("./prerm", entries)
+        # This is only the PINNED version. It does not prove the properties
+        # of the UNKNOWN, different version in the r216 hardware receipt.
+        self.assertNotIn("./conffiles", entries)
+        self.assertNotIn("./postinst", entries)
+        self.assertNotIn("./postrm", entries)
+
     def test_package_owner_and_disk_paths_are_verified_before_mutation(self):
         self.assertIn("O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC", INSTALL)
         self.assertIn('@"Library/dpkg/info"', INSTALL)

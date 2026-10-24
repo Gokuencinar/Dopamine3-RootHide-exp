@@ -1897,6 +1897,41 @@ static int RH3DiagnosticMachMagic(NSString *path)
     // any duplicate stanza, another package version, or an ambiguous dpkg
     // state such as half-installed, triggers-pending or config-files.
     NSMutableArray<NSNumber *> *states = [NSMutableArray new];
+    // Read-only r216 version-mismatch evidence. Version is public package
+    // metadata, but sanitize it before persistent diagnostics: only Debian
+    // version syntax, bounded to 64 characters, with no path separators.
+    // Status must be one of the documented dpkg triples, not arbitrary text
+    // supplied by a corrupted or adversarial status database. Neither helper
+    // logs raw status lines, conffile entries, paths, or maintainer scripts.
+    NSString *(^safeReceiptField)(NSString *, NSString *, NSUInteger, NSString *) =
+        ^NSString *(NSString *record, NSString *field, NSUInteger limit, NSString *allowed) {
+            NSString *prefix = [field stringByAppendingString:@": "];
+            NSCharacterSet *safe = [NSCharacterSet characterSetWithCharactersInString:allowed];
+            NSString *result = nil;
+            for (NSString *line in [record componentsSeparatedByString:@"\n"]) {
+                if (![line hasPrefix:prefix]) continue;
+                if (result) return @"ambiguous";
+                NSString *value = [line substringFromIndex:prefix.length];
+                if (!value.length || value.length > limit ||
+                    [value rangeOfCharacterFromSet:safe.invertedSet].location != NSNotFound)
+                    return @"invalid";
+                result = value;
+            }
+            return result ?: @"missing";
+        };
+    NSString *(^safeDpkgStatus)(NSString *) = ^NSString *(NSString *record) {
+        NSString *raw = safeReceiptField(record, @"Status", 48,
+                                         @"abcdefghijklmnopqrstuvwxyz- ");
+        NSArray<NSString *> *parts = [raw componentsSeparatedByString:@" "];
+        if (parts.count != 3 ||
+            ![@[@"unknown", @"install", @"hold", @"deinstall", @"purge"] containsObject:parts[0]] ||
+            ![@[@"ok", @"reinstreq"] containsObject:parts[1]] ||
+            ![@[@"not-installed", @"config-files", @"half-installed", @"unpacked",
+                 @"half-configured", @"triggers-awaited", @"triggers-pending",
+                 @"installed"] containsObject:parts[2]])
+            return @"unrecognized";
+        return raw;
+    };
     NSString *statusPath = [root stringByAppendingPathComponent:@"Library/dpkg/status"];
     int statusFD = open(statusPath.fileSystemRepresentation, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
     if (statusFD < 0) { int err = errno; close(infoDirectory); return err; }
@@ -1943,6 +1978,18 @@ static int RH3DiagnosticMachMagic(NSString *path)
             }
             NSString *fields = [record stringByAppendingString:@"\n"];
             if (![fields containsString:@"\nVersion: 9.2p1\n"]) {
+                NSString *version = safeReceiptField(fields, @"Version", 64,
+                                                      @"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz.+:~_-");
+                if (![version isEqualToString:@"missing"] &&
+                    ![version isEqualToString:@"ambiguous"] &&
+                    ![version isEqualToString:@"invalid"] &&
+                    ![[NSCharacterSet decimalDigitCharacterSet]
+                      characterIsMember:[version characterAtIndex:0]])
+                    version = @"invalid";
+                NSString *statusClass = safeDpkgStatus(fields);
+                [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
+                    [NSString stringWithFormat:@"SSH inventory mismatch: package=%s version=%@ status=%@ reason=version_mismatch; no dpkg writes",
+                     packageTags[i], version, statusClass]];
                 inventoryError = EEXIST;
                 inventoryReason = "version_mismatch";
                 break;
