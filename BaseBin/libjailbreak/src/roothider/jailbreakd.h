@@ -3,6 +3,7 @@
 
 #include <unistd.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <mach/mach.h>
 
 typedef enum {
@@ -35,6 +36,10 @@ int jbdTestCall(int value);
 int jbdSystemwideLog(const char* fmt, ...);
 
 int jbdSpawnPatchChild(int pid, bool resume);
+// PID1 asynchronous patching: bind the request to the actual suspended
+// process, not just its recyclable numeric PID. Never use the unbound API
+// from PID1 for an asynchronous child.
+int jbdSpawnPatchChildIdentified(int pid, uint64_t uniqueid, bool resume);
 int jbdSpawnExecStart(const char* execfile, bool resume);
 int jbdSpawnExecCancel(const char* execfile);
 int jbdExecTraceStart(const char* execfile, bool* traced);

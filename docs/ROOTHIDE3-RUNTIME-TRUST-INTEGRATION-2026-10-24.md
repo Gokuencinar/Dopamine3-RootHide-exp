@@ -194,3 +194,25 @@ invalid root, authenticated active root, PID1, changed root and return to the
 original path. Source contracts verify constructor order and lack of repeated
 status XPC; a device run is still necessary to confirm NewTerm's actual
 Mach-O, `systemhook` constructor, private dyld and spawned child lifetimes.
+
+## Scoped asynchronous launchd-child lifecycle (experimental)
+
+RootHide2 waits synchronously for a daemon after creating a suspended child.
+The previous NewTerm parity candidate was deliberately disabled because that
+wait can deadlock PID1. This follow-on confines the new asynchronous path to
+the exact selected NewTerm, Sileo, Zebra, RootHide Manager and OpenSSH jobs,
+after verified RootHide activation and daemon check-in. Other system services,
+blacklisted apps, early boot and safe mode retain their existing behavior.
+
+The selected child starts suspended, and a background worker handles its
+daemon request without blocking the launchd spawn callback. A matching unique
+process identifier is checked on both sides before resuming; the watchdog
+is bounded to three seconds and a maximum of four pending workers. Failures
+affect only the selected child, never the installed bootstrap or user data.
+
+The new C host tests check strict label selection, fallback behavior, and
+atomic success/expiry/backpressure. A successful host simulation or native
+binary build **cannot** prove the child executed or its tweak constructor ran.
+PID reuse has a residual check-to-signal race. An iPhone X test must verify
+launchd responsiveness, private dyld, hook constructor, app startup and SSH
+banner before any public release. Strict readiness remains 7/9.

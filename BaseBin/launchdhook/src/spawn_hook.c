@@ -17,6 +17,13 @@
 #include <errno.h>
 #include <dlfcn.h>
 #include "roothide_manager_spawn.h"
+#include "roothide_pid1_selected.h"
+#include "roothide_pid1_deferred_state.h"
+#include <libjailbreak/roothider/jailbreakd.h>
+#include <libjailbreak/roothider/common.h>
+#include <dispatch/dispatch.h>
+#include <stdatomic.h>
+#include <signal.h>
 extern char **environ;
 
 void abort_with_reason(uint32_t reason_namespace, uint64_t reason_code, const char *reason_string, uint64_t reason_flags);
@@ -283,6 +290,118 @@ int __posix_spawn_orig_wrapper(pid_t *restrict pid, const char *restrict path,
 	return r;
 }
 
+// The donor waited for jailbreakd from launchd's spawn callback. That can
+// deadlock PID1 when jailbreakd needs launchd to start another service. Keep
+// launchd's caller nonblocking: a bounded worker patches the suspended child
+// and only jailbreakd resumes it. A watchdog kills a stalled, identity-matched
+// child rather than allowing it to run without its code-signing preparation.
+// This never changes the lifetime of unrelated Apple processes.
+typedef struct {
+	pid_t pid;
+	uint64_t uniqueid;
+	_Atomic int outcome; // 0=pending; 1=worker finished; 2=expired
+	_Atomic int references; // worker and watchdog each hold one reference
+} rh3_pid1_patch_job_t;
+
+static _Atomic int rh3_pid1_outstanding_patches = 0;
+
+static void rh3_pid1_patch_job_release(rh3_pid1_patch_job_t *job)
+{
+	if (atomic_fetch_sub_explicit(&job->references, 1, memory_order_acq_rel) == 1) free(job);
+}
+
+static bool rh3_pid1_same_child(const rh3_pid1_patch_job_t *job)
+{
+	return job->uniqueid && proc_get_ppid(job->pid) == 1 &&
+	       proc_get_uniqueid(job->pid) == job->uniqueid;
+}
+
+static void rh3_pid1_kill_failed_child(const rh3_pid1_patch_job_t *job)
+{
+	// The kernel may recycle a PID while the worker is waiting on XPC.
+	// A mismatch MUST NOT signal whichever process now occupies that PID.
+	if (rh3_pid1_same_child(job)) (void)kill(job->pid, SIGKILL);
+}
+
+static int rh3_pid1_spawn_and_patch_async(pid_t *pid, const char *path,
+				struct _posix_spawn_args_desc *desc, char *const argv[], char *const envp[])
+{
+	if (pid) *pid = 0;
+	// The shared spawn policy may intentionally omit injection (its process
+	// blacklist or a missing hook). Never patch such a process merely because
+	// its launch label matches one of the selected RootHide tools.
+	if (!rh3_pid1_has_private_systemhook(envp))
+		return __posix_spawn_orig_wrapper(pid, path, desc, argv, envp);
+	if (!desc || !desc->attrp) return EINVAL;
+	posix_spawnattr_t attr = desc->attrp;
+	short flags = 0;
+	int err = posix_spawnattr_getflags(&attr, &flags);
+	if (err) return err;
+	int type = 0;
+	if ((flags & (POSIX_SPAWN_SETEXEC | POSIX_SPAWN_START_SUSPENDED)) ||
+	    (posix_spawnattr_getprocesstype_np(&attr, &type) == 0 &&
+	     type == POSIX_SPAWN_PROC_TYPE_DRIVER))
+		return __posix_spawn_orig_wrapper(pid, path, desc, argv, envp);
+	// Do not allocate unbounded background waiters if the daemon is hung.
+	if (!rh3_pid1_deferred_reserve(&rh3_pid1_outstanding_patches, 4)) return EBUSY;
+	err = posix_spawnattr_setflags(&attr, flags | POSIX_SPAWN_START_SUSPENDED);
+	if (err) { atomic_fetch_sub(&rh3_pid1_outstanding_patches, 1); return err; }
+	pid_t child = 0;
+	err = __posix_spawn_orig_wrapper(&child, path, desc, argv, envp);
+	int restore = posix_spawnattr_setflags(&attr, flags);
+	if (err || restore || child <= 1) {
+		if (!err && child > 1 && proc_get_ppid(child) == 1) (void)kill(child, SIGKILL);
+		atomic_fetch_sub(&rh3_pid1_outstanding_patches, 1);
+		return err ? err : (restore ? restore : ECHILD);
+	}
+	uint64_t uniqueid = proc_get_uniqueid(child);
+	if (!uniqueid || proc_get_ppid(child) != 1) {
+		// An identity read error must not strand the freshly-created suspended
+		// child. PID1 still must be its parent before cleanup is attempted.
+		if (proc_get_ppid(child) == 1 &&
+		    (!uniqueid || proc_get_uniqueid(child) == uniqueid))
+			(void)kill(child, SIGKILL);
+		atomic_fetch_sub(&rh3_pid1_outstanding_patches, 1);
+		return ECHILD;
+	}
+	rh3_pid1_patch_job_t *job = calloc(1, sizeof(*job));
+	if (!job) {
+		if (proc_get_uniqueid(child) == uniqueid) (void)kill(child, SIGKILL);
+		atomic_fetch_sub(&rh3_pid1_outstanding_patches, 1);
+		return ENOMEM;
+	}
+	job->pid = child;
+	job->uniqueid = uniqueid;
+	atomic_init(&job->references, 2);
+	atomic_init(&job->outcome, 0);
+	if (pid) *pid = child;
+	// Timeout is bounded even if an IPC worker never returns; after that, the
+	// worker may finish but must not resume a recycled PID (server checks id).
+	dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC),
+	               dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+		if (rh3_pid1_deferred_finish(&job->outcome, 2)) {
+			rh3_pid1_kill_failed_child(job);
+			rh3_bootlog("PID1 child patch: timed out and isolated suspended child");
+		}
+		rh3_pid1_patch_job_release(job);
+	});
+	dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+		int patched = rh3_pid1_same_child(job) ?
+			jbdSpawnPatchChildIdentified(job->pid, job->uniqueid, true) : -1;
+		if (rh3_pid1_deferred_finish(&job->outcome, 1)) {
+			if (patched != 0) {
+				rh3_pid1_kill_failed_child(job);
+				rh3_bootlog("PID1 child patch failed; isolated child");
+			} else {
+				rh3_bootlog("PID1 child patch replied; not constructor proof");
+			}
+		}
+		atomic_fetch_sub(&rh3_pid1_outstanding_patches, 1);
+		rh3_pid1_patch_job_release(job);
+	});
+	return 0; // Child is suspended. This does NOT certify constructor execution.
+}
+
 // launchd commonly spawns UIKit apps through xpcproxy: path alone is then
 // /usr/libexec/xpcproxy, not the app executable. Recognize *only* the
 // UIKitApplication:<bundle id>[...] label in argv[1]. No substring matching,
@@ -482,6 +601,24 @@ int __posix_spawn_hook(pid_t *restrict pid, const char *restrict path,
 		commitBlacklistProcessId(trackedPid);
 		return result;
 	}
+		// Only explicitly supported RootHide jobs participate in deferred
+		// patch-before-resume. Do not hold PID1 waiting for a daemon reply,
+		// and never rewrite global Apple launchd process policy.
+		if (roothide_is_active() && !gInEarlyBoot && !launchdhookFirstLoad &&
+		    roothide_launchdhook_origin_verified() && jailbreakd_has_checked_in() &&
+		    rh3_pid1_selected_child(path, argv, JBROOT_PATH("/usr/sbin/sshd")) &&
+		    desc && desc->attrp) {
+			bool safeMode = false;
+			for (unsigned i = 0; envp && envp[i] && i < 4096; i++) {
+				if (!strcmp(envp[i], "_SafeMode=1") || !strcmp(envp[i], "_MSSafeMode=1")) {
+					safeMode = true;
+					break;
+				}
+			}
+			if (!safeMode) return posix_spawn_hook_shared(pid, path, desc, argv, envp,
+			    rh3_pid1_spawn_and_patch_async, systemwide_trust_file_by_path,
+			    platform_set_process_debugged, jbsetting(jetsamMultiplier));
+		}
 	return posix_spawn_hook_shared(pid, path, desc, argv, envp, __posix_spawn_orig_wrapper, systemwide_trust_file_by_path, platform_set_process_debugged, jbsetting(jetsamMultiplier));
 }
 

@@ -393,6 +393,27 @@ int jbdSpawnPatchChild(int pid, bool resume)
 	return result;
 }
 
+int jbdSpawnPatchChildIdentified(int pid, uint64_t uniqueid, bool resume)
+{
+	if (getpid() != 1 || pid <= 1 || !uniqueid || !jailbreakd_has_checked_in()) return -1;
+	xpc_object_t message = xpc_dictionary_create_empty();
+	if (!message) return -1;
+	xpc_dictionary_set_uint64(message, "id", JBD_MSG_SPAWN_PATCH_CHILD);
+	xpc_dictionary_set_int64(message, "pid", pid);
+	xpc_dictionary_set_uint64(message, "uniqueid", uniqueid);
+	xpc_dictionary_set_bool(message, "resume", resume);
+	// Uses the *direct* daemon port. This function can block, so it must
+	// exclusively run on a background launchd worker, never in its spawn hook.
+	xpc_object_t reply = jailbreakdXpcRequest(message);
+	xpc_release(message);
+	if (!reply) return -1;
+	xpc_object_t value = xpc_dictionary_get_value(reply, "result");
+	int result = value && xpc_get_type(value) == XPC_TYPE_INT64
+		? (int)xpc_int64_get_value(value) : -1;
+	xpc_release(reply);
+	return result;
+}
+
 int jbdSpinlockFixOnly(int pid, bool resume)
 {
 	xpc_object_t message = xpc_dictionary_create_empty();

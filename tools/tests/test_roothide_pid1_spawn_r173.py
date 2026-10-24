@@ -23,7 +23,7 @@ class PID1PrivateDyldTests(unittest.TestCase):
         self.assertIn('if (path && !strcmp(path, "/usr/libexec/xpcproxy"))', hook)
         self.assertIn('if (argv && argv[0])', hook)
         wrapper = text.split('int __posix_spawn_orig_wrapper(pid_t *restrict pid, const char *restrict path,', 2)[-1].split(
-            '// launchd commonly spawns UIKit apps through xpcproxy', 1)[0]
+            '// The donor waited for jailbreakd from launchd', 1)[0]
         self.assertIn('r, r == 0 ? *recordedPid : 0', wrapper)
 
     def test_bounded_pid1_private_dyld_contract(self):
@@ -32,7 +32,7 @@ class PID1PrivateDyldTests(unittest.TestCase):
             self.skipTest("No native C compiler")
         text = SOURCE.read_text(encoding="utf-8")
         functions = text[text.index("static const char *rh3_pid1_var_alias_n("):
-                         text.index("// launchd commonly spawns UIKit apps")]
+                         text.index("// The donor waited for jailbreakd from launchd")]
         # Production origin verifier is exercised by its own mocked-dladdr
         # test. This older harness intentionally supplies a forced origin
         # result; skip unrelated real PID1 origin and fakelib implementation.

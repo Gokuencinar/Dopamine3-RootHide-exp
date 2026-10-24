@@ -82,16 +82,26 @@ void jailbreakd_received_message(mach_port_t port)
 					bool resume = xpc_dictionary_get_bool(message, "resume");
 					pid_t ppid = proc_get_ppid(pid);
 					const char *childPath = proc_get_path(pid, NULL);
+						// A queued launchd request may arrive after a timeout or the
+						// child has exited. PID alone can then belong to another child.
+						// Require the original kernel uniqueid for every PID1 request.
+						uint64_t expectedUniqueid = xpc_dictionary_get_uint64(message, "uniqueid");
+						bool sameChild = clientPid != 1 ||
+							(expectedUniqueid && proc_get_uniqueid(pid) == expectedUniqueid);
 					bool probeChild = childPath &&
 						string_has_suffix(childPath, "/basebin/rh3tweakprobe");
 					JBLogDebug("spawn patch: client pid=%d, child pid=%d, child's parent pid=%d, child proc=%s", clientPid, pid, ppid, proc_get_path(pid,NULL));
-					if(ppid == clientPid) {
+						if(ppid == clientPid && sameChild) {
 						if(ppid==1 && resume==false) {
 							//`frida -f` sucks with proc_patch_dyld on ios15
 							result = proc_patch_csflags(pid);
 						}
-						else if(roothide_patch_proc(pid) == 0) {
-								if(resume && kill(pid, SIGCONT) != 0) {
+							else if(roothide_patch_proc(pid) == 0) {
+									// Recheck immediately before signal, in case the child
+									// terminated during patching. Never resume a recycled PID.
+									if(clientPid == 1 && proc_get_uniqueid(pid) != expectedUniqueid) {
+										result = -1;
+									} else if(resume && kill(pid, SIGCONT) != 0) {
 									// The parent will kill/reap its OWN suspended child
 									// when it receives this nonzero patch result.
 									JBLogError("spawn patch: failed to resume child %d", pid);
