@@ -9,6 +9,9 @@
 // injected hook using the active jailbreak root, for both spawn and exec.
 const char *systemhook_dylib_path(void);
 bool systemhook_is_roothide_root_path(const char *root);
+// This process's authenticated dyld/check-in state; never set from PID1.
+__attribute__((visibility("hidden"))) void rh3_record_authenticated_root(const char *root);
+__attribute__((visibility("hidden"))) bool rh3_has_authenticated_root(void);
 #define HOOK_DYLIB_PATH systemhook_dylib_path()
 
 typedef enum 

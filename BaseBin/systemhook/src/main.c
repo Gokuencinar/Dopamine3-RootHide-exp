@@ -367,7 +367,7 @@ static bool rh3_spawn_canonical_root_child(const char *path, const char *root)
 static int rh3_trust_before_spawn(const char *path, struct _posix_spawn_args_desc *desc, char *const envp[])
 {
     // Do not introduce jailbreakd XPC in PID 1 or the dyld-patched phase.
-    if (!path || getpid() == 1 || !jbclient_roothide_jailbroken() || jbclient_dyld_patch_enabled())
+    if (!path || !rh3_has_authenticated_root() || jbclient_dyld_patch_enabled())
         return 0;
     const char *root = get_jbroot();
     if (!systemhook_is_roothide_root_path(root)) return 0;
@@ -409,7 +409,7 @@ int __posix_spawn_hook_with_filter(pid_t *restrict pid, const char *restrict pat
 
 int __execve_hook(const char *path, char *const argv[], char *const envp[])
 {
-	if (path && systemhook_is_roothide_root_path(get_jbroot()) && jbclient_roothide_jailbroken()) {
+	if (path && rh3_has_authenticated_root()) {
 		// execve resets the process's code-signing state. Route it through
 		// SETEXEC so jailbreakd can patch the replacement before it runs.
 		posix_spawnattr_t attributes = NULL;
@@ -556,6 +556,10 @@ __attribute__((constructor)) static void initializer(void)
 		}
 	}
 
+	// The dyld __jbinfo or completed process_checkin above has already
+	// authenticated this process. Re-querying launchd on each spawn may
+	// fail during startup, incorrectly skipping the child patch pipeline.
+	rh3_record_authenticated_root(JB_RootPath);
 		if (rh3DiagnosticProbe) setenv("RH3_TWEAK_PROBE_CHECKIN", "1", 1);
 		// Unset DYLD_INSERT_LIBRARIES, but only if systemhook itself is the only thing contained in it
 	// Feeable attempt at making jailbreak detection harder
@@ -631,7 +635,7 @@ __attribute__((constructor)) static void initializer(void)
 	if (gDyldPtr) {
 		// TODO: Maybe we can just rebind sandbox_apply instead?
 		dyld_hook_routine(*gDyldPtr, 17, (void *)&dyld_dlsym_hook, (void **)&dyld_dlsym_orig, 0x839D);
-		if (!__builtin_available(iOS 18.0, *) && jbclient_roothide_jailbroken()) {
+		if (!__builtin_available(iOS 18.0, *) && rh3_has_authenticated_root()) {
 			dyld_hook_routine(*gDyldPtr, 14, (void *)&dyld_dlopen_hook, (void **)&dyld_dlopen_orig, 0xBF31);
 			dyld_hook_routine(*gDyldPtr, 18, (void *)&dyld_dlopen_preflight_hook, (void **)&dyld_dlopen_preflight_orig, 0xB1B6);
 			dyld_hook_routine(*gDyldPtr, 97, (void *)&dyld_dlopen_from_hook, (void **)&dyld_dlopen_from_orig, 0xD48C);
@@ -644,7 +648,7 @@ __attribute__((constructor)) static void initializer(void)
 			// The arm64 dyld4 gAPIs table has different offsets from gDyld.
 			// Keep arm64e and iOS 18+ out of this unverified layout.
 			#ifndef __arm64e__
-			if (!__builtin_available(iOS 18.0, *) && jbclient_roothide_jailbroken()) {
+			if (!__builtin_available(iOS 18.0, *) && rh3_has_authenticated_root()) {
 				dyld_hook_routine(*gAPIsPtr, 13, (void *)&dyld_dlopen_hook, (void **)&dyld_dlopen_orig, 0xBF31);
 				dyld_hook_routine(*gAPIsPtr, 17, (void *)&dyld_dlopen_preflight_hook, (void **)&dyld_dlopen_preflight_orig, 0xB1B6);
 				dyld_hook_routine(*gAPIsPtr, 92, (void *)&dyld_dlopen_from_hook, (void **)&dyld_dlopen_from_orig, 0xD48C);
@@ -680,7 +684,7 @@ __attribute__((constructor)) static void initializer(void)
 			!strcmp(gExecutablePath, "/usr/libexec/lsd")) {
 				const char *roothideHooks = JBROOT_PATH("/basebin/roothidehooks.dylib");
 					void *hideHooks = NULL;
-					if (jbclient_roothide_jailbroken() && roothideHooks && access(roothideHooks, R_OK) == 0)
+				if (rh3_has_authenticated_root() && roothideHooks && access(roothideHooks, R_OK) == 0)
 						hideHooks = dlopen(roothideHooks, RTLD_NOW);
 					// A partial RootHide install must retain Dopamine 3's stock
 					// cfprefsd / lsd / SpringBoard hooks.

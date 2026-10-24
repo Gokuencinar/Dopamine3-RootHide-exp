@@ -167,3 +167,30 @@ real PID1 child patch-before-run contract, private dyld loaded from the
 expected trustcache, actual `systemhook` constructor and `TweakLoader`
 execution, one unauthenticated SSH banner probe, NewTerm login spawning,
 LaunchServices activation, and a real tweak Settings pane on the same iPhone.
+
+## Authenticated process check-in carries across subsequent spawns
+
+`jbclient_roothide_jailbroken()` sends a new launchd XPC domain request each
+time it is called, and returns `false` when the reply is missing. Previously
+`systemhook` re-issued it from both `rh3_trust_before_spawn` and the shared
+spawn/exec pipeline **after** dyld or `jbclient_process_checkin` had already
+authenticated its RootHide root. A transient launchd server disruption could
+therefore skip patch-before-run for an otherwise checked-in process and leave
+later children failing to execute. The exact source path was identified;
+physical causality for r188 is not asserted.
+
+The shared C hook now keeps a per-process, atomic RootHide check-in token with
+the **exact root path captured only after successful check-in**. No token is
+created from a directory name alone, from a failed check-in, or in PID1.
+The token is rejected when the current root no longer matches that exact
+path. The non-PID1 spawn/exec preflight and dyld hook selection reuse the
+authenticated state, eliminating redundant RootHide-status XPC round trips
+without changing the separate, audit-token-checked jailbreakd patch request.
+The server still controls patch authorization; this grants no new privileges
+and makes no assumption that `posix_spawn == 0` proves child execution.
+
+A compiled C harness exercises the production cache for an unchecked process,
+invalid root, authenticated active root, PID1, changed root and return to the
+original path. Source contracts verify constructor order and lack of repeated
+status XPC; a device run is still necessary to confirm NewTerm's actual
+Mach-O, `systemhook` constructor, private dyld and spawned child lifetimes.

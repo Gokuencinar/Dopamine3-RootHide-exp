@@ -14,7 +14,11 @@ class SpawnLifecycleTests(unittest.TestCase):
         client = (ROOT/'BaseBin/libjailbreak/src/jbclient_roothide.c').read_text(encoding='utf-8')
         server = (ROOT/'BaseBin/jailbreakd/src/server.m').read_text(encoding='utf-8')
         self.assertIn('rh3_spawn_patched(pid ?: pidOut', common)
-        self.assertIn('bool rootHide = getpid() != 1 && path', common)
+        # Only a root received through the successful dyld/process check-in
+        # may enable this client's suspended-child patch path. The helper
+        # itself rules out PID1, which must not XPC-request its own server.
+        self.assertIn('bool rootHide = path && rh3_has_authenticated_root();', common)
+        self.assertIn('return getpid() != 1 &&', common)
         self.assertIn('&& !rootHide)', common)
         self.assertIn('posix_spawnattr_setflags(&attributes, POSIX_SPAWN_SETEXEC)', main)
         for action in ('JBD_MSG_SPAWN_PATCH_CHILD', 'JBD_MSG_SPAWN_EXEC_START', 'JBD_MSG_SPAWN_EXEC_CANCEL'):

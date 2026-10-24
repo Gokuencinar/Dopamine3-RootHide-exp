@@ -20,6 +20,31 @@
 #include <libkern/OSCacheControl.h>
 #include <stdint.h>
 #include <errno.h>
+#include <stdatomic.h>
+
+// Cache the exact active root only after dyld's authenticated jbinfo or the
+// process check-in succeeds. A transient launchd XPC failure during spawn
+// must not negate that earlier authenticated result. Never use this in PID1.
+static _Atomic bool gRh3RootCheckedIn = false;
+static char gRh3CheckedInRoot[PATH_MAX] = {0};
+
+void rh3_record_authenticated_root(const char *root)
+{
+	if (getpid() == 1 || !systemhook_is_roothide_root_path(root)) return;
+	size_t length = strlen(root);
+	if (!length || length >= sizeof(gRh3CheckedInRoot)) return;
+	memcpy(gRh3CheckedInRoot, root, length + 1);
+	atomic_store_explicit(&gRh3RootCheckedIn, true, memory_order_release);
+}
+
+bool rh3_has_authenticated_root(void)
+{
+	const char *root = get_jbroot();
+	return getpid() != 1 &&
+	       atomic_load_explicit(&gRh3RootCheckedIn, memory_order_acquire) &&
+	       root && systemhook_is_roothide_root_path(root) &&
+	       strcmp(root, gRh3CheckedInRoot) == 0;
+}
 
 // RootHide's jbrand stores a checksum in its low byte. Do not trust a
 // .jbroot-looking path merely because its directory name has 16 hex digits.
@@ -475,7 +500,7 @@ int posix_spawn_hook_shared(pid_t *restrict pid,
 	int (*posix_spawn_orig)(pid_t *restrict, const char *restrict, struct _posix_spawn_args_desc *, char *const[restrict], char *const[restrict]) = orig;
 	// common.c is also linked into launchdhook. PID 1 must keep its local
 	// server path; asking it for its own XPC state here would deadlock.
-	bool rootHide = getpid() != 1 && path && systemhook_is_roothide_root_path(get_jbroot()) && jbclient_roothide_jailbroken();
+	bool rootHide = path && rh3_has_authenticated_root();
 	if (rootHide && (!desc || !desc->attrp)) {
 		// The public entry builds the correctly sized private descriptor. It
 		// reenters once, with an initialized attrp; keep file actions intact.
