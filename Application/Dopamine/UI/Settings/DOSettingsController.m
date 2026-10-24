@@ -27,6 +27,10 @@
 #define RH3_FULL_APP_EXPERIMENTAL 0
 #endif
 
+#ifndef ROOTHIDE3_SSH_DEFAULT_PREPARE
+#define ROOTHIDE3_SSH_DEFAULT_PREPARE 0
+#endif
+
 // Accessed only by UIKit callbacks on the main queue. A timed-out worker may
 // still be running, so closing its progress alert must not permit a duplicate.
 static BOOL gRootHideAppsRefreshInFlight = NO;
@@ -316,9 +320,15 @@ static BOOL gRootHideFullDiagnosisInFlight = NO;
             // their next jailbreak attempt.
             if ([DOBootstrapper rootHidePortEnabled]) {
                 PSSpecifier *sshOptInGroup = [PSSpecifier emptyGroupSpecifier];
-                sshOptInGroup.name = @"OpenSSH (opción para el próximo jailbreak)";
+                sshOptInGroup.name = ROOTHIDE3_SSH_DEFAULT_PREPARE ?
+                    @"OpenSSH (preparación predeterminada en All Enabled Beta)" :
+                    @"OpenSSH (opción para el próximo jailbreak)";
                 [specifiers addObject:sshOptInGroup];
-                PSSpecifier *sshPreboot = [PSSpecifier preferenceSpecifierNamed:@"Preparar OpenSSH al iniciar jailbreak (optativo)" target:self set:defSetter get:defGetter detail:nil cell:PSStaticTextCell edit:nil];
+                BOOL sshPrebootEnabled = [[DOPreferenceManager sharedManager]
+                    boolPreferenceValueForKey:@"rh3SSHInstallerRepairOptIn" fallback:ROOTHIDE3_SSH_DEFAULT_PREPARE];
+                PSSpecifier *sshPreboot = [PSSpecifier preferenceSpecifierNamed:
+                    (sshPrebootEnabled ? @"Preparar OpenSSH: ACTIVADO" : @"Preparar OpenSSH: DESACTIVADO")
+                    target:self set:defSetter get:defGetter detail:nil cell:PSStaticTextCell edit:nil];
                 [sshPreboot setProperty:[DOButtonCell class] forKey:@"cellClass"];
                 [sshPreboot setProperty:buttonHeight forKey:@"height"];
                 [sshPreboot setProperty:@"shield.checkered" forKey:@"image"];
@@ -828,7 +838,7 @@ static BOOL gRootHideFullDiagnosisInFlight = NO;
 - (void)toggleRootHideSSHPrebootRepairPressed
 {
     BOOL enabled = [[DOPreferenceManager sharedManager]
-                    boolPreferenceValueForKey:@"rh3SSHInstallerRepairOptIn" fallback:NO];
+                    boolPreferenceValueForKey:@"rh3SSHInstallerRepairOptIn" fallback:ROOTHIDE3_SSH_DEFAULT_PREPARE];
     UIAlertController *confirm = [UIAlertController alertControllerWithTitle:
         enabled ? @"Desactivar preparación de OpenSSH" : @"Preparar OpenSSH durante el próximo jailbreak"
         message:enabled ?
@@ -853,6 +863,7 @@ static BOOL gRootHideFullDiagnosisInFlight = NO;
                 preferredStyle:UIAlertControllerStyleAlert];
             [done addAction:[UIAlertAction actionWithTitle:@"Aceptar" style:UIAlertActionStyleCancel handler:nil]];
             [self presentViewController:done animated:YES completion:nil];
+            if (saved) [self reloadSpecifiers];
         }]];
     [self presentViewController:confirm animated:YES completion:nil];
 }

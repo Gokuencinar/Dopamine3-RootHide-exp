@@ -15,10 +15,13 @@ PREF = (ROOT / "Application/Dopamine/Jailbreak/DOPreferenceManager.m").read_text
 
 
 class RootHideSSHPrebootRC(unittest.TestCase):
-    def test_opt_in_is_off_by_default_and_preboot_error_is_nonfatal(self):
+    def test_all_enabled_beta_only_defaults_to_ssh_preparation_and_failures_are_nonfatal(self):
         preboot = ENV.split('- (int)prepareRootHideOpenSSHBeforeUserspaceReboot', 1)[1].split(
             '// Read the effective launchd disabled override', 1)[0]
-        self.assertIn('@"rh3SSHInstallerRepairOptIn" fallback:NO', preboot)
+        self.assertIn('@"rh3SSHInstallerRepairOptIn" fallback:ROOTHIDE3_SSH_DEFAULT_PREPARE', preboot)
+        self.assertIn('savedPolicy != nil, enabled', preboot)
+        self.assertIn('if (!enabled)', preboot)
+        self.assertIn('#define ROOTHIDE3_SSH_DEFAULT_PREPARE 0', ENV)
         self.assertIn('!(flags & CS_INSTALLER)', preboot)
         self.assertIn('!(flags & CS_PLATFORM_BINARY)', preboot)
         self.assertIn('geteuid() != 0 || getegid() != 0', preboot)
@@ -99,12 +102,31 @@ class RootHideSSHPrebootRC(unittest.TestCase):
         handler = UI.split('- (void)toggleRootHideSSHPrebootRepairPressed', 1)[1].split(
             '- (void)diagnoseRootHideRuntimePressed', 1)[0]
         self.assertIn('setVerifiedPreferenceValue:@(!enabled)', handler)
+        self.assertIn('@"rh3SSHInstallerRepairOptIn" fallback:ROOTHIDE3_SSH_DEFAULT_PREPARE', handler)
+        self.assertIn('@"Preparar OpenSSH: ACTIVADO"', UI)
+        self.assertIn('@"Preparar OpenSSH: DESACTIVADO"', UI)
         self.assertIn('if (persisted && [onDisk[key] isEqual:obj]) return YES', PREF)
         self.assertIn('if (oldValue) _preferences[key] = oldValue', PREF)
         self.assertIn('SSH pre-import opt-in save failed; consent NOT confirmed', handler)
         self.assertNotIn('repairRootHideSSH]', handler)
         self.assertNotIn('rebootUserspace', handler)
         self.assertNotIn('ssh-keygen', handler)
+
+    def test_read_only_ssh_diagnosis_reports_independent_package_receipts(self):
+        probe = ENV.split('static int RH3SSHReadInstalledReceiptMask(', 1)[1].split(
+            '// jbclient_get_jbroot()', 1)[0]
+        diagnose = ENV.split('- (int)diagnoseRootHideOpenSSHSocket', 1)[1].split(
+            '// Never treat presence of TweakLoader', 1)[0]
+        self.assertIn('O_RDONLY | O_NOFOLLOW | O_CLOEXEC', probe)
+        self.assertIn('st.st_uid != 0', probe)
+        self.assertIn('st.st_nlink != 1', probe)
+        self.assertIn('Status: install ok installed', probe)
+        self.assertIn('packageMask = 0', diagnose)
+        self.assertIn('RH3SSHReadInstalledReceiptMask(root, &packageMask)', diagnose)
+        self.assertIn('fully_installed_mask=%lu', diagnose)
+        self.assertIn('SSH socket policy: beta_default=%d saved=%d enabled=%d', diagnose)
+        self.assertNotIn('dpkg -i', diagnose)
+        self.assertNotIn('launchctl bootstrap', diagnose)
 
 
 if __name__ == '__main__':

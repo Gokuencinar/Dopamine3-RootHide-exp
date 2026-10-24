@@ -158,6 +158,7 @@ class RootHideBuildMatrixTests(unittest.TestCase):
                     command = next(x for x in result.stdout.splitlines()
                                    if x.lstrip().startswith("xcodebuild "))
                     self.assertIn(f"ROOTHIDE3_TWEAKS_DEFAULT_ON={int(enabled == 'YES')}", command)
+                    self.assertIn(f"ROOTHIDE3_SSH_DEFAULT_PREPARE={int(enabled == 'YES')}", command)
 
 
 if __name__ == "__main__":

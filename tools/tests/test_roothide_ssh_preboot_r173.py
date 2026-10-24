@@ -67,7 +67,7 @@ class RootHideSSHPrebootR173(unittest.TestCase):
         self.assertIn('if (changed) *changed = NO;', TRANSACTION)
 
     def test_ssh_consent_and_installer_phase_still_fail_closed(self):
-        self.assertIn('@"rh3SSHInstallerRepairOptIn" fallback:NO', PREBOOT)
+        self.assertIn('@"rh3SSHInstallerRepairOptIn" fallback:ROOTHIDE3_SSH_DEFAULT_PREPARE', PREBOOT)
         self.assertIn('!(flags & CS_INSTALLER)', PREBOOT)
         self.assertIn('!(flags & CS_PLATFORM_BINARY)', PREBOOT)
         self.assertIn('rh3RepairRootHideSSHAllowKeyGeneration:NO installerPhase:YES', PREBOOT)

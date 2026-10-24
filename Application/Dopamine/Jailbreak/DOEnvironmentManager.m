@@ -47,6 +47,10 @@
 #import <CommonCrypto/CommonDigest.h>
 #import <LocalAuthentication/LocalAuthentication.h>
 
+#ifndef ROOTHIDE3_SSH_DEFAULT_PREPARE
+#define ROOTHIDE3_SSH_DEFAULT_PREPARE 0
+#endif
+
 int reboot3(uint64_t flags, ...);
 CFPropertyListRef MGCopyAnswer(CFStringRef);
 extern char **environ;
@@ -194,6 +198,47 @@ static NSData *RH3SSHReadBounded(int fd, off_t length)
         else return nil;
     }
     return data;
+}
+
+// Read-only dpkg receipt probe. A binary or a launchd plist existing on disk
+// does not establish that dpkg completed all three SSH packages. Do not try
+// to repair a partial transaction here, and never log receipt contents.
+// Bits: client=1, sftp=2, server=4. Every package must be fully installed.
+static int RH3SSHReadInstalledReceiptMask(NSString *root, NSUInteger *mask)
+{
+    if (!root || !mask) return EINVAL;
+    *mask = 0;
+    NSString *status = [root stringByAppendingPathComponent:@"Library/dpkg/status"];
+    int fd = open(status.fileSystemRepresentation, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0) return errno;
+    struct stat st = {0};
+    int error = fstat(fd, &st) ? errno : 0;
+    if (!error && (!S_ISREG(st.st_mode) || st.st_uid != 0 || st.st_nlink != 1 ||
+                   (st.st_mode & 022) || st.st_size < 128 || st.st_size > 512 * 1024))
+        error = EPERM;
+    NSMutableData *bytes = error ? nil : [NSMutableData dataWithLength:(NSUInteger)st.st_size];
+    if (!error && !bytes) error = ENOMEM;
+    NSUInteger offset = 0;
+    while (!error && offset < bytes.length) {
+        ssize_t amount = pread(fd, (uint8_t *)bytes.mutableBytes + offset,
+                               bytes.length - offset, (off_t)offset);
+        if (amount > 0) offset += (NSUInteger)amount;
+        else if (amount < 0 && errno == EINTR) continue;
+        else error = amount == 0 ? EIO : errno;
+    }
+    close(fd);
+    if (error) return error;
+    NSString *text = [[NSString alloc] initWithData:bytes encoding:NSUTF8StringEncoding];
+    if (!text) return EILSEQ;
+    NSArray<NSString *> *packages = @[@"openssh-client", @"openssh-sftp-server", @"openssh-server"];
+    for (NSString *record in [text componentsSeparatedByString:@"\n\n"]) {
+        for (NSUInteger i = 0; i < packages.count; i++) {
+            if ([record hasPrefix:[NSString stringWithFormat:@"Package: %@\n", packages[i]]] &&
+                [record containsString:@"\nStatus: install ok installed"])
+                *mask |= (NSUInteger)1 << i;
+        }
+    }
+    return 0;
 }
 
 // jbclient_get_jbroot() uses dispatch_once and can retain the OLD brand if
@@ -2197,8 +2242,17 @@ static int RH3DiagnosticMachMagic(NSString *path)
 - (int)prepareRootHideOpenSSHBeforeUserspaceReboot
 {
     if (![DOBootstrapper rootHidePortEnabled]) return ENOTSUP;
-    if (![[DOPreferenceManager sharedManager] boolPreferenceValueForKey:
-          @"rh3SSHInstallerRepairOptIn" fallback:NO]) {
+    // Only the manually dispatched, jailbreak-and-tweaks-on beta defaults to
+    // preparing its key-only SSH service. An explicitly saved NO always wins.
+    // Standard builds and the isolated diagnostic remain opt-in by default.
+    id savedPolicy = [[DOPreferenceManager sharedManager]
+                      preferenceValueForKey:@"rh3SSHInstallerRepairOptIn"];
+    BOOL enabled = [[DOPreferenceManager sharedManager] boolPreferenceValueForKey:
+                    @"rh3SSHInstallerRepairOptIn" fallback:ROOTHIDE3_SSH_DEFAULT_PREPARE];
+    [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
+        [NSString stringWithFormat:@"SSH pre-import policy: default=%d explicitly_saved=%d enabled=%d",
+         ROOTHIDE3_SSH_DEFAULT_PREPARE, savedPolicy != nil, enabled]];
+    if (!enabled) {
         [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
             @"SSH pre-import: not requested; no job changed"];
         return ECANCELED;
@@ -2318,7 +2372,17 @@ static int RH3DiagnosticMachMagic(NSString *path)
 {
     if (![DOBootstrapper rootHidePortEnabled]) return ENOTSUP;
     [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:@"SSH socket diagnosis: read-only launchctl print requested"];
+    id savedSSHPreference = [[DOPreferenceManager sharedManager]
+                             preferenceValueForKey:@"rh3SSHInstallerRepairOptIn"];
+    BOOL sshPreparationEnabled = [[DOPreferenceManager sharedManager]
+        boolPreferenceValueForKey:@"rh3SSHInstallerRepairOptIn" fallback:ROOTHIDE3_SSH_DEFAULT_PREPARE];
+    [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
+        [NSString stringWithFormat:@"SSH socket policy: beta_default=%d saved=%d enabled=%d (read-only)",
+         ROOTHIDE3_SSH_DEFAULT_PREPARE, savedSSHPreference != nil, sshPreparationEnabled]];
     __block NSString *root = nil;
+    __block int packageStatus = -1;
+    __block NSUInteger packageMask = 0;
+    __block int executablePresent = -1, configurationPresent = -1, hostKeyPresent = -1;
     __block int onDiskWait = -1;
     __block int onDiskDisabled = -1;
     __block NSUInteger socketCount = 0;
@@ -2341,6 +2405,19 @@ static int RH3DiagnosticMachMagic(NSString *path)
         if (error || !root || !serverRoot ||
             ![RH3CanonicalAppPath(root) isEqualToString:
               RH3CanonicalAppPath([NSString stringWithUTF8String:serverRoot])]) return EPERM;
+        packageStatus = RH3SSHReadInstalledReceiptMask(root, &packageMask);
+        struct stat entry = {0};
+        NSString *sshd = [root stringByAppendingPathComponent:@"usr/sbin/sshd"];
+        executablePresent = lstat(sshd.fileSystemRepresentation, &entry) == 0 &&
+                            S_ISREG(entry.st_mode) && entry.st_uid == 0 &&
+                            (entry.st_mode & S_IXUSR) ? 1 : 0;
+        NSString *config = [root stringByAppendingPathComponent:@"etc/ssh/sshd_config"];
+        configurationPresent = lstat(config.fileSystemRepresentation, &entry) == 0 &&
+                               S_ISREG(entry.st_mode) && entry.st_uid == 0 ? 1 : 0;
+        NSString *key = [root stringByAppendingPathComponent:@"etc/ssh/ssh_host_ed25519_key"];
+        hostKeyPresent = lstat(key.fileSystemRepresentation, &entry) == 0 &&
+                         S_ISREG(entry.st_mode) && entry.st_uid == 0 &&
+                         !(entry.st_mode & 077) && entry.st_size >= 32 ? 1 : 0;
         uint32_t processFlags = 0;
         csopsResult = csops(getpid(), CS_OPS_STATUS, &processFlags, sizeof(processFlags));
         if (csopsResult == 0) {
@@ -2397,6 +2474,10 @@ static int RH3DiagnosticMachMagic(NSString *path)
         if (matches != 1) return ENOENT;
         return 0;
     }];
+    [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
+        [NSString stringWithFormat:@"SSH socket receipt: read_result=%d fully_installed_mask=%lu (7=all; 0=none); sshd_trusted=%d config_trusted=%d ed25519_key_trusted=%d (read-only)",
+         packageStatus, (unsigned long)packageMask,
+         executablePresent, configurationPresent, hostKeyPresent]];
     [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
         [NSString stringWithFormat:@"SSH socket plist: result=%d sockets=%lu port22=%lu port2222=%lu disabled=%d inetd_wait=%d (minus one=unknown)",
          preflight, (unsigned long)socketCount, (unsigned long)port22Count,
