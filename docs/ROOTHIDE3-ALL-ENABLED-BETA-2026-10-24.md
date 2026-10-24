@@ -10,7 +10,7 @@ The main Mach-O carries distinguishable markers (`RH3_HARDWARE_BETA_ACTIVATED_V1
 
 ## What this does not activate or prove
 
-- The initial RootHide bootstrap does **not** bundle the OpenSSH daemon; no unauthenticated SSH service is started. SSH preparation remains opt-in after account credential verification. NewTerm is an optional installed package.
+- The original RootHide archive does **not** contain OpenSSH. The subsequent SSH-focused integration bundles pinned OpenSSH 1900 packages and an opt-in installer-phase preparation; the server defaults to public-key-only authentication, does not grant root password access, and cannot be considered operational until launchd import and an SSH banner have been proven on hardware. NewTerm is an optional installed package.
 - Per-process `systemhook`/`TweakLoader` loading, RootHide package managers, dyld/CDHash/trustcache acceptance and APT `libgnutls` must still function. The last **physical failure** remains r198 on iPhone X iOS 16.7.15, APT method `@rpath/libgnutls.30.dylib` `code signature invalid`. This beta does not independently fix that problem.
 - Validation must separately distinguish code changes, local tests, macOS build, IPA packaging, signed binary markers, and actual device behavior. Do not claim functional success without a hardware report. Readiness remains 7/9 pending physical evidence.
 - USB interaction is read-only. Do not install the IPA, alter the iPhone, change accounts or reboot as part of this build.

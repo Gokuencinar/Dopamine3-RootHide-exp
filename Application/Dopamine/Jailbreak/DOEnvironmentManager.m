@@ -44,6 +44,7 @@
 #import <CoreServices/LSApplicationProxy.h>
 #import <libjailbreak/roothider.h>
 #import "NSData+Hex.h"
+#import <CommonCrypto/CommonDigest.h>
 #import <LocalAuthentication/LocalAuthentication.h>
 
 int reboot3(uint64_t flags, ...);
@@ -1782,6 +1783,147 @@ static int RH3DiagnosticMachMagic(NSString *path)
     return [self rh3RepairRootHideSSHAllowKeyGeneration:YES installerPhase:NO];
 }
 
+// The RootHide 1900 donor archive has no OpenSSH daemon, sshd_config, SSH
+// socket plist or ssh-keygen. The historical pre-import repair therefore
+// returned ENOENT before it could do anything useful. Install only the three
+// pinned, offline packages inside an already selected *active* hidden root.
+// The server is a reproducible derivative whose extrainst_/prerm do nothing;
+// its default config rejects password logins until credentials are explicitly
+// provisioned. There is NO package-network access, shell invocation, global
+// code-signing bypass, stock /etc write or premature service activation here.
+- (int)rh3InstallPinnedOpenSSHBeforeImport
+{
+    if (NSProcessInfo.processInfo.operatingSystemVersion.majorVersion != 16)
+        return ENOTSUP; // Only the pinned bootstrap 1900 packages have been audited.
+    NSError *rootError = nil;
+    NSString *root = [DOBootstrapper rootHideExistingRootWithError:&rootError];
+    NSString *active = RH3SSHRootForPhase(YES);
+    if (rootError || !root || !active ||
+        ![RH3CanonicalAppPath(root) isEqualToString:RH3CanonicalAppPath(active)])
+        return EPERM;
+
+    NSArray<NSDictionary<NSString *, NSString *> *> *packages = @[
+        @{ @"name":@"roothide_ssh_client_1900.deb", @"package":@"openssh-client",
+           @"sha":@"f178c962e65862f5c42bd7317cd234b0f61c5e374901a8811a5e89141d4b7f08" },
+        @{ @"name":@"roothide_ssh_sftp_1900.deb", @"package":@"openssh-sftp-server",
+           @"sha":@"07670c829ba94722ab69a8457363c0eb737c2e9951cb558668d0ce724a529431" },
+        @{ @"name":@"roothide_ssh_server_safe_1900.deb", @"package":@"openssh-server",
+           @"sha":@"2c49bc8eb80639fd59d914f2337ac4d14b0f54d3c280afe4d82c9e56a5bf60ec" },
+    ];
+    NSString *statusPath = [root stringByAppendingPathComponent:@"Library/dpkg/status"];
+    int statusFD = open(statusPath.fileSystemRepresentation, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (statusFD < 0) return errno;
+    struct stat statusInfo = {0};
+    int statusError = fstat(statusFD, &statusInfo) ? errno : 0;
+    if (!statusError && (!S_ISREG(statusInfo.st_mode) || statusInfo.st_uid != 0 ||
+        statusInfo.st_nlink != 1 || (statusInfo.st_mode & 022) ||
+        statusInfo.st_size < 128 || statusInfo.st_size > 512 * 1024)) statusError = EPERM;
+    NSMutableData *statusBytes = statusError ? nil : [NSMutableData dataWithLength:(NSUInteger)statusInfo.st_size];
+    if (!statusError && (!statusBytes ||
+        pread(statusFD, statusBytes.mutableBytes, statusBytes.length, 0) != (ssize_t)statusBytes.length))
+        statusError = EIO;
+    close(statusFD);
+    if (statusError) return statusError;
+    NSString *status = [[NSString alloc] initWithData:statusBytes encoding:NSUTF8StringEncoding];
+    if (!status) return EILSEQ;
+    NSArray<NSString *> *records = [status componentsSeparatedByString:@"\n\n"];
+    NSUInteger installed = 0;
+    for (NSDictionary *package in packages) {
+        NSString *prefix = [@"Package: " stringByAppendingFormat:@"%@\n", package[@"package"]];
+        for (NSString *record in records) {
+            if (![record hasPrefix:prefix]) continue;
+            if ([record containsString:@"\nStatus: install ok installed"]) installed++;
+            break;
+        }
+    }
+    if (installed == packages.count) {
+        [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:@"SSH packages: already installed; existing configuration preserved"];
+        return 0;
+    }
+    if (installed != 0) {
+        [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:@"SSH packages: partial installed state; refusing automatic retry"];
+        return EEXIST;
+    }
+    // A pre-existing daemon, config, key or service plist may be user-owned or
+    // from a previous incomplete setup. Never replace it by accident.
+    for (NSString *suffix in @[@"etc/ssh", @"usr/sbin/sshd",
+                               @"usr/bin/ssh-keygen",
+                               @"Library/LaunchDaemons/com.openssh.sshd.plist"]) {
+        struct stat existing = {0};
+        if (lstat([root stringByAppendingPathComponent:suffix].fileSystemRepresentation, &existing) == 0)
+            return EEXIST;
+        if (errno != ENOENT) return errno;
+    }
+    NSMutableArray<NSString *> *verifiedPaths = [NSMutableArray new];
+    for (NSDictionary *package in packages) {
+        NSString *path = [NSBundle.mainBundle.bundlePath stringByAppendingPathComponent:package[@"name"]];
+        struct stat info = {0};
+        if (lstat(path.fileSystemRepresentation, &info) || !S_ISREG(info.st_mode) ||
+            info.st_size < 1024 || info.st_size > 4 * 1024 * 1024) return ENOENT;
+        NSData *data = [NSData dataWithContentsOfFile:path options:NSDataReadingMappedIfSafe error:nil];
+        if (!data || data.length != (NSUInteger)info.st_size) return EIO;
+        unsigned char digest[CC_SHA256_DIGEST_LENGTH] = {0};
+        CC_SHA256(data.bytes, (CC_LONG)data.length, digest);
+        NSMutableString *hash = [NSMutableString new];
+        for (size_t i = 0; i < CC_SHA256_DIGEST_LENGTH; i++) [hash appendFormat:@"%02x", digest[i]];
+        if (![hash isEqualToString:package[@"sha"]]) return EBADMSG;
+        [verifiedPaths addObject:path];
+    }
+    [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:@"SSH packages: three pinned offline payloads verified; dpkg transaction starting"];
+    int result = exec_cmd_trusted(JBROOT_PATH("/usr/bin/dpkg"), "-i",
+                                  verifiedPaths[0].fileSystemRepresentation,
+                                  verifiedPaths[1].fileSystemRepresentation,
+                                  verifiedPaths[2].fileSystemRepresentation, NULL);
+    [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
+        [NSString stringWithFormat:@"SSH packages: dpkg result=%d; package scripts do not start the service", result]];
+    // If dpkg fails or ends with a partial receipt, preserve its entire state
+    // for inspection. Repeating the package transaction is deliberately NOT
+    // automatic. The next attempt will detect existing SSH paths and stop.
+    return result;
+}
+
+- (int)rh3GenerateMissingOpenSSHHostKeyBeforeImport
+{
+    NSString *root = RH3SSHRootForPhase(YES);
+    if (!root) return EPERM;
+    NSString *directory = [root stringByAppendingPathComponent:@"etc/ssh"];
+    int fd = open(directory.fileSystemRepresentation, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0) return errno;
+    struct stat info = {0};
+    int err = fstat(fd, &info) ? errno : 0;
+    if (!err && (!S_ISDIR(info.st_mode) || info.st_uid != 0 || (info.st_mode & 022))) err = EPERM;
+    if (err) { close(fd); return err; }
+    struct stat keyInfo = {0};
+    if (fstatat(fd, "ssh_host_ed25519_key", &keyInfo, AT_SYMLINK_NOFOLLOW) == 0) {
+        close(fd);
+        return S_ISREG(keyInfo.st_mode) && keyInfo.st_uid == 0 &&
+            !(keyInfo.st_mode & 077) && keyInfo.st_size >= 32 ? 0 : EPERM;
+    }
+    err = errno;
+    struct stat publicInfo = {0};
+    BOOL pubExists = fstatat(fd, "ssh_host_ed25519_key.pub", &publicInfo, AT_SYMLINK_NOFOLLOW) == 0;
+    close(fd);
+    if (err != ENOENT || pubExists) return err == ENOENT ? EEXIST : err;
+    NSString *keygen = [root stringByAppendingPathComponent:@"usr/bin/ssh-keygen"];
+    NSString *key = [directory stringByAppendingPathComponent:@"ssh_host_ed25519_key"];
+    struct stat executable = {0};
+    if (lstat(keygen.fileSystemRepresentation, &executable) != 0 ||
+        !S_ISREG(executable.st_mode) || executable.st_uid != 0 ||
+        !(executable.st_mode & S_IXUSR) || (executable.st_mode & 022)) return ENOENT;
+    [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:@"SSH host key: generating absent ED25519 key in verified hidden root"];
+    int result = exec_cmd_trusted(keygen.fileSystemRepresentation, "-q", "-t", "ed25519",
+                                  "-N", "", "-f", key.fileSystemRepresentation, NULL);
+    if (result) return result;
+    fd = open(directory.fileSystemRepresentation, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0) return errno;
+    err = fstatat(fd, "ssh_host_ed25519_key", &keyInfo, AT_SYMLINK_NOFOLLOW) ? errno : 0;
+    if (!err && (!S_ISREG(keyInfo.st_mode) || keyInfo.st_uid != 0 ||
+                 (keyInfo.st_mode & 077) || keyInfo.st_size < 32)) err = EPERM;
+    if (!err && fsync(fd)) err = errno;
+    close(fd);
+    return err;
+}
+
 - (int)rh3RepairRootHideSSHAllowKeyGeneration:(BOOL)allowKeyGeneration
                                   installerPhase:(BOOL)installerPhase
 {
@@ -2077,9 +2219,13 @@ static int RH3DiagnosticMachMagic(NSString *path)
     // validates sshd -t/key ownership and persists only the single SSH job.
     [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
         @"SSH pre-import: verified installer phase, repairing selected service"];
-    // The persistent opt-in is for plist rebasing ONLY. It must never
-    // generate, rotate or replace a host key without a separate explicit
-    // interactive action.
+    int installResult = [self rh3InstallPinnedOpenSSHBeforeImport];
+    if (installResult) return [self rh3ActionStage:@"SSH pre-import pinned package installation" result:installResult];
+    int keyResult = [self rh3GenerateMissingOpenSSHHostKeyBeforeImport];
+    if (keyResult) return [self rh3ActionStage:@"SSH pre-import host key preparation" result:keyResult];
+    // Explicit pre-import consent now permits installing the pinned packages
+    // and creating ONLY a missing ED25519 host key. Existing keys are neither
+    // rotated nor replaced; the rebase below still has its own safety checks.
     int result = [self rh3RepairRootHideSSHAllowKeyGeneration:NO installerPhase:YES];
     [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
         [NSString stringWithFormat:@"SSH pre-import: result=%d; optional service only, no boot interruption", result]];

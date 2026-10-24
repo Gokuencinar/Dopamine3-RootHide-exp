@@ -833,7 +833,7 @@ static BOOL gRootHideFullDiagnosisInFlight = NO;
         enabled ? @"Desactivar preparación de OpenSSH" : @"Preparar OpenSSH durante el próximo jailbreak"
         message:enabled ?
             @"Se dejará de actualizar automáticamente el trabajo de OpenSSH en futuras activaciones. No se modificará el servidor ni el jailbreak que está ejecutándose." :
-            @"Activa esta opción solo si has cambiado las contraseñas de acceso. Durante una futura activación de RootHide, después de preparar el bootstrap, se comprobarán la clave existente y la configuración y se intentará corregir únicamente las rutas del plist de OpenSSH con respaldo y reversión ante fallos. Nunca se generarán ni reemplazarán claves automáticamente. La opción seguirá activa para adaptar las rutas si RootHide cambia de raíz. No se hará ningún reinicio ahora."
+            @"Durante el próximo jailbreak se instalarán los tres paquetes OpenSSH oficiales verificados y adaptados para no arrancar prematuramente (solo RootHide iOS 16, si todavía faltan), se creará una clave de host ED25519 únicamente cuando no exista y se corregirá el plist con respaldo. Nunca se sustituirán claves ni instalaciones existentes. SSH quedará configurado inicialmente para autenticación mediante clave pública, sin acceso root por contraseña. launchd podrá importar el servicio tras el reinicio normal del jailbreak. No se cambia nada ahora."
         preferredStyle:UIAlertControllerStyleAlert];
     [confirm addAction:[UIAlertAction actionWithTitle:@"Cancelar" style:UIAlertActionStyleCancel handler:nil]];
     [confirm addAction:[UIAlertAction actionWithTitle:enabled ? @"Desactivar" : @"Activar para próximos jailbreaks"
@@ -848,7 +848,7 @@ static BOOL gRootHideFullDiagnosisInFlight = NO;
                 (enabled ? @"Preparación desactivada" : @"Preparación programada")
                 message:!saved ? @"La preferencia no quedó verificada en disco. No se confirma ningún cambio; comprueba el almacenamiento antes de repetir esta opción." :
                 (enabled ? @"No se volverá a modificar automáticamente el plist de OpenSSH." :
-                    @"No se ha cambiado ningún archivo ni servicio. En la próxima activación completa de RootHide se intentará preparar el plist de SSH antes del reinicio del espacio de usuario; su importación efectiva debe comprobarse después. Un fallo opcional no impedirá arrancar el jailbreak."
+                    @"No se ha cambiado ningún archivo ni servicio. En la próxima activación completa se intentará instalar OpenSSH de forma verificada, preparar la clave ED25519 ausente y reubicar el plist antes del reinicio del espacio de usuario. Hay que comprobar después si launchd lo importó y si existe banner SSH. Un fallo opcional no impedirá arrancar el jailbreak."
                 )
                 preferredStyle:UIAlertControllerStyleAlert];
             [done addAction:[UIAlertAction actionWithTitle:@"Aceptar" style:UIAlertActionStyleCancel handler:nil]];
