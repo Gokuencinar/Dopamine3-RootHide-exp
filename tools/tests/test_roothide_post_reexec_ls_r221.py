@@ -56,7 +56,7 @@ int main(void) {
     def test_snapshot_queries_fresh_server_root_not_dispatch_once_cache(self):
         scope = BOOTSTRAPPER.split(
             "+ (void)recordRootHideLaunchServicesSnapshotWithContext:", 1
-        )[1].split("- (NSError *)repairRootHideAppLinks", 1)[0]
+        )[1].split("static int RH3ExplicitRefreshLSStateDecision(", 1)[0]
         self.assertIn("JBS_DOMAIN_SYSTEMWIDE", scope)
         self.assertIn("JBS_SYSTEMWIDE_GET_JBROOT", scope)
         self.assertIn('xpc_dictionary_get_string(rootReply, "root-path")', scope)
@@ -95,7 +95,7 @@ int main(void) {
             "- (void)repairRootHideLibkrwPressed", 1
         )[0]
         self.assertEqual(refresh.count("refreshJailbreakApps]"), 2)  # RootHide and stock paths
-        self.assertIn('if (result == 0)\n'
+        self.assertIn('if (result != ETIMEDOUT)\n'
                       '                    [DOBootstrapper recordRootHideLaunchServicesSnapshotWithContext:@"after-explicit-refresh"]',
                       refresh)
         self.assertLess(

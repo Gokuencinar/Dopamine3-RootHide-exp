@@ -1017,12 +1017,43 @@ static BOOL gRootHideFullDiagnosisInFlight = NO;
                 }];
             });
             dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-                int result = [[DOEnvironmentManager sharedManager] refreshJailbreakApps];
-                // Explicit user action only: the existing refresh is already
-                // idempotent for registrations that match the active root.
-                // Never launch a second refresh automatically after reboot or
-                // after a timed-out uicache child with an unknown outcome.
-                if (result == 0)
+                // The pre-reexec -p exit=0 did not survive into r216 lsd.
+                // This is a user-triggered, once-only post-reexec attempt:
+                // protect foreign registrations BEFORE writing and verify
+                // actual LS visibility AFTER the existing bounded -p path.
+                int result = [DOBootstrapper preflightExplicitRootHideAppRefresh];
+                __block BOOL refreshCommandExitedZero = NO;
+                BOOL invokedRefresh = NO;
+                if (result == EALREADY) {
+                    [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
+                        @"apps: explicit post-reexec refresh skipped; three managers already registered"];
+                    result = 0;
+                } else if (result == 0) {
+                    // DOEnvironmentManager retains its existing scope for
+                    // /Applications: this gate covers the three known managers,
+                    // not unknown user-installed bundle identifiers.
+                    invokedRefresh = YES;
+                    result = [[DOEnvironmentManager sharedManager] refreshJailbreakApps];
+                    if (result == 0) {
+                        refreshCommandExitedZero = YES;
+                        result = [DOBootstrapper verifyExplicitRootHideAppRefresh];
+                        [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
+                            [NSString stringWithFormat:
+                                @"apps: explicit post-reexec LS verification result=%d (uicache exit alone is not proof)",
+                                result]];
+                    }
+                } else {
+                    [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
+                        [NSString stringWithFormat:@"apps: explicit post-reexec preflight refused result=%d", result]];
+                }
+                [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
+                    [NSString stringWithFormat:
+                        @"apps: explicit post-reexec action command_invoked=%d command_exited_zero=%d result=%d",
+                        invokedRefresh, refreshCommandExitedZero, result]];
+                // Record LS outcome even on EAGAIN or a failed command; the
+                // previous success-only log suppressed the useful evidence.
+                // Do not duplicate a possibly hung LS lookup on timeout.
+                if (result != ETIMEDOUT)
                     [DOBootstrapper recordRootHideLaunchServicesSnapshotWithContext:@"after-explicit-refresh"];
                 dispatch_async(dispatch_get_main_queue(), ^{
                     completed = YES;
@@ -1033,8 +1064,15 @@ static BOOL gRootHideFullDiagnosisInFlight = NO;
                         return;
                     }
                     [progress dismissViewControllerAnimated:YES completion:^{
-                        UIAlertController *alert = [UIAlertController alertControllerWithTitle:result ? @"No se pudieron actualizar las apps" : @"Apps actualizadas"
-                            message:result ? [NSString stringWithFormat:@"Código %d. Comparte el diagnóstico. Si se agotó el tiempo, el proceso puede seguir en marcha; no repitas la acción.", result] : @"Prueba a abrir Sileo y RootHide."
+                        UIAlertController *alert = [UIAlertController alertControllerWithTitle:
+                            result ? @"Registro de apps sin confirmar" : @"Registro de apps verificado"
+                            message:result == EAGAIN && refreshCommandExitedZero
+                                ? @"uicache terminó, pero LaunchServices todavía no confirma los tres gestores. Comparte el diagnóstico. No se ha repetido automáticamente la operación."
+                                : (result == EEXIST
+                                    ? @"Una app tiene un registro de otra ruta o un estado ambiguo. No se ha reemplazado ni borrado ese registro. Comparte el diagnóstico."
+                                    : (result
+                                        ? [NSString stringWithFormat:@"Código %d. Comparte el diagnóstico. Si se agotó el tiempo, no repitas la operación: puede seguir activa.", result]
+                                        : @"LaunchServices confirma Sileo, Zebra y RootHide en el root actual. Puedes probar a abrirlas."))
                             preferredStyle:UIAlertControllerStyleAlert];
                         [alert addAction:[UIAlertAction actionWithTitle:@"Aceptar" style:UIAlertActionStyleCancel handler:nil]];
                         [self presentViewController:alert animated:YES completion:nil];

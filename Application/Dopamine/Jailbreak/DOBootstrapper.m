@@ -1769,6 +1769,120 @@ static void RH3RecordInstalledAppInventory(NSString *root)
     }
 }
 
+// The three proxies were observed on r216 with bundleURL=nil and installed=0,
+// AFTER the new launchd/lsd had started, even though the installer-side
+// uicache -p exited 0 before userspace reboot. This only proves that the
+// post-reexec LaunchServices state is incomplete. It does NOT authorize a
+// background replay or replacing someone else's app registration.
+//
+// The existing Settings action already offers a single bounded, explicit
+// post-reexec registration. Restrict its preflight to the three pinned bundle
+// identifiers and refuse a nonmatching nonempty URL, rather than overwriting
+// a potentially foreign app with the same identifier. Only verify records
+// AFTER the command has returned; exit=0 alone is not LS success.
+static int RH3ExplicitRefreshLSStateDecision(RH3LSRecordStatus state, BOOL proxyInstalled)
+{
+    if (state == RH3LSRegisteredCurrentRoot) return 0;
+    if (state == RH3LSWrongRoot || state == RH3LSExpectedRootUnknown ||
+        (state == RH3LSBundleURLMissing && proxyInstalled)) return EEXIST;
+    // Missing/uninstalled placeholders can be offered to the existing
+    // explicitly requested registration path, never retried automatically.
+    return EAGAIN;
+}
+
+static int RH3ExplicitRefreshLSCheck(BOOL postRegistration)
+{
+    if (geteuid() == 0 || ![DOEnvironmentManager sharedManager].isJailbroken)
+        return EPERM;
+    xpc_object_t reply = jbserver_xpc_send(JBS_DOMAIN_SYSTEMWIDE,
+                                          JBS_SYSTEMWIDE_GET_JBROOT, NULL);
+    const char *serverPath = reply && xpc_get_type(reply) == XPC_TYPE_DICTIONARY
+        ? xpc_dictionary_get_string(reply, "root-path") : NULL;
+    NSString *root = serverPath ? RH3CanonicalAppPath([NSString stringWithUTF8String:serverPath]) : nil;
+    if (![DOBootstrapper rootHideBrandForPath:root]) {
+        [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:
+            @"LS explicit refresh: fresh server root unavailable; registration refused"];
+        return ENXIO;
+    }
+    NSArray<NSArray<NSString *> *> *apps = @[
+        @[@"Sileo", @"org.coolstar.SileoStore", @"Sileo.app"],
+        @[@"Zebra", @"xyz.willy.Zebra", @"Zebra.app"],
+        @[@"RootHide", @"com.roothide.manager", @"RootHide.app"]
+    ];
+    unsigned complete = 0, incomplete = 0;
+    for (NSArray<NSString *> *app in apps) {
+        NSString *expected = RH3CanonicalAppPath([[root stringByAppendingPathComponent:@"Applications"]
+                                                   stringByAppendingPathComponent:app[2]]);
+        LSApplicationProxy *proxy = [LSApplicationProxy applicationProxyForIdentifier:app[1]];
+        NSString *url = proxy.bundleURL.path;
+        NSString *observed = RH3CanonicalAppPath(url);
+        BOOL hasURL = [url isKindOfClass:NSString.class] && url.length && url.isAbsolutePath;
+        RH3LSRecordStatus state = RH3ClassifyLSRecord(proxy != nil, hasURL, expected.length > 0,
+                                                      expected && observed && [expected isEqualToString:observed],
+                                                      proxy.installed);
+        [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:[NSString stringWithFormat:
+            @"LS explicit refresh: phase=%@ app=%@ state=%s; no identifiers/paths",
+            postRegistration ? @"verify" : @"preflight", app[0], RH3LSRecordStatusName(state)]];
+        int decision = RH3ExplicitRefreshLSStateDecision(state, proxy.installed);
+        if (decision == 0) {
+            complete++;
+        } else if (decision == EEXIST) {
+            // No automatic unregister, foreign URL overwrite or fake success.
+            return EEXIST;
+        } else {
+            incomplete++;
+        }
+    }
+    if (postRegistration) return incomplete ? EAGAIN : 0;
+    // No command is needed if all three apps are already registered.
+    return complete == apps.count ? EALREADY : 0;
+}
+
+static BOOL RH3AwaitExplicitLSCheck(int (^operation)(void), int *resultOut)
+{
+    if (!operation || !resultOut) return NO;
+    // Both this read-only preflight and verification run outside the
+    // privileged installation callback. Keep the combined LS allowance
+    // below the existing UI's 45-second budget around a 30-second -p wait.
+    // A late IPC reply is ignored and must never enqueue another refresh.
+    __block int result = EIO;
+    dispatch_group_t group = dispatch_group_create();
+    dispatch_group_async(group, dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        @autoreleasepool { result = operation(); }
+    });
+    if (dispatch_group_wait(group, dispatch_time(DISPATCH_TIME_NOW, 4 * NSEC_PER_SEC)) != 0)
+        return NO;
+    *resultOut = result;
+    return YES;
+}
+
++ (int)preflightExplicitRootHideAppRefresh
+{
+    if (![DOBootstrapper rootHidePortEnabled]) return ENOTSUP;
+    int result = EIO;
+    BOOL finished = RH3AwaitExplicitLSCheck(^int(void) {
+        return RH3ExplicitRefreshLSCheck(NO);
+    }, &result);
+    return finished ? result : ETIMEDOUT;
+}
+
++ (int)verifyExplicitRootHideAppRefresh
+{
+    if (![DOBootstrapper rootHidePortEnabled]) return ENOTSUP;
+    int result = EIO;
+    BOOL finished = RH3AwaitExplicitLSCheck(^int(void) {
+        // Allow the same lsd to finish publishing an accepted registration;
+        // no secondary uicache, kickstart, lsd restart or daemon mutation.
+        for (unsigned check = 0; check < 3; check++) {
+            int state = RH3ExplicitRefreshLSCheck(YES);
+            if (state != EAGAIN || check == 2) return state;
+            usleep(250000);
+        }
+        return EAGAIN;
+    }, &result);
+    return finished ? result : ETIMEDOUT;
+}
+
 - (NSError *)repairRootHideAppLinks
 {
     [[DOUIManager sharedInstance] rh3RecordDiagnosticStage:@"apps: loader backlinks repair starting"];
